@@ -13,6 +13,8 @@ from googleapiclient.discovery import build
 from pyppeteer import launch, errors
 import nest_asyncio
 
+os.environ["PYPPETEER_SKIP_CHROMIUM_DOWNLOAD"] = "true"
+
 # Ensure UTF-8 encoding for output
 sys.stdout.reconfigure(encoding='utf-8')
 
