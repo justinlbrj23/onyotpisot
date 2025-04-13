@@ -2,18 +2,22 @@ import asyncio
 import os
 import json
 import sys
+import string
+import shutil
+import tempfile
+import time
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from pyppeteer import launch, errors
-import string
-import shutil
-import tempfile
-import time
+import nest_asyncio
 
 # Ensure UTF-8 encoding for output
 sys.stdout.reconfigure(encoding='utf-8')
+
+# Apply nest_asyncio to avoid event loop issues in certain environments
+nest_asyncio.apply()
 
 # Define file paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -107,125 +111,60 @@ def update_sheet_data(sheet_id, row_index, data):
     except Exception as e:
         print(f"Error updating Google Sheet: {e}")
 
-        
-# Clean up temporary user data directory
-def cleanup_tmp_user_data_dir(browser):
-    """Clean up the temporary user data directory used by Pyppeteer."""
-    try:
-        tmp_user_data_dir = browser._launcher._tmp_user_data_dir
-        if os.path.exists(tmp_user_data_dir):
-            shutil.rmtree(tmp_user_data_dir)
-            print(f"Successfully removed temporary user data directory: {tmp_user_data_dir}")
-    except Exception as e:
-        print(f"Error cleaning up temporary user data directory: {e}")
-
 async def fetch_page_html(url, retry_count=3):
     """Launch a headless browser and fetch the page HTML."""
-    browser = None
-    page = None
-
     for attempt in range(retry_count):
         temp_dir = tempfile.mkdtemp()
         try:
             print(f"Attempt {attempt + 1}: Launching browser...")
-
-            # Launch browser with temporary user data directory
-            browser = await launch(
-                headless=True,
-                userDataDir=temp_dir,
-                executablePath=r'C:\Program Files\Google\Chrome\Application\chrome.exe'  # Adjust Chrome path if necessary
-            )
+            browser = await launch(headless=True, userDataDir=temp_dir)
             page = await browser.newPage()
-
-            # Set a realistic user-agent
             await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36")
-
-            await page.goto(url, {'waitUntil': 'networkidle2', 'timeout': 60000})  # Increased timeout
+            await page.goto(url, {'waitUntil': 'networkidle2', 'timeout': 60000})
             print(f"Successfully fetched page: {url}")
             return page, browser
-
-        except (asyncio.TimeoutError, errors.NetworkError) as e:
-            print(f"Error fetching {url}: {e}")
-            if browser:
-                try:
-                    await page.close()
-                    await browser.close()
-                except Exception as cleanup_error:
-                    print(f"Error during cleanup: {cleanup_error}")
-            shutil.rmtree(temp_dir)
-
         except Exception as e:
-            print(f"Unexpected error: {e}")
-            if browser:
-                try:
-                    await page.close()
-                    await browser.close()
-                except Exception as cleanup_error:
-                    print(f"Error during cleanup: {cleanup_error}")
-            shutil.rmtree(temp_dir)
-
-    shutil.rmtree(temp_dir)
+            print(f"Error fetching {url} on attempt {attempt + 1}: {e}")
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
     return None, None
 
-# Extract content using XPath
 async def extract_hrefs_and_span_h4_within_class(page, class_name):
+    """Extract hrefs and text within elements of a specific class."""
     try:
         elements = await page.xpath(f'//div[contains(@class, "{class_name}")]')
         extracted_data = []
-
         for element in elements:
             href_elements = await element.xpath('.//a[@href]')
             hrefs = [await page.evaluate('(element) => element.href', el) for el in href_elements]
-
             span_h4_elements = await element.xpath('.//span[contains(@class, "h4")]')
             span_h4_texts = [await page.evaluate('(element) => element.textContent', el) for el in span_h4_elements]
-
             for href, text in zip(hrefs, span_h4_texts):
-                extracted_data.append({'href': href, 'text': text})
-
-        if not extracted_data:
-            print(f"No data found within elements with class '{class_name}'.")
-
+                extracted_data.append({'href': href, 'text': text.strip()})
         return extracted_data
-    except (asyncio.TimeoutError, errors.NetworkError) as e:
+    except Exception as e:
         print(f"Error extracting content: {e}")
         return []
-    except Exception as e:
-        print(f"Unexpected error: {e}")
-        return []
 
-# Main Function
 async def main():
     """Main function to fetch URLs, scrape content, and log results sequentially."""
     urls = get_sheet_data(SHEET_ID, "Raw Cape Coral - ArcGIS (lands)!Y2:Y")
-
     if not urls:
         print("No URLs found in the spreadsheet.")
         return
-
-    for idx, url in enumerate(urls, start=2):  # Start from row 2
+    for idx, url in enumerate(urls, start=2):
         print(f"\nFetching: {url}")
         page, browser = await fetch_page_html(url)
-
         if page:
-            print("Page fetched successfully!")
             class_name = 'card card-body shadow-form pt-3'
             extracted_data = await extract_hrefs_and_span_h4_within_class(page, class_name)
-
             if extracted_data:
                 print(f"Extracted data: {extracted_data}")
                 update_sheet_data(SHEET_ID, idx, extracted_data)
             else:
-                print("No data extracted from the page.")
-            
-            try:
-                await page.close()
-                await browser.close()
-            except Exception as cleanup_error:
-                print(f"Error during cleanup: {cleanup_error}")
-        else:
-            print("Failed to fetch the page.")
+                print(f"No data extracted from the page at {url}.")
+            await page.close()
+            await browser.close()
 
-# Run the async main function
 if __name__ == "__main__":
     asyncio.run(main())
