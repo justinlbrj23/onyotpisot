@@ -188,7 +188,7 @@ async def extract_hrefs_and_span_h4_within_class(page, class_name):
 # Main Function
 async def main():
     """Main function to fetch URLs, scrape content, and log results sequentially."""
-    urls = get_sheet_data(SHEET_ID, "Raw Cape Coral - ArcGIS (lands)!X2:X")
+    urls = get_sheet_data(SHEET_ID, "Raw Cape Coral - ArcGIS (lands)!Y2:Y")
 
     if not urls:
         print("No URLs found in the spreadsheet.")
