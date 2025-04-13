@@ -13,6 +13,7 @@ jobs:
       matrix:
         script:
           - "rapid_API.py"  # Add more script names here if needed
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v2
@@ -37,17 +38,18 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if (Test-Path requirements.txt) { pip install -r requirements.txt }
-          python -m pip install nest_asyncio  # Ensure nest_asyncio is installed for compatibility
+          python -m pip install nest_asyncio webdriver-manager
         shell: powershell
 
-      - name: Install Chrome and ChromeDriver
+      - name: Install Chrome
         run: |
-          # Install Google Chrome (for Pyppeteer and Selenium)
           choco install googlechrome -y
-          choco install chromium -y
+        shell: powershell
 
-          # Install WebDriver Manager (for Selenium compatibility)
-          python -m pip install webdriver-manager
+      - name: Set CHROME_PATH environment variable (for Pyppeteer)
+        run: |
+          echo "CHROME_PATH=C:\Program Files\Google\Chrome\Application\chrome.exe" >> $GITHUB_ENV
+        shell: powershell
 
       - name: Run Python script
         run: python "${{ matrix.script }}"
