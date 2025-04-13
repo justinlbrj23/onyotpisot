@@ -48,7 +48,7 @@ def get_sheet_data(sheet_id, range_name):
         print(f"Error fetching data from Google Sheets: {e}")
         return []
 
-# Convert column index to Excel column letter
+# Convert column index to Excel column name
 def get_column_letter(index):
     letters = string.ascii_uppercase
     if index < 26:
@@ -76,7 +76,18 @@ def update_sheet_data(sheet_id, row_index, data):
     except Exception as e:
         print(f"Error updating Google Sheet: {e}")
 
-# Launch browser and fetch page
+# Clean up temporary directories
+def safe_remove_temp_dir(temp_dir):
+    """Attempt to remove the temporary directory, retrying if necessary."""
+    for _ in range(5):  # Retry up to 5 times
+        try:
+            shutil.rmtree(temp_dir)
+            break
+        except PermissionError as e:
+            print(f"Temporary directory in use: {e}")
+            time.sleep(1)  # Wait 1 second before retrying
+
+# Fetch page HTML
 async def fetch_page_html(url, retry_count=3):
     """Launch browser and fetch page HTML."""
     for attempt in range(retry_count):
@@ -102,15 +113,12 @@ async def fetch_page_html(url, retry_count=3):
             try:
                 if browser:
                     await browser.close()
-            except Exception as cleanup_error:
-                print(f"Error closing browser: {cleanup_error}")
-            try:
-                shutil.rmtree(temp_dir)
-            except PermissionError as perm_error:
-                print(f"Temporary directory in use: {perm_error}")
+            except Exception as browser_error:
+                print(f"Error closing browser: {browser_error}")
+            safe_remove_temp_dir(temp_dir)  # Use safe cleanup
     return None, None
 
-# Extract data using XPath
+# Extract hrefs and texts using XPath
 async def extract_hrefs_and_span_h4_within_class(page, class_name):
     try:
         elements = await page.xpath(f'//div[contains(@class, "{class_name}")]')
@@ -128,6 +136,7 @@ async def extract_hrefs_and_span_h4_within_class(page, class_name):
 
 # Main function
 async def main():
+    """Main function to fetch URLs, scrape content, and log results."""
     urls = get_sheet_data(SHEET_ID, "Raw Cape Coral - ArcGIS (lands)!Y2:Y")
     if not urls:
         print("No URLs found in the spreadsheet.")
@@ -143,9 +152,18 @@ async def main():
                     update_sheet_data(SHEET_ID, idx, extracted_data)
                 else:
                     print("No data extracted from the page.")
+            except Exception as e:
+                print(f"Error during page processing: {e}")
             finally:
-                await page.close()
-                await browser.close()
+                try:
+                    await page.close()
+                except Exception as page_error:
+                    print(f"Error closing page: {page_error}")
+                try:
+                    if browser:
+                        await browser.close()
+                except Exception as browser_error:
+                    print(f"Error closing browser: {browser_error}")
 
 # Entry point
 if __name__ == "__main__":
