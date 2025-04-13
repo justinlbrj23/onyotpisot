@@ -68,3 +68,4 @@ wsproto==1.2.0
 yamllint==1.37.0
 yml==0.0.1
 zipp==3.21.0
+nest_asyncio==1.5.4  # Add nest_asyncio if it's used in the script
