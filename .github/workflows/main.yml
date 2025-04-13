@@ -20,7 +20,15 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v2
         with:
-          python-version: '3.x'
+          python-version: '3.10'
+
+      - name: Cache Python dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
       - name: Set Python UTF-8 Encoding
         run: echo "PYTHONIOENCODING=UTF-8" >> $GITHUB_ENV
@@ -31,26 +39,14 @@ jobs:
           if (Test-Path requirements.txt) { pip install -r requirements.txt }
         shell: powershell
 
-      - name: Install Firefox and GeckoDriver (Windows)
+      - name: Install Chrome and ChromeDriver
         run: |
-          # Install Firefox
-          choco install firefox -y
+          # Install Chrome
+          choco install googlechrome -y
+          choco install chromium -y
 
-          # Fetch the latest GeckoDriver version (no authentication)
-          $response = Invoke-WebRequest -Uri "https://api.github.com/repos/mozilla/geckodriver/releases/latest" | ConvertFrom-Json
-          $GECKO_VERSION = $response.tag_name -replace "v", ""
-          $GECKO_URL = "https://github.com/mozilla/geckodriver/releases/download/v$GECKO_VERSION/geckodriver-v$GECKO_VERSION-win64.zip"
-
-          # Download and extract GeckoDriver
-          Invoke-WebRequest -Uri $GECKO_URL -OutFile geckodriver.zip
-          Expand-Archive geckodriver.zip -DestinationPath C:\GeckoDriver
-
-          # Add GeckoDriver to PATH for this session
-          $env:PATH += ";C:\GeckoDriver"
-
-          # Verify installation
-          C:\GeckoDriver\geckodriver.exe --version
-        shell: powershell
+          # Install WebDriver Manager (for Selenium compatibility)
+          python -m pip install webdriver-manager
 
       - name: Run Python script
         run: python "${{ matrix.script }}"
