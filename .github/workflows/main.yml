@@ -37,6 +37,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if (Test-Path requirements.txt) { pip install -r requirements.txt }
+          python -m pip install nest_asyncio
         shell: powershell
 
       - name: Install Chrome and ChromeDriver
