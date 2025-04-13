@@ -36,7 +36,7 @@ def authenticate_google_sheets():
                 token.write(creds.to_json())
     return build("sheets", "v4", credentials=creds)
 
-# Fetch data from a Google Sheets range
+# Fetch data from Google Sheets
 def get_sheet_data(sheet_id, range_name):
     try:
         service = authenticate_google_sheets()
@@ -48,7 +48,7 @@ def get_sheet_data(sheet_id, range_name):
         print(f"Error fetching data from Google Sheets: {e}")
         return []
 
-# Convert column index to Excel column name
+# Convert column index to Excel column letter
 def get_column_letter(index):
     letters = string.ascii_uppercase
     if index < 26:
@@ -56,18 +56,16 @@ def get_column_letter(index):
     else:
         return letters[(index // 26) - 1] + letters[index % 26]
 
-# Update Google Sheets data
+# Update Google Sheets
 def update_sheet_data(sheet_id, row_index, data):
     try:
         service = authenticate_google_sheets()
         sheet = service.spreadsheets()
-
         batch_update_body = {"valueInputOption": "RAW", "data": []}
 
         for i, item in enumerate(data):
             href_col = get_column_letter(26 + 2 * i)
             text_col = get_column_letter(26 + 2 * i + 1)
-
             batch_update_body["data"].extend([
                 {"range": f"'Raw Cape Coral - ArcGIS (lands)'!{href_col}{row_index}", "values": [[item["href"]]]},
                 {"range": f"'Raw Cape Coral - ArcGIS (lands)'!{text_col}{row_index}", "values": [[item["text"].strip()]]},
@@ -78,8 +76,9 @@ def update_sheet_data(sheet_id, row_index, data):
     except Exception as e:
         print(f"Error updating Google Sheet: {e}")
 
-# Launch browser and fetch page HTML
+# Launch browser and fetch page
 async def fetch_page_html(url, retry_count=3):
+    """Launch browser and fetch page HTML."""
     for attempt in range(retry_count):
         temp_dir = tempfile.mkdtemp()
         browser = None
@@ -100,12 +99,18 @@ async def fetch_page_html(url, retry_count=3):
         except Exception as e:
             print(f"Error fetching {url}: {e}")
         finally:
-            if browser:
-                await browser.close()
-            shutil.rmtree(temp_dir)
+            try:
+                if browser:
+                    await browser.close()
+            except Exception as cleanup_error:
+                print(f"Error closing browser: {cleanup_error}")
+            try:
+                shutil.rmtree(temp_dir)
+            except PermissionError as perm_error:
+                print(f"Temporary directory in use: {perm_error}")
     return None, None
 
-# Extract hrefs and texts
+# Extract data using XPath
 async def extract_hrefs_and_span_h4_within_class(page, class_name):
     try:
         elements = await page.xpath(f'//div[contains(@class, "{class_name}")]')
@@ -142,6 +147,6 @@ async def main():
                 await page.close()
                 await browser.close()
 
-# Run the main function
+# Entry point
 if __name__ == "__main__":
     asyncio.run(main())
