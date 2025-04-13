@@ -1,6 +1,7 @@
 import asyncio
 import os
 import json
+import sys
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -10,6 +11,9 @@ import string
 import shutil
 import tempfile
 import time
+
+# Ensure UTF-8 encoding for output
+sys.stdout.reconfigure(encoding='utf-8')
 
 # Define file paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -44,16 +48,17 @@ def get_sheet_data(sheet_id, range_name):
         sheet = service.spreadsheets()
         result = sheet.values().get(spreadsheetId=sheet_id, range=range_name).execute()
         
-        print(f"🔍 Raw API Response: {json.dumps(result, indent=2)}")  # Debugging
+        # Debugging: Print raw API response
+        print(f"Raw API Response: {json.dumps(result, indent=2)}")
 
         values = result.get("values", [])
         if not values:
-            print(f"⚠️ No data found in the range: {range_name}")
+            print(f"No data found in the range: {range_name}")
             return []
 
         return [row[0] for row in values if row]  # Flattening list
     except Exception as e:
-        print(f"❌ Error fetching data from Google Sheets: {e}")
+        print(f"Error fetching data from Google Sheets: {e}")
         return []
 
 def get_column_letter(index):
@@ -80,8 +85,8 @@ def update_sheet_data(sheet_id, row_index, data):
             href_body = {"values": [[item['href']]]}  # Ensure values are properly structured
             text_body = {"values": [[item['text'].strip()]]}  # Ensure values are properly structured
 
-            print(f"📌 Updating range: {href_update_range} with data: {href_body}")  # Debugging print
-            print(f"📌 Updating range: {text_update_range} with data: {text_body}")  # Debugging print
+            print(f"Updating range: {href_update_range} with data: {href_body}")  # Debugging print
+            print(f"Updating range: {text_update_range} with data: {text_body}")  # Debugging print
 
             sheet.values().update(
                 spreadsheetId=sheet_id,
@@ -98,9 +103,9 @@ def update_sheet_data(sheet_id, row_index, data):
 
             time.sleep(1)  # Add a 1-second delay between each update to prevent hitting the API limit
 
-        print(f"✅ Successfully updated sheet at row {row_index}")
+        print(f"Successfully updated sheet at row {row_index}")
     except Exception as e:
-        print(f"❌ Error updating Google Sheet: {e}")
+        print(f"Error updating Google Sheet: {e}")
 
         
 # Clean up temporary user data directory
@@ -110,9 +115,9 @@ def cleanup_tmp_user_data_dir(browser):
         tmp_user_data_dir = browser._launcher._tmp_user_data_dir
         if os.path.exists(tmp_user_data_dir):
             shutil.rmtree(tmp_user_data_dir)
-            print(f"🧹 Successfully removed temporary user data directory: {tmp_user_data_dir}")
+            print(f"Successfully removed temporary user data directory: {tmp_user_data_dir}")
     except Exception as e:
-        print(f"❌ Error cleaning up temporary user data directory: {e}")
+        print(f"Error cleaning up temporary user data directory: {e}")
 
 async def fetch_page_html(url, retry_count=3):
     """Launch a headless browser and fetch the page HTML."""
@@ -122,7 +127,7 @@ async def fetch_page_html(url, retry_count=3):
     for attempt in range(retry_count):
         temp_dir = tempfile.mkdtemp()
         try:
-            print(f"🔄 Attempt {attempt + 1}: Launching browser...")
+            print(f"Attempt {attempt + 1}: Launching browser...")
 
             # Launch browser with temporary user data directory
             browser = await launch(
@@ -136,27 +141,27 @@ async def fetch_page_html(url, retry_count=3):
             await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36")
 
             await page.goto(url, {'waitUntil': 'networkidle2', 'timeout': 60000})  # Increased timeout
-            print(f"✅ Successfully fetched page: {url}")
+            print(f"Successfully fetched page: {url}")
             return page, browser
 
         except (asyncio.TimeoutError, errors.NetworkError) as e:
-            print(f"❌ Error fetching {url}: {e}")
+            print(f"Error fetching {url}: {e}")
             if browser:
                 try:
                     await page.close()
                     await browser.close()
                 except Exception as cleanup_error:
-                    print(f"❌ Error during cleanup: {cleanup_error}")
+                    print(f"Error during cleanup: {cleanup_error}")
             shutil.rmtree(temp_dir)
 
         except Exception as e:
-            print(f"❌ Unexpected error: {e}")
+            print(f"Unexpected error: {e}")
             if browser:
                 try:
                     await page.close()
                     await browser.close()
                 except Exception as cleanup_error:
-                    print(f"❌ Error during cleanup: {cleanup_error}")
+                    print(f"Error during cleanup: {cleanup_error}")
             shutil.rmtree(temp_dir)
 
     shutil.rmtree(temp_dir)
@@ -179,14 +184,14 @@ async def extract_hrefs_and_span_h4_within_class(page, class_name):
                 extracted_data.append({'href': href, 'text': text})
 
         if not extracted_data:
-            print(f"⚠️ No data found within elements with class '{class_name}'.")
+            print(f"No data found within elements with class '{class_name}'.")
 
         return extracted_data
     except (asyncio.TimeoutError, errors.NetworkError) as e:
-        print(f"❌ Error extracting content: {e}")
+        print(f"Error extracting content: {e}")
         return []
     except Exception as e:
-        print(f"❌ Unexpected error: {e}")
+        print(f"Unexpected error: {e}")
         return []
 
 # Main Function
@@ -198,7 +203,7 @@ async def main():
         print("No URLs found in the spreadsheet.")
         return
 
-    for idx, url in enumerate(urls, start=2):  # Start from row 39
+    for idx, url in enumerate(urls, start=2):  # Start from row 2
         print(f"\nFetching: {url}")
         page, browser = await fetch_page_html(url)
 
@@ -208,16 +213,16 @@ async def main():
             extracted_data = await extract_hrefs_and_span_h4_within_class(page, class_name)
 
             if extracted_data:
-                print(f"✅ Extracted data: {extracted_data}")
+                print(f"Extracted data: {extracted_data}")
                 update_sheet_data(SHEET_ID, idx, extracted_data)
             else:
-                print("⚠️ No data extracted from the page.")
+                print("No data extracted from the page.")
             
             try:
                 await page.close()
                 await browser.close()
             except Exception as cleanup_error:
-                print(f"❌ Error during cleanup: {cleanup_error}")
+                print(f"Error during cleanup: {cleanup_error}")
         else:
             print("Failed to fetch the page.")
 
