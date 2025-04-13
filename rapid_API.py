@@ -1,138 +1,173 @@
-import os
 import asyncio
-from pyppeteer import launch
-from googleapiclient.discovery import build
-from google.oauth2.credentials import Credentials
+import os
+import json
 from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
-from pyppeteer.errors import TimeoutError, NetworkError
+from googleapiclient.discovery import build
+from pyppeteer import launch, errors
+import string
+import shutil
+import tempfile
+import time
 
-# Google Sheets setup
-SHEET_ID = '1VUB2NdGSY0l3tuQAfkz8QV2XZpOj2khCB69r5zU1E5A'
-SHEET_NAME = 'PALM BAY FINAL'
-SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-CREDENTIALS_PATH = os.path.join(os.getcwd(), 'credentials.json')
-TOKEN_PATH = os.path.join(os.getcwd(), 'token.json')
+# Define file paths
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CREDENTIALS_PATH = os.path.join(BASE_DIR, "credentials.json")
+TOKEN_PATH = os.path.join(BASE_DIR, "token.json")
+SHEET_ID = "1VUB2NdGSY0l3tuQAfkz8QV2XZpOj2khCB69r5zU1E5A"
 
-# Authenticate Google Sheets
+# Authenticate Google Sheets API
 def authenticate_google_sheets():
+    """Authenticate with Google Sheets API."""
     creds = None
     if os.path.exists(TOKEN_PATH):
-        creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
+        creds = Credentials.from_authorized_user_file(
+            TOKEN_PATH, ["https://www.googleapis.com/auth/spreadsheets"]
+        )
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_PATH, SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open(TOKEN_PATH, 'w') as token:
-            token.write(creds.to_json())
-    return creds
+            flow = InstalledAppFlow.from_client_secrets_file(
+                CREDENTIALS_PATH, ["https://www.googleapis.com/auth/spreadsheets"]
+            )
+            creds = flow.run_local_server(port=53221)
+            with open(TOKEN_PATH, "w") as token:
+                token.write(creds.to_json())
+    return build("sheets", "v4", credentials=creds)
 
-# Generate column names dynamically
-def get_column_name(index):
-    column_name = ""
-    while index >= 0:
-        column_name = chr(index % 26 + 65) + column_name
-        index = index // 26 - 1
-    return column_name
-
-# Ensure sheet has enough columns
-def expand_sheet_columns_if_needed(credentials, required_column_index):
-    service = build('sheets', 'v4', credentials=credentials)
-    spreadsheet = service.spreadsheets().get(spreadsheetId=SHEET_ID).execute()
-
-    for sheet in spreadsheet['sheets']:
-        if sheet['properties']['title'] == SHEET_NAME:
-            current_cols = sheet['properties']['gridProperties']['columnCount']
-            if required_column_index + 1 > current_cols:
-                requests = [{
-                    "updateSheetProperties": {
-                        "properties": {
-                            "sheetId": sheet['properties']['sheetId'],
-                            "gridProperties": {
-                                "columnCount": required_column_index + 1
-                            }
-                        },
-                        "fields": "gridProperties.columnCount"
-                    }
-                }]
-                service.spreadsheets().batchUpdate(spreadsheetId=SHEET_ID, body={"requests": requests}).execute()
-                print(f"Expanded columns to {required_column_index + 1}")
-            break
-
-# Batch update Google Sheets
-def batch_update_sheet(credentials, data, row_number):
-    sheets = build('sheets', 'v4', credentials=credentials)
-    body = {'valueInputOption': 'RAW', 'data': []}
-
-    for j, val in enumerate(data):
-        col_index = 19 + j  # Start from column S (index 19)
-        column_name = get_column_name(col_index)
-        expand_sheet_columns_if_needed(credentials, col_index)
-        range_str = f'{SHEET_NAME}!{column_name}{row_number}'
-        print(f"Updating range: {range_str} with value: {val}")
-
-        body['data'].append({
-            'range': range_str,
-            'values': [[val]]
-        })
-
-    if not body['data']:
-        print("No valid data to update.")
-        return
-
+def get_sheet_data(sheet_id, range_name):
+    """Fetch data from a Google Sheets range."""
     try:
-        sheets.spreadsheets().values().batchUpdate(
-            spreadsheetId=SHEET_ID, body=body
-        ).execute()
-        print("Sheet update successful!")
-    except Exception as e:
-        print(f"Error updating sheet: {e}")
-        raise e
+        service = authenticate_google_sheets()
+        sheet = service.spreadsheets()
+        result = sheet.values().get(spreadsheetId=sheet_id, range=range_name).execute()
+        
+        print(f"🔍 Raw API Response: {json.dumps(result, indent=2)}")  # Debugging
 
-# Pyppeteer setup with enhanced error handling
-async def fetch_page_html(url, retries=3, delay=5):
-    browser = await launch(
-        headless=True,
-        executablePath=r'C:\Program Files\Google\Chrome\Application\chrome.exe'
-    )
-    page = await browser.newPage()
-    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36")
-
-    try:
-        # Retry mechanism for fetching page
-        attempt = 0
-        while attempt < retries:
-            try:
-                print(f"Attempting to load {url} (Attempt {attempt + 1}/{retries})")
-                await page.goto(url, {'waitUntil': 'networkidle2', 'timeout': 60000})
-                break  # Exit retry loop if successful
-            except asyncio.TimeoutError:
-                print(f"Timeout while fetching {url}, retrying...")
-                await asyncio.sleep(delay)
-            except asyncio.pyppeteer.errors.NetworkError as e:
-                print(f"Network error while fetching {url}: {e}, retrying...")
-                await asyncio.sleep(delay)
-                attempt += 1
-                if attempt == retries:
-                    print(f"Failed to load {url} after {retries} attempts.")
-                    raise e
-        return page, browser
-    except Exception as e:
-        print(f"Error fetching {url}: {e}")
-        await browser.close()
-        return None, None
-
-# Ensure that browser is properly closed in case of errors
-async def extract_data(page, class_name):
-    try:
-        elements = await page.xpath(f'//div[contains(@class, "{class_name}")]')
-        if not elements:
-            print(f"No elements found for class '{class_name}'.")
+        values = result.get("values", [])
+        if not values:
+            print(f"⚠️ No data found in the range: {range_name}")
             return []
 
+        return [row[0] for row in values if row]  # Flattening list
+    except Exception as e:
+        print(f"❌ Error fetching data from Google Sheets: {e}")
+        return []
+
+def get_column_letter(index):
+    """Convert column index (starting at 0) to an Excel column (AA, AB, etc.)."""
+    letters = string.ascii_uppercase
+    if index < 26:
+        return letters[index]  # A-Z
+    else:
+        return letters[(index // 26) - 1] + letters[index % 26]  # AA, AB, AC...
+
+def update_sheet_data(sheet_id, row_index, data):
+    """Update the Google Sheet with extracted data starting from column AD."""
+    try:
+        service = authenticate_google_sheets()
+        sheet = service.spreadsheets()
+
+        for i, item in enumerate(data):
+            href_column_letter = get_column_letter(26 + 2 * i)  # Start at AA (index 26), with two columns per entry
+            text_column_letter = get_column_letter(26 + 2 * i + 1)  # Next column
+
+            href_update_range = f"'Raw Cape Coral - ArcGIS (lands)'!{href_column_letter}{row_index}"  # Fixed range format
+            text_update_range = f"'Raw Cape Coral - ArcGIS (lands)'!{text_column_letter}{row_index}"  # Fixed range format
+
+            href_body = {"values": [[item['href']]]}  # Ensure values are properly structured
+            text_body = {"values": [[item['text'].strip()]]}  # Ensure values are properly structured
+
+            print(f"📌 Updating range: {href_update_range} with data: {href_body}")  # Debugging print
+            print(f"📌 Updating range: {text_update_range} with data: {text_body}")  # Debugging print
+
+            sheet.values().update(
+                spreadsheetId=sheet_id,
+                range=href_update_range,
+                valueInputOption="RAW",
+                body=href_body
+            ).execute()
+            sheet.values().update(
+                spreadsheetId=sheet_id,
+                range=text_update_range,
+                valueInputOption="RAW",
+                body=text_body
+            ).execute()
+
+            time.sleep(1)  # Add a 1-second delay between each update to prevent hitting the API limit
+
+        print(f"✅ Successfully updated sheet at row {row_index}")
+    except Exception as e:
+        print(f"❌ Error updating Google Sheet: {e}")
+
+        
+# Clean up temporary user data directory
+def cleanup_tmp_user_data_dir(browser):
+    """Clean up the temporary user data directory used by Pyppeteer."""
+    try:
+        tmp_user_data_dir = browser._launcher._tmp_user_data_dir
+        if os.path.exists(tmp_user_data_dir):
+            shutil.rmtree(tmp_user_data_dir)
+            print(f"🧹 Successfully removed temporary user data directory: {tmp_user_data_dir}")
+    except Exception as e:
+        print(f"❌ Error cleaning up temporary user data directory: {e}")
+
+async def fetch_page_html(url, retry_count=3):
+    """Launch a headless browser and fetch the page HTML."""
+    browser = None
+    page = None
+
+    for attempt in range(retry_count):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            print(f"🔄 Attempt {attempt + 1}: Launching browser...")
+
+            # Launch browser with temporary user data directory
+            browser = await launch(
+                headless=True,
+                userDataDir=temp_dir,
+                executablePath=r'C:\Program Files\Google\Chrome\Application\chrome.exe'  # Adjust Chrome path if necessary
+            )
+            page = await browser.newPage()
+
+            # Set a realistic user-agent
+            await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36")
+
+            await page.goto(url, {'waitUntil': 'networkidle2', 'timeout': 60000})  # Increased timeout
+            print(f"✅ Successfully fetched page: {url}")
+            return page, browser
+
+        except (asyncio.TimeoutError, errors.NetworkError) as e:
+            print(f"❌ Error fetching {url}: {e}")
+            if browser:
+                try:
+                    await page.close()
+                    await browser.close()
+                except Exception as cleanup_error:
+                    print(f"❌ Error during cleanup: {cleanup_error}")
+            shutil.rmtree(temp_dir)
+
+        except Exception as e:
+            print(f"❌ Unexpected error: {e}")
+            if browser:
+                try:
+                    await page.close()
+                    await browser.close()
+                except Exception as cleanup_error:
+                    print(f"❌ Error during cleanup: {cleanup_error}")
+            shutil.rmtree(temp_dir)
+
+    shutil.rmtree(temp_dir)
+    return None, None
+
+# Extract content using XPath
+async def extract_hrefs_and_span_h4_within_class(page, class_name):
+    try:
+        elements = await page.xpath(f'//div[contains(@class, "{class_name}")]')
         extracted_data = []
+
         for element in elements:
             href_elements = await element.xpath('.//a[@href]')
             hrefs = [await page.evaluate('(element) => element.href', el) for el in href_elements]
@@ -141,114 +176,51 @@ async def extract_data(page, class_name):
             span_h4_texts = [await page.evaluate('(element) => element.textContent', el) for el in span_h4_elements]
 
             for href, text in zip(hrefs, span_h4_texts):
-                extracted_data.append({'href': href, 'text': text.strip()})
+                extracted_data.append({'href': href, 'text': text})
+
+        if not extracted_data:
+            print(f"⚠️ No data found within elements with class '{class_name}'.")
 
         return extracted_data
-    except Exception as e:
-        print(f"Error extracting data: {e}")
+    except (asyncio.TimeoutError, errors.NetworkError) as e:
+        print(f"❌ Error extracting content: {e}")
         return []
-    
-# Simulate human-like mouse movement and click on an input element
-async def simulate_mouse_click(page, input_xpath):
-    try:
-        # Wait for the main content to load
-        await page.waitForXPath('//*[@id="content"]', timeout=60000)
-
-        # Wait until the input element is available and visible
-        input_element = await page.waitForXPath(input_xpath, timeout=60000)
-        is_visible = await page.evaluate('(el) => el.offsetParent !== null', input_element)
-
-        if not is_visible:
-            print(f"Element found but not visible: {input_xpath}")
-            return
-
-        # Wait until the input element is enabled (clickable)
-        await page.waitForFunction(
-            '''(xpath) => {
-                const element = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-                return element && !element.disabled && element.offsetParent !== null;
-            }''',
-            {'timeout': 60000},
-            input_xpath
-        )
-
-        # Get bounding box to calculate coordinates for mouse movement
-        box = await input_element.boundingBox()
-        if box:
-            x = box['x'] + box['width'] / 2
-            y = box['y'] + box['height'] / 2
-
-            # Simulate human-like mouse movement using small incremental steps
-            await page.evaluate('''
-                (x, y) => {
-                    const moveMouse = (x, y) => {
-                        const event = new MouseEvent('mousemove', {
-                            view: window,
-                            bubbles: true,
-                            cancelable: true,
-                            clientX: x,
-                            clientY: y
-                        });
-                        document.dispatchEvent(event);
-                    };
-
-                    for (let i = 0; i <= 10; i++) {
-                        setTimeout(() => moveMouse(x + i, y + i), i * 20);
-                    }
-                }
-            ''', x, y)
-
-        # Perform the click
-        await input_element.click()
-        print(f"Successfully clicked on element: {input_xpath}")
-
     except Exception as e:
-        print(f"Error during mouse simulation or click: {e}")
+        print(f"❌ Unexpected error: {e}")
+        return []
 
-# Main function
+# Main Function
 async def main():
-    credentials = authenticate_google_sheets()
-    sheets = build('sheets', 'v4', credentials=credentials)
+    """Main function to fetch URLs, scrape content, and log results sequentially."""
+    urls = get_sheet_data(SHEET_ID, "Raw Cape Coral - ArcGIS (lands)!Y2:Y")
 
-    range_ = f"{SHEET_NAME}!R2:R"  # URLs from column R
-    try:
-        result = sheets.spreadsheets().values().get(spreadsheetId=SHEET_ID, range=range_).execute()
-        urls = [val[0] for val in result.get('values', []) if val and val[0]]
-    except Exception as e:
-        print(f"Error fetching URLs: {e}")
+    if not urls:
+        print("No URLs found in the spreadsheet.")
         return
 
-    for index, url in enumerate(urls, start=2):
-        print(f"\nFetching data for URL: {url}")
+    for idx, url in enumerate(urls, start=2):  # Start from row 39
+        print(f"\nFetching: {url}")
         page, browser = await fetch_page_html(url)
 
         if page:
+            print("Page fetched successfully!")
             class_name = 'card card-body shadow-form pt-3'
-
-            # Check if any elements exist before clicking
-            elements = await page.querySelectorAll(f'.{class_name.replace(" ", ".")}')
-            if not elements:
-                print(f"No elements found for class '{class_name}', attempting simulated click...")
-                input_xpath = '//*[@id="aPYp3"]/div/label/input'
-                await simulate_mouse_click(page, input_xpath)
-
-            # Re-check after clicking (optional retry after triggering element)
-            extracted_data = await extract_data(page, class_name)
+            extracted_data = await extract_hrefs_and_span_h4_within_class(page, class_name)
 
             if extracted_data:
-                print(f"Data extracted for {url}: {extracted_data}")
-                row_data = []
-                for item in extracted_data:
-                    row_data.append(item['href'])
-                    row_data.append(item['text'])
-                try:
-                    batch_update_sheet(credentials, row_data, index)
-                except Exception as e:
-                    print(f"Error while updating Google Sheets for {url}: {e}")
+                print(f"✅ Extracted data: {extracted_data}")
+                update_sheet_data(SHEET_ID, idx, extracted_data)
             else:
-                print(f"No data extracted for {url}")
-            await browser.close()
+                print("⚠️ No data extracted from the page.")
+            
+            try:
+                await page.close()
+                await browser.close()
+            except Exception as cleanup_error:
+                print(f"❌ Error during cleanup: {cleanup_error}")
         else:
-            print(f"Failed to fetch page for {url}")
+            print("Failed to fetch the page.")
 
-asyncio.run(main())
+# Run the async main function
+if __name__ == "__main__":
+    asyncio.run(main())
