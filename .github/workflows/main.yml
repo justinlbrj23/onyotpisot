@@ -18,6 +18,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v2
 
+      # Set up HTTP Cache Proxy
+      - name: HTTP Cache Proxy
+        uses: cirruslabs/http-cache-action@v1.1
+
       - name: Set up Python
         uses: actions/setup-python@v2
         with:
