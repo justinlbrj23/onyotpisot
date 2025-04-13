@@ -4,11 +4,17 @@ import json
 import string
 import shutil
 import tempfile
+import time
+import logging
+import psutil
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from pyppeteer import launch, errors
+
+# Suppress Pyppeteer logging
+logging.getLogger("pyppeteer").setLevel(logging.CRITICAL)
 
 # Define file paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -18,7 +24,6 @@ SHEET_ID = "1VUB2NdGSY0l3tuQAfkz8QV2XZpOj2khCB69r5zU1E5A"
 
 # Authenticate Google Sheets API
 def authenticate_google_sheets():
-    """Authenticate with Google Sheets API."""
     creds = None
     if os.path.exists(TOKEN_PATH):
         creds = Credentials.from_authorized_user_file(
@@ -48,7 +53,7 @@ def get_sheet_data(sheet_id, range_name):
         print(f"Error fetching data from Google Sheets: {e}")
         return []
 
-# Convert column index to Excel column name
+# Convert column index to Excel column letter
 def get_column_letter(index):
     letters = string.ascii_uppercase
     if index < 26:
@@ -87,9 +92,15 @@ def safe_remove_temp_dir(temp_dir):
             print(f"Temporary directory in use: {e}")
             time.sleep(1)  # Wait 1 second before retrying
 
+# Terminate lingering Chrome processes
+def terminate_chrome_processes():
+    """Terminate lingering Chrome processes."""
+    for proc in psutil.process_iter(['name']):
+        if proc.info['name'] == 'chrome.exe':
+            proc.terminate()
+
 # Fetch page HTML
 async def fetch_page_html(url, retry_count=3):
-    """Launch browser and fetch page HTML."""
     for attempt in range(retry_count):
         temp_dir = tempfile.mkdtemp()
         browser = None
@@ -115,7 +126,8 @@ async def fetch_page_html(url, retry_count=3):
                     await browser.close()
             except Exception as browser_error:
                 print(f"Error closing browser: {browser_error}")
-            safe_remove_temp_dir(temp_dir)  # Use safe cleanup
+            terminate_chrome_processes()  # Kill lingering processes
+            safe_remove_temp_dir(temp_dir)  # Safe cleanup
     return None, None
 
 # Extract hrefs and texts using XPath
