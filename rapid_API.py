@@ -11,7 +11,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-from pyppeteer import launch, errors
+from pyppeteer import launch
 
 # Suppress Pyppeteer logging
 logging.getLogger("pyppeteer").setLevel(logging.CRITICAL)
@@ -22,6 +22,9 @@ TOKEN_PATH = os.path.join(BASE_DIR, "token.json")
 SHEET_ID = "1VUB2NdGSY0l3tuQAfkz8QV2XZpOj2khCB69r5zU1E5A"
 
 def authenticate_google_sheets():
+    """
+    Authenticate and return a Google Sheets API service instance.
+    """
     creds = None
     if os.path.exists(TOKEN_PATH):
         creds = Credentials.from_authorized_user_file(
@@ -40,19 +43,28 @@ def authenticate_google_sheets():
     return build("sheets", "v4", credentials=creds)
 
 def get_sheet_data(sheet_id, range_name):
+    """
+    Fetch data from a Google Sheet.
+    """
     try:
         service = authenticate_google_sheets()
         result = service.spreadsheets().values().get(spreadsheetId=sheet_id, range=range_name).execute()
         return [row[0] for row in result.get("values", []) if row]
     except Exception as e:
-        print(f"Error fetching data from Google Sheets: {e}")
+        logging.error(f"Error fetching data from Google Sheets: {e}")
         return []
 
 def get_column_letter(index):
+    """
+    Convert a zero-based column index to a Google Sheets column letter.
+    """
     letters = string.ascii_uppercase
     return letters[index] if index < 26 else letters[(index // 26) - 1] + letters[index % 26]
 
 def update_sheet_data(sheet_id, row_index, data):
+    """
+    Update Google Sheet with extracted data.
+    """
     try:
         service = authenticate_google_sheets()
         sheet = service.spreadsheets()
@@ -67,20 +79,26 @@ def update_sheet_data(sheet_id, row_index, data):
             ])
 
         sheet.values().batchUpdate(spreadsheetId=sheet_id, body=batch_update_body).execute()
-        print(f"Successfully updated sheet at row {row_index}")
+        logging.info(f"Successfully updated sheet at row {row_index}")
     except Exception as e:
-        print(f"Error updating Google Sheet: {e}")
+        logging.error(f"Error updating Google Sheet: {e}")
 
 def safe_remove_temp_dir(temp_dir):
+    """
+    Safely remove a temporary directory with retries.
+    """
     for _ in range(5):
         try:
             shutil.rmtree(temp_dir)
             break
         except PermissionError as e:
-            print(f"Temporary directory in use: {e}")
+            logging.warning(f"Temporary directory in use: {e}")
             time.sleep(1)
 
 def terminate_chrome_processes():
+    """
+    Terminate all Chrome processes to avoid resource leakage.
+    """
     for proc in psutil.process_iter(['name']):
         if proc.info['name'] == 'chrome.exe':
             try:
@@ -88,37 +106,30 @@ def terminate_chrome_processes():
             except psutil.NoSuchProcess:
                 pass
 
-async def fetch_page_html(url, retry_count=3):
+async def fetch_page_html(url, browser, retry_count=3):
+    """
+    Fetch the HTML content of a page using Pyppeteer.
+    """
     for attempt in range(retry_count):
-        temp_dir = tempfile.mkdtemp()
-        browser = None
         try:
-            print(f"Attempt {attempt + 1}: Launching browser...")
-            browser = await launch(
-                headless=False,
-                userDataDir=temp_dir,
-                executablePath=r'C:\Program Files\Google\Chrome\Application\chrome.exe'
-            )
+            logging.info(f"Attempt {attempt + 1}: Navigating to {url}...")
             page = await browser.newPage()
             await page.setUserAgent(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36"
             )
             await page.goto(url, {'waitUntil': 'networkidle2', 'timeout': 30000})
-            print(f"Successfully fetched page: {url}")
-            return page, browser, temp_dir
+            logging.info(f"Successfully fetched page: {url}")
+            return page
         except Exception as e:
-            print(f"Error fetching {url}: {e}")
-            terminate_chrome_processes()
-            safe_remove_temp_dir(temp_dir)
+            logging.error(f"Error fetching {url}: {e}")
         finally:
-            if browser:
-                try:
-                    await browser.close()
-                except Exception as browser_error:
-                    print(f"Error closing browser: {browser_error}")
-    return None, None, None
+            terminate_chrome_processes()
+    return None
 
 async def extract_hrefs_and_span_h4_within_class(page, class_name):
+    """
+    Extract hrefs and text from elements within a specific class on the page.
+    """
     try:
         elements = await page.xpath(f'//div[contains(@class, "{class_name}")]')
         extracted_data = []
@@ -130,45 +141,47 @@ async def extract_hrefs_and_span_h4_within_class(page, class_name):
             extracted_data.extend({'href': h, 'text': t} for h, t in zip(hrefs, texts))
         return extracted_data
     except Exception as e:
-        print(f"Error extracting content: {e}")
+        logging.error(f"Error extracting content: {e}")
         return []
 
 async def main():
+    """
+    Main function to orchestrate fetching and updating data.
+    """
     urls = get_sheet_data(SHEET_ID, "Raw Cape Coral - ArcGIS (lands)!Y2:Y")
     if not urls:
-        print("No URLs found in the spreadsheet.")
+        logging.warning("No URLs found in the spreadsheet.")
         return
 
-    for idx, url in enumerate(urls, start=2):
-        page, browser, temp_dir = await fetch_page_html(url)
-        if page:
-            try:
-                extracted_data = await extract_hrefs_and_span_h4_within_class(page, 'card card-body shadow-form pt-3')
-                if extracted_data:
-                    update_sheet_data(SHEET_ID, idx, extracted_data)
-                else:
-                    print("No data extracted from the page.")
-            except Exception as e:
-                print(f"Error during page processing: {e}")
-            finally:
+    temp_dir = tempfile.mkdtemp()
+    browser = await launch(
+        headless=False,
+        userDataDir=temp_dir,
+        executablePath=r'C:\Program Files\Google\Chrome\Application\chrome.exe'
+    )
+
+    try:
+        for idx, url in enumerate(urls, start=2):
+            page = await fetch_page_html(url, browser)
+            if page:
                 try:
+                    extracted_data = await extract_hrefs_and_span_h4_within_class(page, 'card card-body shadow-form pt-3')
+                    if extracted_data:
+                        update_sheet_data(SHEET_ID, idx, extracted_data)
+                    else:
+                        logging.warning(f"No data extracted from {url}.")
+                finally:
                     await page.close()
-                except Exception as page_error:
-                    print(f"Error closing page: {page_error}")
-                try:
-                    await browser.close()
-                except Exception as browser_error:
-                    print(f"Error closing browser: {browser_error}")
-                terminate_chrome_processes()
-                if temp_dir:
-                    safe_remove_temp_dir(temp_dir)
+    finally:
+        await browser.close()
+        safe_remove_temp_dir(temp_dir)
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except RuntimeError as e:
         if "event loop is closed" in str(e).lower():
-            print("Recreating event loop...")
+            logging.warning("Recreating event loop...")
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             loop.run_until_complete(main())
