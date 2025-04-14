@@ -70,11 +70,11 @@ def update_sheet_data(sheet_id, row_index, data):
         sheet = service.spreadsheets()
 
         for i, item in enumerate(data):
-            href_column_letter = get_column_letter(26 + 2 * i)  # Start at AA (index 26), with two columns per entry
-            text_column_letter = get_column_letter(26 + 2 * i + 1)  # Next column
+            href_column_letter = get_column_letter(19 + 2 * i)  # Start at S (index 19), with two columns per entry
+            text_column_letter = get_column_letter(19 + 2 * i + 1)  # Next column
 
-            href_update_range = f"'Raw Cape Coral - ArcGIS (lands)'!{href_column_letter}{row_index}"  # Fixed range format
-            text_update_range = f"'Raw Cape Coral - ArcGIS (lands)'!{text_column_letter}{row_index}"  # Fixed range format
+            href_update_range = f"'CAPE CORAL FINAL'!{href_column_letter}{row_index}"  # Fixed range format
+            text_update_range = f"'CAPE CORAL FINAL'!{text_column_letter}{row_index}"  # Fixed range format
 
             href_body = {"values": [[item['href']]]}  # Ensure values are properly structured
             text_body = {"values": [[item['text'].strip()]]}  # Ensure values are properly structured
