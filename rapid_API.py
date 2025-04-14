@@ -111,51 +111,57 @@ def cleanup_tmp_user_data_dir(browser):
         print(f" Error cleaning up temporary user data directory: {e}")
 
 async def fetch_page_html(url, retry_count=3):
-    """Launch a headless browser and fetch the page HTML."""
-    browser = None
-    page = None
-
+    """Launch a headless browser and fetch the page HTML safely."""
     for attempt in range(retry_count):
         temp_dir = tempfile.mkdtemp()
+        browser = None
+        page = None
+
         try:
             print(f" Attempt {attempt + 1}: Launching browser...")
 
-            # Launch browser with temporary user data directory
             browser = await launch(
                 headless=True,
                 userDataDir=temp_dir,
-                executablePath=r'C:\Program Files\Google\Chrome\Application\chrome.exe'  # Adjust Chrome path if necessary
+                executablePath=r'C:\Program Files\Google\Chrome\Application\chrome.exe',  # Adjust if needed
+                args=['--no-sandbox', '--disable-setuid-sandbox']  # More stable across systems
             )
             page = await browser.newPage()
 
-            # Set a realistic user-agent
-            await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36")
+            await page.setUserAgent(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36"
+            )
 
-            await page.goto(url, {'waitUntil': 'networkidle2', 'timeout': 30000})
+            await page.goto(url, {
+                'waitUntil': 'domcontentloaded',  # More stable than 'networkidle2'
+                'timeout': 30000
+            })
             print(f" Successfully fetched page: {url}")
             return page, browser
 
         except (asyncio.TimeoutError, errors.NetworkError) as e:
-            print(f" Error fetching {url}: {e}")
-            if browser:
-                try:
-                    await page.close()
-                    await browser.close()
-                except Exception as cleanup_error:
-                    print(f" Error during cleanup: {cleanup_error}")
-            shutil.rmtree(temp_dir)
-
+            print(f" Network error fetching {url}: {e}")
         except Exception as e:
-            print(f" Unexpected error: {e}")
+            print(f" Unexpected error during browser launch or navigation: {e}")
+
+        finally:
+            # If we fail and will retry, close resources and clean up
             if browser:
                 try:
-                    await page.close()
+                    if page:
+                        await page.close()
                     await browser.close()
+                    await asyncio.sleep(1)  # Ensure Chrome fully shuts down
                 except Exception as cleanup_error:
                     print(f" Error during cleanup: {cleanup_error}")
-            shutil.rmtree(temp_dir)
+            if os.path.exists(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir)
+                    print(f" Cleaned up temp dir: {temp_dir}")
+                except Exception as cleanup_error:
+                    print(f" Failed to remove temp dir: {cleanup_error}")
 
-    shutil.rmtree(temp_dir)
+    print(f" All {retry_count} attempts failed for URL: {url}")
     return None, None
 
 # Extract content using XPath
