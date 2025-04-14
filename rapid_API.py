@@ -16,13 +16,11 @@ from pyppeteer import launch, errors
 # Suppress Pyppeteer logging
 logging.getLogger("pyppeteer").setLevel(logging.CRITICAL)
 
-# Define file paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CREDENTIALS_PATH = os.path.join(BASE_DIR, "credentials.json")
 TOKEN_PATH = os.path.join(BASE_DIR, "token.json")
 SHEET_ID = "1VUB2NdGSY0l3tuQAfkz8QV2XZpOj2khCB69r5zU1E5A"
 
-# Authenticate Google Sheets API
 def authenticate_google_sheets():
     creds = None
     if os.path.exists(TOKEN_PATH):
@@ -41,27 +39,19 @@ def authenticate_google_sheets():
                 token.write(creds.to_json())
     return build("sheets", "v4", credentials=creds)
 
-# Fetch data from Google Sheets
 def get_sheet_data(sheet_id, range_name):
     try:
         service = authenticate_google_sheets()
-        sheet = service.spreadsheets()
-        result = sheet.values().get(spreadsheetId=sheet_id, range=range_name).execute()
-        values = result.get("values", [])
-        return [row[0] for row in values if row]
+        result = service.spreadsheets().values().get(spreadsheetId=sheet_id, range=range_name).execute()
+        return [row[0] for row in result.get("values", []) if row]
     except Exception as e:
         print(f"Error fetching data from Google Sheets: {e}")
         return []
 
-# Convert column index to Excel column letter
 def get_column_letter(index):
     letters = string.ascii_uppercase
-    if index < 26:
-        return letters[index]
-    else:
-        return letters[(index // 26) - 1] + letters[index % 26]
+    return letters[index] if index < 26 else letters[(index // 26) - 1] + letters[index % 26]
 
-# Update Google Sheets
 def update_sheet_data(sheet_id, row_index, data):
     try:
         service = authenticate_google_sheets()
@@ -81,25 +71,23 @@ def update_sheet_data(sheet_id, row_index, data):
     except Exception as e:
         print(f"Error updating Google Sheet: {e}")
 
-# Clean up temporary directories
 def safe_remove_temp_dir(temp_dir):
-    """Attempt to remove the temporary directory, retrying if necessary."""
-    for _ in range(5):  # Retry up to 5 times
+    for _ in range(5):
         try:
             shutil.rmtree(temp_dir)
             break
         except PermissionError as e:
             print(f"Temporary directory in use: {e}")
-            time.sleep(1)  # Wait 1 second before retrying
+            time.sleep(1)
 
-# Terminate lingering Chrome processes
 def terminate_chrome_processes():
-    """Terminate lingering Chrome processes."""
     for proc in psutil.process_iter(['name']):
         if proc.info['name'] == 'chrome.exe':
-            proc.terminate()
+            try:
+                proc.kill()
+            except psutil.NoSuchProcess:
+                pass
 
-# Fetch page HTML
 async def fetch_page_html(url, retry_count=3):
     for attempt in range(retry_count):
         temp_dir = tempfile.mkdtemp()
@@ -117,20 +105,19 @@ async def fetch_page_html(url, retry_count=3):
             )
             await page.goto(url, {'waitUntil': 'networkidle2', 'timeout': 30000})
             print(f"Successfully fetched page: {url}")
-            return page, browser
+            return page, browser, temp_dir
         except Exception as e:
             print(f"Error fetching {url}: {e}")
+            terminate_chrome_processes()
+            safe_remove_temp_dir(temp_dir)
         finally:
-            try:
-                if browser:
+            if browser:
+                try:
                     await browser.close()
-            except Exception as browser_error:
-                print(f"Error closing browser: {browser_error}")
-            terminate_chrome_processes()  # Kill lingering processes
-            safe_remove_temp_dir(temp_dir)  # Safe cleanup
-    return None, None
+                except Exception as browser_error:
+                    print(f"Error closing browser: {browser_error}")
+    return None, None, None
 
-# Extract hrefs and texts using XPath
 async def extract_hrefs_and_span_h4_within_class(page, class_name):
     try:
         elements = await page.xpath(f'//div[contains(@class, "{class_name}")]')
@@ -146,20 +133,17 @@ async def extract_hrefs_and_span_h4_within_class(page, class_name):
         print(f"Error extracting content: {e}")
         return []
 
-# Main function
 async def main():
-    """Main function to fetch URLs, scrape content, and log results."""
     urls = get_sheet_data(SHEET_ID, "Raw Cape Coral - ArcGIS (lands)!Y2:Y")
     if not urls:
         print("No URLs found in the spreadsheet.")
         return
 
     for idx, url in enumerate(urls, start=2):
-        page, browser = await fetch_page_html(url)
+        page, browser, temp_dir = await fetch_page_html(url)
         if page:
             try:
-                class_name = 'card card-body shadow-form pt-3'
-                extracted_data = await extract_hrefs_and_span_h4_within_class(page, class_name)
+                extracted_data = await extract_hrefs_and_span_h4_within_class(page, 'card card-body shadow-form pt-3')
                 if extracted_data:
                     update_sheet_data(SHEET_ID, idx, extracted_data)
                 else:
@@ -172,11 +156,19 @@ async def main():
                 except Exception as page_error:
                     print(f"Error closing page: {page_error}")
                 try:
-                    if browser:
-                        await browser.close()
+                    await browser.close()
                 except Exception as browser_error:
                     print(f"Error closing browser: {browser_error}")
+                terminate_chrome_processes()
+                if temp_dir:
+                    safe_remove_temp_dir(temp_dir)
 
-# Entry point
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except RuntimeError as e:
+        if "event loop is closed" in str(e).lower():
+            print("Recreating event loop...")
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(main())
