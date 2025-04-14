@@ -1,6 +1,5 @@
 import asyncio
 import os
-import json
 import string
 import shutil
 import tempfile
@@ -15,6 +14,9 @@ from pyppeteer import launch
 
 # Suppress Pyppeteer logging
 logging.getLogger("pyppeteer").setLevel(logging.CRITICAL)
+
+# Logging setup
+logging.basicConfig(level=logging.INFO)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CREDENTIALS_PATH = os.path.join(BASE_DIR, "credentials.json")
@@ -37,7 +39,7 @@ def authenticate_google_sheets():
             flow = InstalledAppFlow.from_client_secrets_file(
                 CREDENTIALS_PATH, ["https://www.googleapis.com/auth/spreadsheets"]
             )
-            creds = flow.run_local_server(port=53221)
+            creds = flow.run_local_server(port=0)
             with open(TOKEN_PATH, "w") as token:
                 token.write(creds.to_json())
     return build("sheets", "v4", credentials=creds)
@@ -106,25 +108,44 @@ def terminate_chrome_processes():
             except psutil.NoSuchProcess:
                 pass
 
-async def fetch_page_html(url, browser, retry_count=3):
+async def fetch_page_html(url, retry_count=3):
     """
     Fetch the HTML content of a page using Pyppeteer.
     """
     for attempt in range(retry_count):
+        temp_dir = tempfile.mkdtemp()
+        browser = None
         try:
-            logging.info(f"Attempt {attempt + 1}: Navigating to {url}...")
+            logging.info(f"Attempt {attempt + 1}: Launching browser...")
+            browser = await launch(
+                headless=False,
+                userDataDir=temp_dir,
+                executablePath=r'C:\Program Files\Google\Chrome\Application\chrome.exe',
+                handleSIGINT=False,
+                handleSIGTERM=False,
+                handleSIGHUP=False
+            )
             page = await browser.newPage()
             await page.setUserAgent(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36"
             )
             await page.goto(url, {'waitUntil': 'networkidle2', 'timeout': 30000})
             logging.info(f"Successfully fetched page: {url}")
-            return page
+            return page, browser, temp_dir
         except Exception as e:
             logging.error(f"Error fetching {url}: {e}")
         finally:
-            terminate_chrome_processes()
-    return None
+            if browser:
+                try:
+                    await browser.close()
+                except Exception as browser_error:
+                    logging.error(f"Error closing browser: {browser_error}")
+            # Ensure temp directory cleanup
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception as cleanup_error:
+                logging.warning(f"Temporary directory cleanup failed: {cleanup_error}")
+    return None, None, None
 
 async def extract_hrefs_and_span_h4_within_class(page, class_name):
     """
@@ -162,7 +183,7 @@ async def main():
 
     try:
         for idx, url in enumerate(urls, start=2):
-            page = await fetch_page_html(url, browser)
+            page, browser, temp_dir = await fetch_page_html(url)
             if page:
                 try:
                     extracted_data = await extract_hrefs_and_span_h4_within_class(page, 'card card-body shadow-form pt-3')
@@ -180,7 +201,7 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except RuntimeError as e:
-        if "event loop is closed" in str(e).lower():
+        if "Event loop is closed" in str(e).lower():
             logging.warning("Recreating event loop...")
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
