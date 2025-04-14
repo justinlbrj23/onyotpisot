@@ -32,17 +32,17 @@ jobs:
             ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}-
             ${{ runner.os }}-pip-
 
-
       - name: Set Python UTF-8 Encoding
         run: echo "PYTHONIOENCODING=UTF-8" >> $GITHUB_ENV
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          if (Test-Path requirements.txt) { pip install -r requirements.txt || exit 1 }
-          python -m pip install nest_asyncio webdriver-manager
+          if (Test-Path requirements.txt) {
+            pip install -r requirements.txt
+          }
+          pip install nest_asyncio webdriver-manager
         shell: powershell
-
 
       - name: Install Chrome
         run: |
@@ -54,11 +54,11 @@ jobs:
           echo "CHROME_PATH=C:\Program Files\Google\Chrome\Application\chrome.exe" >> $GITHUB_ENV
         shell: powershell
 
-      # Set up the proxy environment variables for HTTP requests
       - name: Set Proxy for HTTP Requests
         run: |
           echo "HTTP_PROXY=http://${{ secrets.PROXY_USER }}:${{ secrets.PROXY_PASS }}@${{ secrets.PROXY_HOST }}:${{ secrets.PROXY_PORT }}" >> $GITHUB_ENV
           echo "HTTPS_PROXY=http://${{ secrets.PROXY_USER }}:${{ secrets.PROXY_PASS }}@${{ secrets.PROXY_HOST }}:${{ secrets.PROXY_PORT }}" >> $GITHUB_ENV
+        shell: powershell
 
       - name: Run Python script
         run: python "${{ matrix.script }}"
