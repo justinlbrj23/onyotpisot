@@ -95,7 +95,7 @@ async def fetch_page_html(url, retry_count=3):
         try:
             print(f"Attempt {attempt + 1}: Launching browser...")
             browser = await launch(
-                headless=True,
+                headless=False,
                 userDataDir=temp_dir,
                 executablePath=r'C:\Program Files\Google\Chrome\Application\chrome.exe'
             )
