@@ -12,7 +12,6 @@ jobs:
     strategy:
       matrix:
         script:
-          - "rapid_API.py"
           - "scrape.js"  # ← your new Playwright-based script
 
     steps:
