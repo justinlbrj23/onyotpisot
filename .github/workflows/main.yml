@@ -12,7 +12,8 @@ jobs:
     strategy:
       matrix:
         script:
-          - "rapid_API.py"  # Add more script names here if needed
+          - "rapid_API.py"
+          - "scrape.js"  # ← your new Playwright-based script
 
     steps:
       - name: Checkout repository
@@ -41,24 +42,27 @@ jobs:
           if (Test-Path requirements.txt) {
             pip install -r requirements.txt
           }
-          pip install nest_asyncio webdriver-manager
         shell: powershell
 
-      - name: Install Chrome
+      - name: Install Playwright (with browser dependencies)
         run: |
-          choco install googlechrome -y
+          python -m playwright install --with-deps
+
+      - name: Install Chrome (optional, for other scripts)
+        run: choco install googlechrome -y
         shell: powershell
 
-      - name: Set CHROME_PATH environment variable (for Pyppeteer)
-        run: |
-          echo "CHROME_PATH=C:\Program Files\Google\Chrome\Application\chrome.exe" >> $GITHUB_ENV
-        shell: powershell
-
-      - name: Set Proxy for HTTP Requests
+      - name: Set Proxy for HTTP Requests (optional)
         run: |
           echo "HTTP_PROXY=http://${{ secrets.PROXY_USER }}:${{ secrets.PROXY_PASS }}@${{ secrets.PROXY_HOST }}:${{ secrets.PROXY_PORT }}" >> $GITHUB_ENV
           echo "HTTPS_PROXY=http://${{ secrets.PROXY_USER }}:${{ secrets.PROXY_PASS }}@${{ secrets.PROXY_HOST }}:${{ secrets.PROXY_PORT }}" >> $GITHUB_ENV
         shell: powershell
 
-      - name: Run Python script
-        run: python "${{ matrix.script }}"
+      - name: Run Python/Node script
+        run: |
+          if (${{ matrix.script }} -like "*.py") {
+            python "${{ matrix.script }}"
+          } elseif (${{ matrix.script }} -like "*.js") {
+            node "${{ matrix.script }}"
+          }
+        shell: powershell
