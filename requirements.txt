@@ -8,7 +8,8 @@ google-auth==2.38.0
 google-auth-oauthlib==1.2.1
 gspread==6.2.0
 gspread-formatting==1.2.1
-pyppeteer==2.0.0
+- pyppeteer==2.0.0
++ playwright==1.44.0
 requests==2.32.3
 webdriver-manager==4.0.2
 undetected-chromedriver==3.5.5
