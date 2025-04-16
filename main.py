@@ -16,7 +16,10 @@ from google.oauth2.service_account import Credentials
 sys.stdout.reconfigure(encoding='utf-8')
 
 # === Config ===
+# Define file paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CREDENTIALS_PATH = os.path.join(BASE_DIR, "credentials.json")
+TOKEN_PATH = os.path.join(BASE_DIR, "token.json")
 SHEET_ID = "1VUB2NdGSY0l3tuQAfkz8QV2XZpOj2khCB69r5zU1E5A"
 SHEET_NAME = "CAPE CORAL FINAL"
 URL_RANGE = "R3:R"
