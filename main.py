@@ -1,23 +1,22 @@
+# main.py
+
 import asyncio
 import os
 import re
 import string
+import json
+import sys
+
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 from playwright_stealth import stealth_async
-
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
-import sys
+
 sys.stdout.reconfigure(encoding='utf-8')
 
 # === Config ===
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CREDENTIALS_PATH = os.path.join(BASE_DIR, "credentials.json")
-TOKEN_PATH = os.path.join(BASE_DIR, "token.json")
 SHEET_ID = "1VUB2NdGSY0l3tuQAfkz8QV2XZpOj2khCB69r5zU1E5A"
 SHEET_NAME = "CAPE CORAL FINAL"
 URL_RANGE = "R3:R"
@@ -25,10 +24,15 @@ MAX_RETRIES = 3
 
 # === Google Sheets Auth ===
 def authenticate_google_sheets():
-    # Replace this with the path to your service account key
-    SERVICE_ACCOUNT_FILE = "path_to_your_service_account_key.json"
-    creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+    SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if not SERVICE_ACCOUNT_JSON:
+        raise ValueError("Missing GOOGLE_SERVICE_ACCOUNT_JSON environment variable")
 
+    service_account_info = json.loads(SERVICE_ACCOUNT_JSON)
+    creds = Credentials.from_service_account_info(
+        service_account_info,
+        scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    )
     return build("sheets", "v4", credentials=creds)
 
 def get_sheet_data(sheet_id, range_name):
@@ -60,22 +64,15 @@ async def fetch_truepeoplesearch_data(url):
                 context = await browser.new_context(
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
                 )
-
-                # ✅ Inject stealthy JS BEFORE creating the page
                 await context.add_init_script(stealth_js)
-
                 page = await context.new_page()
-
-                # ✅ Use stealth_async in combo
                 await stealth_async(page)
 
                 print(f" Attempt {attempt} to fetch: {url}")
                 await page.goto(url, wait_until="networkidle", timeout=20000)
-
                 await page.mouse.move(300, 400)
                 await page.mouse.wheel(0, 600)
                 await page.wait_for_timeout(3000)
-
                 content = await page.content()
                 await browser.close()
 
@@ -97,7 +94,6 @@ async def fetch_truepeoplesearch_data(url):
 def extract_links(html):
     soup = BeautifulSoup(html, "html.parser")
     people_data = []
-
     for link in soup.find_all("a", href=re.compile(r"^/find/person/")):
         href = f"https://www.truepeoplesearch.com{link['href']}"
         web_text = link.get_text(separator=" ", strip=True)
@@ -135,19 +131,9 @@ def update_sheet_data(sheet_id, row_index, data):
     except Exception as e:
         print(f"Error updating Google Sheet: {e}")
 
-# === Debugging Single URL ===
-async def debug_single_url():
-    test_url = "https://www.truepeoplesearch.com/find/address/2437-SW-PINE-ISLAND-RD_33991"
-    html = await fetch_truepeoplesearch_data(test_url)
-    print(html[:1000])
-    results = extract_links(html)
-    for entry in results:
-        print(f"{entry['href']}\n→ {entry['text']}\n")
-
 # === Main Execution ===
 async def main():
     urls = get_sheet_data(SHEET_ID, URL_RANGE)
-
     if not urls:
         print(" No URLs fetched from Google Sheets!")
         return
@@ -163,9 +149,7 @@ async def main():
         for entry in results:
             print(f"{entry['href']}\n→ {entry['text']}\n")
 
-        # Uncomment this to write results to the sheet
-        # update_sheet_data(SHEET_ID, idx, results)
+        # Optional: update_sheet_data(SHEET_ID, idx, results)
 
 if __name__ == "__main__":
     asyncio.run(main())
-    # asyncio.run(debug_single_url())  # Optional debug
