@@ -1,67 +1,36 @@
-name: Run Multiple Python Scripts
+name: Run Scraper
 
 on:
-  push:
-    branches:
-      - main
-  workflow_dispatch:
+  workflow_dispatch:  # Manual trigger
+  schedule:
+    - cron: ''  # Runs daily at 8:00 UTC (optional)
 
 jobs:
-  run-scripts:
-    runs-on: windows-latest
-    strategy:
-      matrix:
-        script:
-          - "scrape.js"  # ← your new Playwright-based script
+  run-script:
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v2
+      - name: Checkout repo
+        uses: actions/checkout@v3
 
       - name: Set up Python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-
-      - name: Cache Python dependencies
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}-${{ runner.os }}-v1
-          restore-keys: |
-            ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}-
-            ${{ runner.os }}-pip-
-
-      - name: Set Python UTF-8 Encoding
-        run: echo "PYTHONIOENCODING=UTF-8" >> $GITHUB_ENV
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          if (Test-Path requirements.txt) {
-            pip install -r requirements.txt
-          }
-        shell: powershell
+          pip install -r requirements.txt
+          playwright install chromium
 
-      - name: Install Playwright (with browser dependencies)
+      - name: Set up secrets
         run: |
-          python -m playwright install --with-deps
+          echo "$CREDENTIALS_JSON" > credentials.json
+          echo "$TOKEN_JSON" > token.json
+        env:
+          CREDENTIALS_JSON: ${{ secrets.CREDENTIALS_JSON }}
+          TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
 
-      - name: Install Chrome (optional, for other scripts)
-        run: choco install googlechrome -y
-        shell: powershell
-
-      - name: Set Proxy for HTTP Requests (optional)
-        run: |
-          echo "HTTP_PROXY=http://${{ secrets.PROXY_USER }}:${{ secrets.PROXY_PASS }}@${{ secrets.PROXY_HOST }}:${{ secrets.PROXY_PORT }}" >> $GITHUB_ENV
-          echo "HTTPS_PROXY=http://${{ secrets.PROXY_USER }}:${{ secrets.PROXY_PASS }}@${{ secrets.PROXY_HOST }}:${{ secrets.PROXY_PORT }}" >> $GITHUB_ENV
-        shell: powershell
-
-      - name: Run Python/Node script
-        run: |
-          if (${{ matrix.script }} -like "*.py") {
-            python "${{ matrix.script }}"
-          } elseif (${{ matrix.script }} -like "*.js") {
-            node "${{ matrix.script }}"
-          }
-        shell: powershell
+      - name: Run the script
+        run: python main.py
