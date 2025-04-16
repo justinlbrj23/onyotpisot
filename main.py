@@ -4,6 +4,9 @@ import re
 import string
 import json
 import sys
+import random
+import time
+from datetime import datetime
 
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
