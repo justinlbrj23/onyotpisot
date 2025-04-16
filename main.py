@@ -24,7 +24,7 @@ MAX_RETRIES = 3
 
 # === Google Sheets Auth ===
 def authenticate_google_sheets():
-    SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+    SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
     if not SERVICE_ACCOUNT_JSON:
         raise ValueError("Missing GOOGLE_SERVICE_ACCOUNT_JSON environment variable")
 
