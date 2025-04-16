@@ -9,6 +9,8 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
 
 # === Config ===
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
