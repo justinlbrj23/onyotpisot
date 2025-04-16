@@ -35,8 +35,10 @@ jobs:
 
       # Step 5: Install Playwright browsers
       - name: Install Playwright Browsers
-        run: python -m playwright install
+        run: |
+          python -m playwright install
         shell: powershell
+
 
       # Step 6: Run the Python script
       - name: Run main.py
