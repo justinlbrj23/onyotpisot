@@ -11,37 +11,30 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      # Step 1: Checkout the repository
       - name: Checkout repository
         uses: actions/checkout@v2
 
-      # Step 2: Set up Python environment
       - name: Set up Python
         uses: actions/setup-python@v2
         with:
-          python-version: '3.x'
+          python-version: '3.12'  # <-- SET TO STABLE 3.12
 
-      # Step 3: Write Google credentials to file
       - name: Write Google credentials to file
         run: |
           echo "${{ secrets.GOOGLE_CREDENTIALS_JSON }}" > credentials.json
 
-      # Step 4: Install dependencies
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel --disable-pip-version-check --no-cache-dir
           pip install -r requirements.txt --no-cache-dir
         shell: powershell
 
-      # Step 5: Install Playwright browsers
       - name: Install Playwright Browsers
-        run: |
-          python -m playwright install
+        run: python -m playwright install
         shell: powershell
 
-
-      # Step 6: Run the Python script
       - name: Run main.py
         run: python main.py
         env:
           PYTHONIOENCODING: utf-8
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
