@@ -1,11 +1,11 @@
 playwright==1.37.0
-playwright-stealth==1.4.0  # Added for stealth mode
+playwright-stealth==1.0.6  # Use the latest compatible version
 beautifulsoup4==4.12.2
 google-api-python-client==2.92.0
 google-auth==2.20.0
 google-auth-oauthlib==1.0.0
-google-auth-httplib2==0.1.0  # Added for Service Account support
+google-auth-httplib2==0.1.0
 requests==2.31.0
-setuptools>=65.5.0  # Added to resolve pkg_resources error
-nest-asyncio>=1.5.6  # Optional but helpful for async behavior
-wheel  # Optional for CI builds
+setuptools>=65.5.0
+nest-asyncio>=1.5.6
+wheel
