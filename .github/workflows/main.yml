@@ -1,7 +1,7 @@
 name: Run main
 
 on:
-  workflow_dispatch:  # You can also use schedule or push triggers here
+  workflow_dispatch:
 
 jobs:
   scrape:
@@ -25,9 +25,21 @@ jobs:
       run: sudo apt-get update && sudo apt-get install -y jq
 
     - name: Inject credentials.json and token.json
+      shell: bash
       run: |
-        echo '${{ secrets.CREDENTIALS_JSON }}' | jq '.' > credentials.json
-        echo '${{ secrets.TOKEN_JSON }}' | jq '.' > token.json
+        echo "${{ secrets.CREDENTIALS_JSON }}" | jq '.' > credentials.json
+        echo "${{ secrets.TOKEN_JSON }}" | jq '.' > token.json
+
+    - name: Install Playwright browsers
+      run: python -m playwright install --with-deps
+
+    # Optional debug step
+    #- name: Debug credentials
+    #  run: |
+    #    echo "credentials.json:"
+    #    cat credentials.json
+    #    echo "token.json:"
+    #    cat token.json
 
     - name: Run script
       run: python main.py
