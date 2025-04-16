@@ -1,4 +1,4 @@
-name: Run Scraper
+name: Run main
 
 on:
   workflow_dispatch:  # You can also use schedule or push triggers here
