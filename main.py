@@ -71,7 +71,7 @@ async def fetch_truepeoplesearch_data(url):
                 return content
 
         except PlaywrightTimeout as e:
-            print(f"⏱ Timeout on attempt {attempt}: {e}")
+            print(f" Timeout on attempt {attempt}: {e}")
         except Exception as e:
             print(f" Error on attempt {attempt}: {e}")
 
