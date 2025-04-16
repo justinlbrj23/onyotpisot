@@ -24,16 +24,23 @@ MAX_RETRIES = 3
 
 # === Google Sheets Auth ===
 def authenticate_google_sheets():
-    SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
-    if not SERVICE_ACCOUNT_JSON:
-        raise ValueError("Missing GOOGLE_SERVICE_ACCOUNT_JSON environment variable")
-
-    service_account_info = json.loads(SERVICE_ACCOUNT_JSON)
-    creds = Credentials.from_service_account_info(
-        service_account_info,
-        scopes=["https://www.googleapis.com/auth/spreadsheets"]
-    )
-    return build("sheets", "v4", credentials=creds)
+    """Authenticate with Google Sheets API."""
+    creds = None
+    if os.path.exists(TOKEN_PATH):
+        creds = Credentials.from_authorized_user_file(
+            TOKEN_PATH, ["https://www.googleapis.com/auth/spreadsheets"]
+        )
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                CREDENTIALS_PATH, ["https://www.googleapis.com/auth/spreadsheets"]
+            )
+            creds = flow.run_local_server(port=53221)
+            with open(TOKEN_PATH, "w") as token:
+                token.write(creds.to_json())
+    return gspread.authorize(creds)
 
 def get_sheet_data(sheet_id, range_name):
     try:
