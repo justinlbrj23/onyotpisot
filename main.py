@@ -4,6 +4,7 @@ import re
 import string
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
+from playwright_stealth import stealth_async
 
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -43,30 +44,52 @@ def authenticate_google_sheets():
 def get_sheet_data(sheet_id, range_name):
     try:
         service = authenticate_google_sheets()
-        result = service.spreadsheets().values().get(spreadsheetId=sheet_id, range=f"{SHEET_NAME}!{range_name}").execute()
+        result = service.spreadsheets().values().get(
+            spreadsheetId=sheet_id,
+            range=f"{SHEET_NAME}!{range_name}"
+        ).execute()
         values = result.get("values", [])
         return [row[0] for row in values if row and row[0]]
     except Exception as e:
         print(f"Error fetching data from Google Sheets: {e}")
         return []
 
-# === Web Scraping with Retry ===
+# === Web Scraping with Playwright + Stealth ===
 async def fetch_truepeoplesearch_data(url):
+    stealth_js = """
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+    window.chrome = { runtime: {} };
+    """
+
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True)
                 context = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
                 )
+
+                # ✅ Inject stealthy JS BEFORE creating the page
+                await context.add_init_script(stealth_js)
+
                 page = await context.new_page()
+
+                # ✅ Use stealth_async in combo
+                await stealth_async(page)
+
                 print(f" Attempt {attempt} to fetch: {url}")
-                await page.goto(url, wait_until="load", timeout=15000)
-                await page.wait_for_timeout(5000)
+                await page.goto(url, wait_until="networkidle", timeout=20000)
+
+                await page.mouse.move(300, 400)
+                await page.mouse.wheel(0, 600)
+                await page.wait_for_timeout(3000)
+
                 content = await page.content()
                 await browser.close()
 
-                if "captcha" in content.lower():
+                if "captcha" in content.lower() or "are you a human" in content.lower():
                     print(f" CAPTCHA detected on attempt {attempt}")
                     continue
 
@@ -84,9 +107,6 @@ async def fetch_truepeoplesearch_data(url):
 def extract_links(html):
     soup = BeautifulSoup(html, "html.parser")
     people_data = []
-
-    # Debugging: Print sample HTML content
-    print("HTML Preview:", html[:1000])  # Check the first 1000 characters
 
     for link in soup.find_all("a", href=re.compile(r"^/find/person/")):
         href = f"https://www.truepeoplesearch.com{link['href']}"
@@ -129,7 +149,7 @@ def update_sheet_data(sheet_id, row_index, data):
 async def debug_single_url():
     test_url = "https://www.truepeoplesearch.com/find/address/2437-SW-PINE-ISLAND-RD_33991"
     html = await fetch_truepeoplesearch_data(test_url)
-    print(html[:1000])  # Print first 1000 characters for inspection
+    print(html[:1000])
     results = extract_links(html)
     for entry in results:
         print(f"{entry['href']}\n→ {entry['text']}\n")
@@ -142,7 +162,7 @@ async def main():
         print(" No URLs fetched from Google Sheets!")
         return
 
-    for idx, url in enumerate(urls, start=3):  # Assuming row 3 starts the list
+    for idx, url in enumerate(urls, start=3):
         print(f"\n Processing Row {idx}: {url}")
         html = await fetch_truepeoplesearch_data(url)
         if not html:
@@ -153,11 +173,9 @@ async def main():
         for entry in results:
             print(f"{entry['href']}\n→ {entry['text']}\n")
 
-        # Optional: uncomment to update Google Sheet
+        # Uncomment this to write results to the sheet
         # update_sheet_data(SHEET_ID, idx, results)
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-# Uncomment below to debug a single URL
-# asyncio.run(debug_single_url())
+    # asyncio.run(debug_single_url())  # Optional debug
