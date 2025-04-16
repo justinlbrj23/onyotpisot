@@ -58,14 +58,14 @@ async def fetch_truepeoplesearch_data(url):
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
                 )
                 page = await context.new_page()
-                print(f"🌐 Attempt {attempt} to fetch: {url}")
+                print(f" Attempt {attempt} to fetch: {url}")
                 await page.goto(url, wait_until="load", timeout=15000)
                 await page.wait_for_timeout(5000)
                 content = await page.content()
                 await browser.close()
 
                 if "captcha" in content.lower():
-                    print(f"🛑 CAPTCHA detected on attempt {attempt}")
+                    print(f" CAPTCHA detected on attempt {attempt}")
                     continue
 
                 return content
@@ -73,7 +73,7 @@ async def fetch_truepeoplesearch_data(url):
         except PlaywrightTimeout as e:
             print(f"⏱ Timeout on attempt {attempt}: {e}")
         except Exception as e:
-            print(f"❌ Error on attempt {attempt}: {e}")
+            print(f" Error on attempt {attempt}: {e}")
 
     print(f"⚠ Failed to fetch valid content after {MAX_RETRIES} attempts for {url}")
     return ""
@@ -92,7 +92,7 @@ def extract_links(html):
         people_data.append({"href": href, "text": web_text})
 
     if not people_data:
-        print("⚠ No links found in extracted HTML! Check site structure.")
+        print(" No links found in extracted HTML! Check site structure.")
 
     return people_data
 
@@ -137,14 +137,14 @@ async def main():
     urls = get_sheet_data(SHEET_ID, URL_RANGE)
 
     if not urls:
-        print("⚠ No URLs fetched from Google Sheets!")
+        print(" No URLs fetched from Google Sheets!")
         return
 
     for idx, url in enumerate(urls, start=15):  # Assuming row 7 starts the list
-        print(f"\n🔍 Processing Row {idx}: {url}")
+        print(f"\n Processing Row {idx}: {url}")
         html = await fetch_truepeoplesearch_data(url)
         if not html:
-            print(f"⚠ No content fetched for {url}")
+            print(f"No content fetched for {url}")
             continue
         results = extract_links(html)
 
