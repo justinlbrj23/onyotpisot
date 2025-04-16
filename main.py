@@ -16,7 +16,7 @@ CREDENTIALS_PATH = os.path.join(BASE_DIR, "credentials.json")
 TOKEN_PATH = os.path.join(BASE_DIR, "token.json")
 SHEET_ID = "1VUB2NdGSY0l3tuQAfkz8QV2XZpOj2khCB69r5zU1E5A"
 SHEET_NAME = "CAPE CORAL FINAL"
-URL_RANGE = "R7:R"
+URL_RANGE = "R15:R"
 MAX_RETRIES = 3
 
 # === Google Sheets Auth ===
@@ -140,7 +140,7 @@ async def main():
         print("⚠ No URLs fetched from Google Sheets!")
         return
 
-    for idx, url in enumerate(urls, start=7):  # Assuming row 7 starts the list
+    for idx, url in enumerate(urls, start=15):  # Assuming row 7 starts the list
         print(f"\n🔍 Processing Row {idx}: {url}")
         html = await fetch_truepeoplesearch_data(url)
         if not html:
