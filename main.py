@@ -58,31 +58,44 @@ def get_sheet_data(sheet_id, range_name):
         print(f"Error fetching data from Google Sheets: {e}")
         return []
 
+user_agents = [
+    # Include at least 10 varied user agents here.
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64)...Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)...Chrome/120.0.0.0 Safari/537.36",
+    # Add more user agents
+]
+
+stealth_js = """
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
+Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+window.chrome = { runtime: {} };
+window.navigator.chrome = { runtime: {} };
+"""
+
 # === Web Scraping with Playwright + Stealth ===
 async def fetch_truepeoplesearch_data(url):
-    stealth_js = """
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-    window.chrome = { runtime: {} };
-    """
-
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             async with async_playwright() as p:
+                selected_agent = random.choice(user_agents)
                 browser = await p.chromium.launch(headless=True)
-                context = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
-                )
+                context = await browser.new_context(user_agent=selected_agent)
                 await context.add_init_script(stealth_js)
+
                 page = await context.new_page()
                 await stealth_async(page)
 
                 print(f" Attempt {attempt} to fetch: {url}")
-                await page.goto(url, wait_until="networkidle", timeout=20000)
-                await page.mouse.move(300, 400)
-                await page.mouse.wheel(0, 600)
-                await page.wait_for_timeout(3000)
+                await page.goto(url, wait_until="networkidle", timeout=30000)
+
+                # Enhanced interaction
+                await page.wait_for_timeout(random.randint(3000, 5000))
+                await page.mouse.move(random.randint(100, 400), random.randint(100, 400), steps=20)
+                await page.mouse.wheel(0, random.randint(400, 800))
+                await page.wait_for_timeout(random.randint(3000, 5000))
+
                 content = await page.content()
                 await browser.close()
 
