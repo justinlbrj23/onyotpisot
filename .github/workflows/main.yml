@@ -21,7 +21,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip setuptools
           if (Test-Path requirements.txt) { pip install -r requirements.txt }
         shell: powershell
 
@@ -33,13 +33,18 @@ jobs:
       - name: Install Firefox and GeckoDriver
         run: |
           choco install firefox -y
-          $response = Invoke-WebRequest -Uri "https://api.github.com/repos/mozilla/geckodriver/releases/latest" | ConvertFrom-Json
-          $GECKO_VERSION = $response.tag_name -replace "v", ""
-          $GECKO_URL = "https://github.com/mozilla/geckodriver/releases/download/v$GECKO_VERSION/geckodriver-v$GECKO_VERSION-win64.zip"
-          Invoke-WebRequest -Uri $GECKO_URL -OutFile geckodriver.zip
-          Expand-Archive geckodriver.zip -DestinationPath C:\GeckoDriver
-          $env:PATH += ";C:\GeckoDriver"
-          C:\GeckoDriver\geckodriver.exe --version
+          try {
+              $response = Invoke-WebRequest -Uri "https://api.github.com/repos/mozilla/geckodriver/releases/latest" | ConvertFrom-Json
+              $GECKO_VERSION = $response.tag_name -replace "v", ""
+              $GECKO_URL = "https://github.com/mozilla/geckodriver/releases/download/v$GECKO_VERSION/geckodriver-v$GECKO_VERSION-win64.zip"
+              Invoke-WebRequest -Uri $GECKO_URL -OutFile geckodriver.zip
+              Expand-Archive geckodriver.zip -DestinationPath C:\GeckoDriver
+              $env:PATH += ";C:\GeckoDriver"
+              C:\GeckoDriver\geckodriver.exe --version
+          } catch {
+              Write-Error "Failed to download or install GeckoDriver: $_"
+              exit 1
+          }
         shell: powershell
 
       - name: Run main.py
