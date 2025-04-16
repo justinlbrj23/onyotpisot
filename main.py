@@ -1,5 +1,3 @@
-# main.py
-
 import asyncio
 import os
 import re
@@ -11,7 +9,9 @@ from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 from playwright_stealth import stealth_async
 from googleapiclient.discovery import build
-from google.oauth2.service_account import Credentials
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
+from google_auth_oauthlib.flow import InstalledAppFlow
 
 sys.stdout.reconfigure(encoding='utf-8')
 
@@ -43,7 +43,7 @@ def authenticate_google_sheets():
             creds = flow.run_local_server(port=53221)
             with open(TOKEN_PATH, "w") as token:
                 token.write(creds.to_json())
-    return gspread.authorize(creds)
+    return build('sheets', 'v4', credentials=creds)
 
 def get_sheet_data(sheet_id, range_name):
     try:
