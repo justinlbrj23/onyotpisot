@@ -21,25 +21,24 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
+    - name: Install Playwright browsers
+      run: python -m playwright install --with-deps
+
     - name: Install jq
       run: sudo apt-get update && sudo apt-get install -y jq
 
     - name: Inject credentials.json and token.json
-      shell: bash
       run: |
-        echo "${{ secrets.CREDENTIALS_JSON }}" | jq '.' > credentials.json
-        echo "${{ secrets.TOKEN_JSON }}" | jq '.' > token.json
+        echo '${{ secrets.CREDENTIALS_JSON }}' | jq '.' > credentials.json
+        echo '${{ secrets.TOKEN_JSON }}' | jq '.' > token.json
 
-    - name: Install Playwright browsers
-      run: python -m playwright install --with-deps
-
-    # Optional debug step
-    #- name: Debug credentials
-    #  run: |
-    #    echo "credentials.json:"
-    #    cat credentials.json
-    #    echo "token.json:"
-    #    cat token.json
+    # Optional: Debug secrets (remove after validating)
+    - name: Debug injected JSON files (TEMP)
+      run: |
+        echo "🔍 credentials.json:"
+        cat credentials.json
+        echo "🔍 token.json:"
+        cat token.json
 
     - name: Run script
       run: python main.py
