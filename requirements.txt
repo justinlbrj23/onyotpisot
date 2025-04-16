@@ -1,22 +1,6 @@
-# Core dependencies
-appdirs==1.4.4
-beautifulsoup4==4.13.3
-cachetools==5.5.2
-certifi==2025.1.31
-google-api-python-client==2.64.0
-google-auth==2.38.0
-google-auth-oauthlib==1.2.1
-gspread==6.2.0
-gspread-formatting==1.2.1
-pyppeteer==2.0.0
-playwright==1.44.0
-requests==2.32.3
-webdriver-manager==4.0.2
-undetected-chromedriver==3.5.5
-psutil==5.9.8
-
-# Optional dependencies (Development and extras)
-gunicorn==23.0.0
-yamllint==1.37.0
-nest_asyncio==1.5.4
-RapidFuzz==3.12.2
+playwright
+beautifulsoup4
+google-api-python-client
+google-auth
+google-auth-oauthlib
+requests
