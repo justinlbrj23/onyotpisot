@@ -19,37 +19,23 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v2
         with:
-          python-version: '3.10'
+          python-version: '3.x'
 
-      # Step 3: Install dependencies
+      # Step 3: Write Google credentials to file
+      - name: Write Google credentials to file
+        run: |
+          echo "${{ secrets.GOOGLE_CREDENTIALS_JSON }}" > credentials.json
+
+      # Step 4: Install dependencies
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel --disable-pip-version-check --no-cache-dir
-          pip install greenlet --only-binary :all: --no-cache-dir
           pip install -r requirements.txt --no-cache-dir
         shell: powershell
 
-      # Step 4: Install Playwright Browsers
+      # Step 5: Install Playwright browsers
       - name: Install Playwright Browsers
         run: python -m playwright install
-        shell: powershell
-
-      # Step 5: Install Firefox and GeckoDriver
-      - name: Install Firefox and GeckoDriver
-        run: |
-          choco install firefox -y
-          try {
-              $response = Invoke-WebRequest -Uri "https://api.github.com/repos/mozilla/geckodriver/releases/latest" | ConvertFrom-Json
-              $GECKO_VERSION = $response.tag_name -replace "v", ""
-              $GECKO_URL = "https://github.com/mozilla/geckodriver/releases/download/v$GECKO_VERSION/geckodriver-v$GECKO_VERSION-win64.zip"
-              Invoke-WebRequest -Uri $GECKO_URL -OutFile geckodriver.zip
-              Expand-Archive geckodriver.zip -DestinationPath C:\GeckoDriver
-              $env:PATH += ";C:\GeckoDriver"
-              C:\GeckoDriver\geckodriver.exe --version
-          } catch {
-              Write-Error "Failed to download or install GeckoDriver: $_"
-              exit 1
-          }
         shell: powershell
 
       # Step 6: Run the Python script
