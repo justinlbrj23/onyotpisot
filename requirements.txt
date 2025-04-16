@@ -1,5 +1,5 @@
 playwright==1.37.0
-playwright-stealth==1.0.6  # Or consider using the GitHub version if needed
+playwright-stealth==1.0.6
 beautifulsoup4==4.12.2
 google-api-python-client==2.92.0
 google-auth==2.20.0
