@@ -1,4 +1,4 @@
-name: Run Scraper
+name: main
 
 on:
   push:
