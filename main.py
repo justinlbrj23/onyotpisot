@@ -16,6 +16,10 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+sheets_service = build('sheets', 'v4', credentials=creds)
+
 sys.stdout.reconfigure(encoding='utf-8')
 
 # === Config ===
@@ -25,7 +29,7 @@ CREDENTIALS_PATH = os.path.join(BASE_DIR, "credentials.json")
 TOKEN_PATH = os.path.join(BASE_DIR, "token.json")
 SHEET_ID = "1VUB2NdGSY0l3tuQAfkz8QV2XZpOj2khCB69r5zU1E5A"
 SHEET_NAME = "CAPE CORAL FINAL"
-URL_RANGE = "R3:R"
+URL_RANGE = "R2:R"
 MAX_RETRIES = 3
 
 # === Google Sheets Auth ===
@@ -56,10 +60,43 @@ def get_sheet_data(sheet_id, range_name):
             range=f"{SHEET_NAME}!{range_name}"
         ).execute()
         values = result.get("values", [])
-        return [row[0] for row in values if row and row[0]]
+        base_row = int(re.search(r"(\d+):\w*", range_name).group(1))
+
+        # Keep track of actual sheet row number
+        return [
+            (i + base_row, row[0])
+            for i, row in enumerate(values)
+            if row and row[0]
+        ]
     except Exception as e:
         print(f"Error fetching data from Google Sheets: {e}")
         return []
+    
+def update_sheet_data(sheet_id, row_index, values):
+    from string import ascii_uppercase
+
+    # We'll write starting from column 'T'
+    start_col_index = ascii_uppercase.index('T')  # 19th letter
+    end_col_index = start_col_index + len(values) - 1
+
+    # Handle column letters for target range
+    start_col_letter = ascii_uppercase[start_col_index]
+    end_col_letter = ascii_uppercase[end_col_index] if end_col_index < len(ascii_uppercase) else 'AM'
+
+    target_range = f"CAPE CORAL FINAL!{start_col_letter}{row_index + 1}:{end_col_letter}{row_index + 1}"
+
+    body = {
+        "range": target_range,
+        "majorDimension": "ROWS",
+        "values": [values]
+    }
+
+    sheets_service.spreadsheets().values().update(
+        spreadsheetId=sheet_id,
+        range=target_range,
+        valueInputOption="RAW",
+        body=body
+    ).execute()
 
 user_agents = [
     # Include at least 10 varied user agents here.
@@ -76,6 +113,64 @@ Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
 window.chrome = { runtime: {} };
 window.navigator.chrome = { runtime: {} };
 """
+
+def name_tokens(name):
+    return [normalize_and_sort()(part) for part in name.split()]
+
+
+def normalize_text(text):
+    return re.sub(r'\s+', ' ', text.strip().upper())
+
+def normalize_and_sort(text):
+    words = re.findall(r'\w+', text.upper())
+    return ' '.join(sorted(words))
+
+def is_match(entry_text, ref_names):
+    normalized_entry = normalize_and_sort(entry_text)
+    for ref in ref_names:
+        normalized_ref = normalize_and_sort(ref)
+        if normalized_ref in normalized_entry or normalized_entry in normalized_ref:
+            return True
+    return False
+
+def extract_reference_names(sheet_id, row_index):
+    range_ = f'CAPE CORAL FINAL!D{row_index}:J{row_index}'
+    result = sheets_service.spreadsheets().values().get(
+        spreadsheetId=sheet_id,
+        range=range_
+    ).execute()
+    values = result.get('values', [[]])[0]
+    return [normalize_text(val) for val in values if val.strip()]
+
+def match_entries(extracted, ref_names):
+    matched_results = []
+    for entry in extracted:
+        # Ensure 'link' and 'text' exist
+        if "link" in entry and "text" in entry:
+            normalized_text = normalize_and_sort(entry["text"])
+            for ref in ref_names:
+                normalized_ref = normalize_and_sort(ref)
+                if normalized_ref in normalized_text or normalized_text in normalized_ref:
+                    matched_results.append({
+                        "link": entry["link"],
+                        "text": entry["text"],
+                        "matched_to": ref  # Add the matched reference term
+                    })
+    return matched_results
+
+def log_matches_to_sheet(sheet_id, row_index, matched_results):
+    values = []
+    for result in matched_results:
+        if "matched_to" in result:
+            entry_text = result['text']
+            entry_link = result['link']
+            match_label = result['matched_to']
+            combined_entry = f"{entry_text} (Matched: {match_label})"
+            values.extend([combined_entry, entry_link])  # Each pair in two columns
+
+    if values:
+        update_sheet_data(sheet_id, row_index, values)
+
 
 # === Web Scraping with Playwright + Stealth ===
 async def fetch_truepeoplesearch_data(url):
@@ -116,66 +211,57 @@ async def fetch_truepeoplesearch_data(url):
     print(f"Failed to fetch valid content after {MAX_RETRIES} attempts for {url}")
     return ""
 
-# === HTML Parsing ===
 def extract_links(html):
-    soup = BeautifulSoup(html, "html.parser")
-    people_data = []
-    for link in soup.find_all("a", href=re.compile(r"^/find/person/")):
-        href = f"https://www.truepeoplesearch.com{link['href']}"
-        web_text = link.get_text(separator=" ", strip=True)
-        people_data.append({"href": href, "text": web_text})
+    soup = BeautifulSoup(html, 'html.parser')
+    entries = []
 
-    if not people_data:
-        print(" No links found in extracted HTML! Check site structure.")
+    # Modify this to extract link data correctly
+    for person_link in soup.find_all("a", href=re.compile(r"^/find/person/")):  # Adjust the target elements as needed
+        link = f"https://www.truepeoplesearch.com{person_link['href']}"
+        text = person_link.get_text(strip=True)
+        entries.append({"link": link, "text": text})
 
-    return people_data
+    return entries
+
 
 # === Sheet Update Logic ===
 def get_column_letter(index):
     letters = string.ascii_uppercase
     return letters[index] if index < 26 else letters[(index // 26) - 1] + letters[index % 26]
 
-def update_sheet_data(sheet_id, row_index, data):
-    try:
-        service = authenticate_google_sheets()
-        sheet = service.spreadsheets()
-        for i, item in enumerate(data):
-            href_col = get_column_letter(19 + 3 * i)
-            text_col = get_column_letter(19 + 3 * i + 1)
-            sheet.values().update(
-                spreadsheetId=sheet_id,
-                range=f"{SHEET_NAME}!{href_col}{row_index}",
-                valueInputOption="RAW",
-                body={"values": [[item['href']]]}
-            ).execute()
-            sheet.values().update(
-                spreadsheetId=sheet_id,
-                range=f"{SHEET_NAME}!{text_col}{row_index}",
-                valueInputOption="RAW",
-                body={"values": [[item['text'].strip()]]}
-            ).execute()
-    except Exception as e:
-        print(f"Error updating Google Sheet: {e}")
-
-# === Main Execution ===
 async def main():
-    urls = get_sheet_data(SHEET_ID, URL_RANGE)
-    if not urls:
-        print(" No URLs fetched from Google Sheets!")
+    url_entries = get_sheet_data(SHEET_ID, URL_RANGE)
+    if not url_entries:
+        print("No URLs fetched from Google Sheets!")
         return
 
-    for idx, url in enumerate(urls, start=3):
-        print(f"\n Processing Row {idx}: {url}")
+    for row_index, url in url_entries:
+        if not url.strip():
+            continue
+
+        print(f"\nProcessing Row {row_index}: {url}")
         html = await fetch_truepeoplesearch_data(url)
         if not html:
             print(f"No content fetched for {url}")
             continue
-        results = extract_links(html)
 
-        for entry in results:
-            print(f"{entry['href']}\n→ {entry['text']}\n")
+        extracted = extract_links(html)
+        if not extracted:
+            print("No valid links extracted.")
+            continue
 
-        # Optional: update_sheet_data(SHEET_ID, idx, results)
+        ref_names = extract_reference_names(SHEET_ID, row_index)
+        if not ref_names:
+            print(f"No reference names in row {row_index} (cols D–J)")
+            continue
+
+        matched_results = match_entries(extracted, ref_names)
+
+        if matched_results:
+            print(f"Match found. Logging to row {row_index}")
+            log_matches_to_sheet(SHEET_ID, row_index, matched_results)
+        else:
+            print(f"No match found in row {row_index}")
 
 if __name__ == "__main__":
     asyncio.run(main())
