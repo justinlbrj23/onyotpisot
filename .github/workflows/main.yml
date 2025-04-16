@@ -1,44 +1,56 @@
-name: Run main
+name: Run Multiple Python Scripts
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
-  scrape:
-    runs-on: ubuntu-latest
-
+  run-scripts:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        script:
+          - "main.py"
     steps:
-    - name: Checkout repo
-      uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v2
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.x'
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
+      - name: Set Python UTF-8 Encoding
+        run: echo "PYTHONIOENCODING=UTF-8" >> $GITHUB_ENV
 
-    - name: Install Playwright browsers
-      run: python -m playwright install --with-deps
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if (Test-Path requirements.txt) { pip install -r requirements.txt }
+        shell: powershell
 
-    - name: Install jq
-      run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Install Firefox and GeckoDriver (Windows)
+        run: |
+          # Install Firefox
+          choco install firefox -y
 
-    - name: Inject credentials.json and token.json
-      run: |
-        echo '${{ secrets.CREDENTIALS_JSON }}' | jq '.' > credentials.json
-        echo '${{ secrets.TOKEN_JSON }}' | jq '.' > token.json
+          # Fetch the latest GeckoDriver version (no authentication)
+          $response = Invoke-WebRequest -Uri "https://api.github.com/repos/mozilla/geckodriver/releases/latest" | ConvertFrom-Json
+          $GECKO_VERSION = $response.tag_name -replace "v", ""
+          $GECKO_URL = "https://github.com/mozilla/geckodriver/releases/download/v$GECKO_VERSION/geckodriver-v$GECKO_VERSION-win64.zip"
 
-    # Optional: Debug secrets (remove after validating)
-    - name: Debug injected JSON files (TEMP)
-      run: |
-        echo "🔍 credentials.json:"
-        cat credentials.json
-        echo "🔍 token.json:"
-        cat token.json
+          # Download and extract GeckoDriver
+          Invoke-WebRequest -Uri $GECKO_URL -OutFile geckodriver.zip
+          Expand-Archive geckodriver.zip -DestinationPath C:\GeckoDriver
 
-    - name: Run script
-      run: python main.py
+          # Add GeckoDriver to PATH for this session
+          $env:PATH += ";C:\GeckoDriver"
+
+          # Verify installation
+          C:\GeckoDriver\geckodriver.exe --version
+        shell: powershell
+
+      - name: Run Python script
+        run: python "${{ matrix.script }}"
