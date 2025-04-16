@@ -10,6 +10,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
+from google.oauth2.service_account import Credentials
 import sys
 sys.stdout.reconfigure(encoding='utf-8')
 
@@ -24,21 +25,10 @@ MAX_RETRIES = 3
 
 # === Google Sheets Auth ===
 def authenticate_google_sheets():
-    creds = None
-    if os.path.exists(TOKEN_PATH):
-        creds = Credentials.from_authorized_user_file(
-            TOKEN_PATH, ["https://www.googleapis.com/auth/spreadsheets"]
-        )
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                CREDENTIALS_PATH, ["https://www.googleapis.com/auth/spreadsheets"]
-            )
-            creds = flow.run_local_server(port=53221)
-            with open(TOKEN_PATH, "w") as token:
-                token.write(creds.to_json())
+    # Replace this with the path to your service account key
+    SERVICE_ACCOUNT_FILE = "path_to_your_service_account_key.json"
+    creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+
     return build("sheets", "v4", credentials=creds)
 
 def get_sheet_data(sheet_id, range_name):
