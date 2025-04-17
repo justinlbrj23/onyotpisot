@@ -190,31 +190,26 @@ def log_matches_to_sheet(sheet_id, row_index, matched_results):
         update_sheet_data(sheet_id, row_index, values)
 
 
+# Fetch data from TruePeopleSearch
 async def fetch_truepeoplesearch_data(url):
-    # Load the auth state from auth_state.json
     auth_state = load_auth_state()
 
     # Extract cookies and headers
     cookies = auth_state.get("cookies", []) if auth_state else []
     headers = auth_state.get("headers", {}) if auth_state else {}
 
-    for attempt in range(1, MAX_RETRIES + 1):
+    for attempt in range(1, 4):  # Retry up to 3 times
         try:
             async with async_playwright() as p:
                 selected_agent = random.choice(user_agents)
-                browser = await p.chromium.launch(headless=True)
-
-                # Create a new browser context
+                browser = await p.chromium.launch(headless=False)  # Set headless to True for production
                 context = await browser.new_context(
                     user_agent=selected_agent,
                     extra_http_headers=headers
                 )
-                await context.add_init_script(stealth_js)
-
-                # Add cookies to the context
                 if cookies:
                     for cookie in cookies:
-                        # Add domain correction if necessary
+                        # Ensure domain is correctly formatted
                         if cookie["domain"].startswith("."):
                             cookie["domain"] = cookie["domain"][1:]
                     await context.add_cookies(cookies)
@@ -222,30 +217,25 @@ async def fetch_truepeoplesearch_data(url):
                 page = await context.new_page()
                 await stealth_async(page)
 
-                print(f" Attempt {attempt} to fetch: {url}")
+                print(f"Attempt {attempt} to fetch: {url}")
                 await page.goto(url, wait_until="networkidle", timeout=30000)
 
-                # Mimic human behavior
-                await page.wait_for_timeout(random.randint(3000, 5000))
-                await page.mouse.move(random.randint(100, 400), random.randint(100, 400), steps=20)
-                await page.mouse.wheel(0, random.randint(400, 800))
-                await page.wait_for_timeout(random.randint(3000, 5000))
-
+                # Check for CAPTCHA
                 content = await page.content()
-                await browser.close()
-
                 if "captcha" in content.lower() or "are you a human" in content.lower():
-                    print(f" CAPTCHA detected on attempt {attempt}")
+                    print(f"CAPTCHA detected on attempt {attempt}")
+                    await page.screenshot(path=f"captcha_{attempt}.png")
                     continue
 
+                await browser.close()
                 return content
 
         except PlaywrightTimeout as e:
-            print(f" Timeout on attempt {attempt}: {e}")
+            print(f"Timeout on attempt {attempt}: {e}")
         except Exception as e:
-            print(f" Error on attempt {attempt}: {e}")
+            print(f"Error on attempt {attempt}: {e}")
 
-    print(f"Failed to fetch valid content after {MAX_RETRIES} attempts for {url}")
+    print(f"Failed to fetch valid content after 3 attempts for {url}")
     return ""
 
 def extract_links(html):
