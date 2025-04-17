@@ -1,0 +1,35 @@
+{
+  "cookies": [
+    {
+      "name": "_ga",
+      "value": "GA1.1.425094365.17141197256",
+      "domain": ".truepeoplesearch.com",
+      "path": "/",
+      "expires": 1776508800,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_ga_JB1DKYFLTX",
+      "value": "GS1.1.1742850368.12.0.1742850408.0.0.0",
+      "domain": ".truepeoplesearch.com",
+      "path": "/",
+      "expires": 1776508800,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_pxhd",
+      "value": "4a7f90a53800631e23c5b3eab12f6865cf3da69e6a0181822...",
+      "domain": "www.truepeoplesearch.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    }
+  ],
+  "origins": []
+}
