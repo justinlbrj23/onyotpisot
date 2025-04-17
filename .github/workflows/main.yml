@@ -17,7 +17,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v2
         with:
-          python-version: '3.12'  # <-- SET TO STABLE 3.12
+          python-version: '3.12'  # Use the stable Python version 3.12
 
       - name: Write Google credentials to file
         run: |
@@ -33,20 +33,24 @@ jobs:
         run: python -m playwright install
         shell: powershell
 
-      - name: Download auth_state.json
+      # Optional: If you need to download the auth_state artifact from a previous workflow run
+      - name: Download auth_state.json (if necessary)
         uses: actions/download-artifact@v3
         with:
           name: auth_state
-          path: .
+          path: .  # Downloads it to the current directory
 
-      - name: Upload auth_state.json
+      # If you're planning to persist the auth_state.json for later use:
+      - name: Upload auth_state.json (if necessary)
         uses: actions/upload-artifact@v3
         with:
           name: auth_state
           path: auth_state.json
 
+      # Run your script
       - name: Run main.py
         run: python main.py
         env:
           PYTHONIOENCODING: utf-8
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          AUTH_STATE_PATH: ./auth_state.json  # Ensure the auth_state.json file is used in your script
