@@ -33,21 +33,7 @@ jobs:
         run: python -m playwright install
         shell: powershell
 
-      # Optional: If you need to download the auth_state artifact from a previous workflow run
-      - name: Download auth_state.json (if necessary)
-        uses: actions/download-artifact@v3
-        with:
-          name: auth_state
-          path: .  # Downloads it to the current directory
-
-      # If you're planning to persist the auth_state.json for later use:
-      - name: Upload auth_state.json (if necessary)
-        uses: actions/upload-artifact@v3
-        with:
-          name: auth_state
-          path: auth_state.json
-
-      # Run your script
+      # Run your script (no artifact downloading/uploading required)
       - name: Run main.py
         run: python main.py
         env:
