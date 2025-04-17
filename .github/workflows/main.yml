@@ -12,26 +12,27 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
 
       - name: Set up Python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v4
         with:
           python-version: '3.12'
 
       - name: Write Google credentials to file
         run: |
-          echo "${{ secrets.GOOGLE_CREDENTIALS_JSON }}" > credentials.json
+          $env:GOOGLE_CREDENTIALS_JSON | Out-File -Encoding utf8 credentials.json
+        shell: pwsh
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel --disable-pip-version-check --no-cache-dir
           pip install -r requirements.txt --no-cache-dir
-        shell: powershell
+        shell: pwsh
 
       - name: Install Playwright Browsers
         run: python -m playwright install
-        shell: powershell
+        shell: pwsh
 
       - name: Run main.py
         run: python main.py
@@ -41,7 +42,7 @@ jobs:
           AUTH_STATE_PATH: ./auth_state.json
 
       - name: Upload auth_state.json
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3
         with:
           name: auth-state
           path: auth_state.json
