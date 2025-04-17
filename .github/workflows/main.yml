@@ -23,19 +23,18 @@ jobs:
         run: |
           echo "${{ secrets.GOOGLE_CREDENTIALS_JSON }}" > credentials.json
 
-      - name: Try to download auth_state.json (ignore if not found)
-        continue-on-error: true
-        uses: actions/download-artifact@v4
+      - name: Download auth_state.json
+        uses: actions/download-artifact@v3
         with:
           name: auth_state
           path: .
 
-      - name: Create empty auth_state.json if missing
-        run: |
-          if (-not (Test-Path "auth_state.json")) {
-            '{}' | Out-File -Encoding utf8 auth_state.json
-          }
-        shell: powershell
+
+      - name: Upload auth_state.json
+        uses: actions/upload-artifact@v3
+        with:
+          name: auth_state
+          path: auth_state.json
 
       - name: Install dependencies
         run: |
