@@ -17,24 +17,11 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v2
         with:
-          python-version: '3.12'
+          python-version: '3.12'  # <-- SET TO STABLE 3.12
 
       - name: Write Google credentials to file
         run: |
           echo "${{ secrets.GOOGLE_CREDENTIALS_JSON }}" > credentials.json
-
-      - name: Download auth_state.json
-        uses: actions/download-artifact@v3
-        with:
-          name: auth_state
-          path: .
-
-
-      - name: Upload auth_state.json
-        uses: actions/upload-artifact@v3
-        with:
-          name: auth_state
-          path: auth_state.json
 
       - name: Install dependencies
         run: |
@@ -46,15 +33,20 @@ jobs:
         run: python -m playwright install
         shell: powershell
 
+      - name: Download auth_state.json
+        uses: actions/download-artifact@v3
+        with:
+          name: auth_state
+          path: .
+
+      - name: Upload auth_state.json
+        uses: actions/upload-artifact@v3
+        with:
+          name: auth_state
+          path: auth_state.json
+
       - name: Run main.py
         run: python main.py
         env:
           PYTHONIOENCODING: utf-8
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
-
-      - name: Upload auth_state.json for future runs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: auth_state
-          path: auth_state.json
