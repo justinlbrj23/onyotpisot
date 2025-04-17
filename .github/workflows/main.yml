@@ -40,9 +40,3 @@ jobs:
           PYTHONIOENCODING: utf-8
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           AUTH_STATE_PATH: ./auth_state.json
-
-      - name: Upload auth_state.json
-        uses: actions/upload-artifact@v3
-        with:
-          name: auth-state
-          path: auth_state.json
