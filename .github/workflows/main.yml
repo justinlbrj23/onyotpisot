@@ -42,7 +42,7 @@ jobs:
 
       # Upload auth_state.json after running main.py (if generated)
       - name: Upload auth_state.json (optional)
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v2  # Changed to v2
         with:
           name: auth_state
           path: ./auth_state.json
