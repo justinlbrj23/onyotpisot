@@ -40,9 +40,8 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           AUTH_STATE_PATH: ./auth_state.json
 
-      # Upload auth_state.json after running main.py (if generated)
-      - name: Upload auth_state.json (optional)
-        uses: actions/upload-artifact@v2  # Changed to v2
+      - name: Upload auth_state.json
+        uses: actions/upload-artifact@v3
         with:
-          name: auth_state
-          path: ./auth_state.json
+          name: auth-state
+          path: auth_state.json
