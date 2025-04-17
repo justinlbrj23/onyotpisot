@@ -190,12 +190,11 @@ def log_matches_to_sheet(sheet_id, row_index, matched_results):
         update_sheet_data(sheet_id, row_index, values)
 
 
-# === Web Scraping with Playwright + Stealth ===
 async def fetch_truepeoplesearch_data(url):
     # Load the auth state from auth_state.json
     auth_state = load_auth_state()
 
-    # If auth_state is available, extract cookies and headers for reuse
+    # Extract cookies and headers
     cookies = auth_state.get("cookies", []) if auth_state else []
     headers = auth_state.get("headers", {}) if auth_state else {}
 
@@ -205,13 +204,20 @@ async def fetch_truepeoplesearch_data(url):
                 selected_agent = random.choice(user_agents)
                 browser = await p.chromium.launch(headless=True)
 
-                # Create a new browser context with the cookies and headers from auth_state.json
+                # Create a new browser context
                 context = await browser.new_context(
                     user_agent=selected_agent,
-                    cookies=cookies,
                     extra_http_headers=headers
                 )
                 await context.add_init_script(stealth_js)
+
+                # Add cookies to the context
+                if cookies:
+                    for cookie in cookies:
+                        # Add domain correction if necessary
+                        if cookie["domain"].startswith("."):
+                            cookie["domain"] = cookie["domain"][1:]
+                    await context.add_cookies(cookies)
 
                 page = await context.new_page()
                 await stealth_async(page)
@@ -219,7 +225,7 @@ async def fetch_truepeoplesearch_data(url):
                 print(f" Attempt {attempt} to fetch: {url}")
                 await page.goto(url, wait_until="networkidle", timeout=30000)
 
-                # Enhanced interaction to mimic human browsing behavior
+                # Mimic human behavior
                 await page.wait_for_timeout(random.randint(3000, 5000))
                 await page.mouse.move(random.randint(100, 400), random.randint(100, 400), steps=20)
                 await page.mouse.wheel(0, random.randint(400, 800))
@@ -228,7 +234,6 @@ async def fetch_truepeoplesearch_data(url):
                 content = await page.content()
                 await browser.close()
 
-                # Check if CAPTCHA or human verification appears on the page
                 if "captcha" in content.lower() or "are you a human" in content.lower():
                     print(f" CAPTCHA detected on attempt {attempt}")
                     continue
