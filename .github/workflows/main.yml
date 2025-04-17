@@ -41,7 +41,7 @@ jobs:
           AUTH_STATE_PATH: ./auth_state.json
 
       - name: Upload auth_state.json
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v2
         with:
           name: auth-state
           path: auth_state.json
