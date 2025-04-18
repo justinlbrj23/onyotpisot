@@ -15,30 +15,13 @@ from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
+import requests
 
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 creds = Credentials.from_authorized_user_file('token.json', SCOPES)
 sheets_service = build('sheets', 'v4', credentials=creds)
 
 sys.stdout.reconfigure(encoding='utf-8')
-
-def load_auth_state():
-    auth_state_file = 'auth_state.json'
-    if os.path.exists(auth_state_file):
-        with open(auth_state_file, 'r') as file:
-            auth_state = json.load(file)
-            return auth_state
-    else:
-        print("auth_state.json not found!")
-        return None
-
-# Example of how to use the loaded auth state
-auth_state = load_auth_state()
-if auth_state:
-    print(f"Loaded auth state: {auth_state}")
-else:
-    print("No auth state found.")
-
 
 # === Config ===
 # Define file paths
@@ -189,54 +172,102 @@ def log_matches_to_sheet(sheet_id, row_index, matched_results):
     if values:
         update_sheet_data(sheet_id, row_index, values)
 
+def fetch_data_browserless_graphql(url: str):
+    print(f"[~] Using Browserless GraphQL fallback for: {url}")
+    endpoint = "https://production-sfo.browserless.io/chrome/bql"
+    query_string = {
+        "token": BROWSERLESS_TOKEN,
+        "proxy": "residential",
+        "proxySticky": "true",
+        "proxyCountry": "us",
+        "humanlike": "true",
+        "blockConsentModals": "true",
+    }
+    headers = {
+        "Content-Type": "application/json",
+    }
 
-# Fetch data from TruePeopleSearch
+    graphql_query = f"""
+    mutation Verify {{
+      goto(url: "{url}") {{
+        status
+      }}
+      verify(type: cloudflare) {{
+        found
+        solved
+        time
+      }}
+      results: elements(selector: "a") {{
+        text
+        attributes {{
+          name
+          value
+        }}
+      }}
+    }}
+    """
+
+    payload = {
+        "query": graphql_query,
+        "operationName": "Verify",
+    }
+
+    try:
+        response = requests.post(endpoint, params=query_string, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        links = []
+
+        if "data" in data and "results" in data["data"]:
+            for el in data["data"]["results"]:
+                href = next((attr["value"] for attr in el.get("attributes", []) if attr["name"] == "href"), None)
+                text = el.get("text", "").strip()
+                if href and "www.truepeoplesearch.com/find/person/" in href:
+                    links.append(f"{text}\n{href}")
+
+        return links
+    except Exception as e:
+        print(f"[!] GraphQL fallback failed for {url}: {e}")
+        return []
+
+BROWSERLESS_TOKEN = "S9HuggAnITqZTnb98093b0645f2b9ea2d49fcc49e6"
+
 async def fetch_truepeoplesearch_data(url):
-    auth_state = load_auth_state()
-
-    # Extract cookies and headers
-    cookies = auth_state.get("cookies", []) if auth_state else []
-    headers = auth_state.get("headers", {}) if auth_state else {}
-
-    for attempt in range(1, 4):  # Retry up to 3 times
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
             async with async_playwright() as p:
                 selected_agent = random.choice(user_agents)
-                browser = await p.chromium.launch(headless=False)  # Set headless to True for production
-                context = await browser.new_context(
-                    user_agent=selected_agent,
-                    extra_http_headers=headers
-                )
-                if cookies:
-                    for cookie in cookies:
-                        # Ensure domain is correctly formatted
-                        if cookie["domain"].startswith("."):
-                            cookie["domain"] = cookie["domain"][1:]
-                    await context.add_cookies(cookies)
+                browser = await p.chromium.launch(headless=True)
+                context = await browser.new_context(user_agent=selected_agent)
+                await context.add_init_script(stealth_js)
 
                 page = await context.new_page()
                 await stealth_async(page)
 
-                print(f"Attempt {attempt} to fetch: {url}")
+                print(f" Attempt {attempt} to fetch: {url}")
                 await page.goto(url, wait_until="networkidle", timeout=30000)
 
-                # Check for CAPTCHA
+                await page.wait_for_timeout(random.randint(3000, 5000))
+                await page.mouse.move(random.randint(100, 400), random.randint(100, 400), steps=20)
+                await page.mouse.wheel(0, random.randint(400, 800))
+                await page.wait_for_timeout(random.randint(3000, 5000))
+
                 content = await page.content()
+                await browser.close()
+
                 if "captcha" in content.lower() or "are you a human" in content.lower():
-                    print(f"CAPTCHA detected on attempt {attempt}")
-                    await page.screenshot(path=f"captcha_{attempt}.png")
+                    print(f" CAPTCHA detected on attempt {attempt}")
                     continue
 
-                await browser.close()
                 return content
 
         except PlaywrightTimeout as e:
-            print(f"Timeout on attempt {attempt}: {e}")
+            print(f" Timeout on attempt {attempt}: {e}")
         except Exception as e:
-            print(f"Error on attempt {attempt}: {e}")
+            print(f" Error on attempt {attempt}: {e}")
 
-    print(f"Failed to fetch valid content after 3 attempts for {url}")
-    return ""
+    print(f" Falling back to Browserless GraphQL for: {url}")
+    return fetch_data_browserless_graphql(url)
 
 def extract_links(html):
     soup = BeautifulSoup(html, 'html.parser')
@@ -267,12 +298,23 @@ async def main():
             continue
 
         print(f"\nProcessing Row {row_index}: {url}")
-        html = await fetch_truepeoplesearch_data(url)
-        if not html:
-            print(f"No content fetched for {url}")
-            continue
 
-        extracted = extract_links(html)
+        # Try Playwright-based fetch first
+        html = await fetch_truepeoplesearch_data(url)
+
+        # Fallback to GraphQL if Playwright fails
+        if not html:
+            print(f"[!] Playwright failed or CAPTCHA detected. Trying Browserless GraphQL for row {row_index}")
+            links = fetch_data_browserless_graphql(url)
+
+            if not links:
+                print(f"[!] Browserless GraphQL also failed for row {row_index}")
+                continue  # Skip to the next row
+
+            extracted = links  # Already structured from GraphQL response
+        else:
+            extracted = extract_links(html)
+
         if not extracted:
             print("No valid links extracted.")
             continue
