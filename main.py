@@ -11,49 +11,38 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 from playwright_stealth import stealth_async
+from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 import requests
+from dotenv import load_dotenv
 
-SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+# Load environment variables
+load_dotenv()
+SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON")
+if not SERVICE_ACCOUNT_JSON:
+    raise ValueError("SERVICE_ACCOUNT_JSON not found in environment variables.")
+
+# Decode the base64 JSON string into a credentials dict
+credentials_dict = json.loads(SERVICE_ACCOUNT_JSON)
+creds = Credentials.from_service_account_info(credentials_dict)
 sheets_service = build('sheets', 'v4', credentials=creds)
 
 sys.stdout.reconfigure(encoding='utf-8')
 
 # === Config ===
-# Define file paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CREDENTIALS_PATH = os.path.join(BASE_DIR, "credentials.json")
-TOKEN_PATH = os.path.join(BASE_DIR, "token.json")
 SHEET_ID = "1VUB2NdGSY0l3tuQAfkz8QV2XZpOj2khCB69r5zU1E5A"
 SHEET_NAME = "CAPE CORAL FINAL"
 URL_RANGE = "R2:R"
 MAX_RETRIES = 3
 
-# === Google Sheets Auth ===
-def authenticate_google_sheets():
-    """Authenticate with Google Sheets API."""
-    creds = None
-    if os.path.exists(TOKEN_PATH):
-        creds = Credentials.from_authorized_user_file(
-            TOKEN_PATH, ["https://www.googleapis.com/auth/spreadsheets"]
-        )
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                CREDENTIALS_PATH, ["https://www.googleapis.com/auth/spreadsheets"]
-            )
-            creds = flow.run_local_server(port=53221)
-            with open(TOKEN_PATH, "w") as token:
-                token.write(creds.to_json())
-    return build('sheets', 'v4', credentials=creds)
+# === Google Sheets Interaction ===
 
-import re
+def authenticate_google_sheets():
+    """Return a built Sheets API service."""
+    return sheets_service
 
 def get_sheet_data(sheet_id, range_name):
     try:
@@ -65,7 +54,6 @@ def get_sheet_data(sheet_id, range_name):
         values = result.get("values", [])
         base_row = int(re.search(r"(\d+):\w*", range_name).group(1))
 
-        # Return only non-empty, stripped values with their actual row number
         return [
             (i + base_row, row[0].strip())
             for i, row in enumerate(values)
@@ -75,19 +63,15 @@ def get_sheet_data(sheet_id, range_name):
         print(f"Error fetching data from Google Sheets: {e}")
         return []
 
-    
 def update_sheet_data(sheet_id, row_index, values):
     from string import ascii_uppercase
 
-    # We'll write starting from column 'T'
-    start_col_index = ascii_uppercase.index('T')  # 19th letter
+    start_col_index = ascii_uppercase.index('T')
     end_col_index = start_col_index + len(values) - 1
-
-    # Handle column letters for target range
     start_col_letter = ascii_uppercase[start_col_index]
     end_col_letter = ascii_uppercase[end_col_index] if end_col_index < len(ascii_uppercase) else 'AM'
 
-    target_range = f"CAPE CORAL FINAL!{start_col_letter}{row_index + 1}:{end_col_letter}{row_index + 1}"
+    target_range = f"{SHEET_NAME}!{start_col_letter}{row_index + 1}:{end_col_letter}{row_index + 1}"
 
     body = {
         "range": target_range,
