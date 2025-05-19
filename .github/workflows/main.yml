@@ -43,3 +43,4 @@ jobs:
         run: python main.py
         env:
           PYTHONIOENCODING: utf-8
+          SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
