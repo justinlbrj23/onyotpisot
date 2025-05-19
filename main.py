@@ -53,6 +53,8 @@ def authenticate_google_sheets():
                 token.write(creds.to_json())
     return build('sheets', 'v4', credentials=creds)
 
+import re
+
 def get_sheet_data(sheet_id, range_name):
     try:
         service = authenticate_google_sheets()
@@ -63,15 +65,16 @@ def get_sheet_data(sheet_id, range_name):
         values = result.get("values", [])
         base_row = int(re.search(r"(\d+):\w*", range_name).group(1))
 
-        # Keep track of actual sheet row number
+        # Return only non-empty, stripped values with their actual row number
         return [
-            (i + base_row, row[0])
+            (i + base_row, row[0].strip())
             for i, row in enumerate(values)
-            if row and row[0]
+            if row and len(row) > 0 and row[0].strip()
         ]
     except Exception as e:
         print(f"Error fetching data from Google Sheets: {e}")
         return []
+
     
 def update_sheet_data(sheet_id, row_index, values):
     from string import ascii_uppercase
