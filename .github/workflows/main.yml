@@ -1,15 +1,30 @@
-name: Run Python Script with Playwright
+name: Unzip Actions Runner Setup
 
 on:
   push:
     branches:
       - main
-  workflow_dispatch:
 
 jobs:
-  run-scripts:
+  unzip:
     runs-on: ubuntu-latest
-  
+
     steps:
-      - name: Unzip Actions Runner Setup
-        run: unzip "actions-runner-setup.zip" -d extracted_folder
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Verify file exists
+        run: |
+          if [ ! -f "actions-runner-setup.zip" ]; then
+            echo "Error: File not found!"
+            exit 1
+          fi
+
+      - name: List directory contents (Debugging)
+        run: ls -l
+
+      - name: Unzip file
+        run: unzip actions-runner-setup.zip -d extracted_folder
+
+      - name: Verify unzip success
+        run: ls -l extracted_folder
