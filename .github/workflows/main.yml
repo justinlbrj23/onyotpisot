@@ -9,9 +9,7 @@ on:
 jobs:
   run-scripts:
     runs-on: ubuntu-latest
-    env:
-      SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
-
+  
     steps:
       - name: Unzip Actions Runner Setup
-        run: unzip "actions-runner-setup (1).zip" -d extracted_folder
+        run: unzip "actions-runner-setup.zip" -d extracted_folder
