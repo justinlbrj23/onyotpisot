@@ -1,0 +1,23 @@
+{
+  "name": "otment",
+  "version": "1.0.0",
+  "description": "",
+  "main": "leePA.mjs",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.6.0",
+    "chromedriver": "^140.0.4",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "googleapis": "^159.0.0",
+    "selenium-webdriver": "^4.35.0",
+    "uuidv4": "^6.2.13",
+    "puppeteer-core": "^22.0.0"
+  }
+}
