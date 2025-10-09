@@ -1,30 +1,348 @@
-name: Unzip Actions Runner Setup
+
+name: Run Scrapers
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
-  unzip:
+  Citrus_PA-10:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Verify file exists
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
+
+      - name: Install Chrome and Chromedriver
         run: |
-          if [ ! -f "actions-runner-setup.zip" ]; then
-            echo "Error: File not found!"
-            exit 1
+          sudo apt-get update
+          sudo apt-get install -y wget unzip xvfb libxi6 libxss1 libnss3 libatk-bridge2.0-0 libgtk-3-0
+          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -f -y
+
+      - name: Install dependencies (fallback to npm install if no lockfile)
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
           fi
 
-      - name: List directory contents (Debugging)
-        run: ls -l
+      - name: Decode Service Account JSON
+        working-directory: "Property Appraiser Scripts"
+        run: base64 -d service-account_base64.txt > service-account.json
 
-      - name: Unzip file
-        run: unzip actions-runner-setup.zip -d extracted_folder
+      - name: Run Citrus County Property Appraiser script
+        working-directory: "Property Appraiser Scripts"
+        env:
+          HEADLESS: 'true'
+          CHROME_PATH: '/usr/bin/google-chrome-stable'
+          GOOGLE_APPLICATION_CREDENTIALS: './service-account.json'
+        run: node citrusPA_10.mjs
 
-      - name: Verify unzip success
-        run: ls -l extracted_folder
+  Citrus_PA-11:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
+
+      - name: Install Chrome and Chromedriver
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget unzip xvfb libxi6 libxss1 libnss3 libatk-bridge2.0-0 libgtk-3-0
+          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -f -y
+
+      - name: Install dependencies (fallback to npm install if no lockfile)
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Decode Service Account JSON
+        working-directory: "Property Appraiser Scripts"
+        run: base64 -d service-account_base64.txt > service-account.json
+
+      - name: Run Citrus County Property Appraiser script
+        working-directory: "Property Appraiser Scripts"
+        env:
+          HEADLESS: 'true'
+          CHROME_PATH: '/usr/bin/google-chrome-stable'
+          GOOGLE_APPLICATION_CREDENTIALS: './service-account.json'
+        run: node citrusPA_11.mjs
+
+  Citrus_PA-12:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
+
+      - name: Install Chrome and Chromedriver
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget unzip xvfb libxi6 libxss1 libnss3 libatk-bridge2.0-0 libgtk-3-0
+          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -f -y
+
+      - name: Install dependencies (fallback to npm install if no lockfile)
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Decode Service Account JSON
+        working-directory: "Property Appraiser Scripts"
+        run: base64 -d service-account_base64.txt > service-account.json
+
+      - name: Run Citrus County Property Appraiser script
+        working-directory: "Property Appraiser Scripts"
+        env:
+          HEADLESS: 'true'
+          CHROME_PATH: '/usr/bin/google-chrome-stable'
+          GOOGLE_APPLICATION_CREDENTIALS: './service-account.json'
+        run: node citrusPA_12.mjs
+
+  Citrus_PA-13:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
+
+      - name: Install Chrome and Chromedriver
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget unzip xvfb libxi6 libxss1 libnss3 libatk-bridge2.0-0 libgtk-3-0
+          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -f -y
+
+      - name: Install dependencies (fallback to npm install if no lockfile)
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Decode Service Account JSON
+        working-directory: "Property Appraiser Scripts"
+        run: base64 -d service-account_base64.txt > service-account.json
+
+      - name: Run Citrus County Property Appraiser script
+        working-directory: "Property Appraiser Scripts"
+        env:
+          HEADLESS: 'true'
+          CHROME_PATH: '/usr/bin/google-chrome-stable'
+          GOOGLE_APPLICATION_CREDENTIALS: './service-account.json'
+        run: node citrusPA_13.mjs
+
+  Citrus_PA-14:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
+
+      - name: Install Chrome and Chromedriver
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget unzip xvfb libxi6 libxss1 libnss3 libatk-bridge2.0-0 libgtk-3-0
+          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -f -y
+
+      - name: Install dependencies (fallback to npm install if no lockfile)
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Decode Service Account JSON
+        working-directory: "Property Appraiser Scripts"
+        run: base64 -d service-account_base64.txt > service-account.json
+
+      - name: Run Citrus County Property Appraiser script
+        working-directory: "Property Appraiser Scripts"
+        env:
+          HEADLESS: 'true'
+          CHROME_PATH: '/usr/bin/google-chrome-stable'
+          GOOGLE_APPLICATION_CREDENTIALS: './service-account.json'
+        run: node citrusPA_14.mjs
+
+  Citrus_PA-15:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
+
+      - name: Install Chrome and Chromedriver
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget unzip xvfb libxi6 libxss1 libnss3 libatk-bridge2.0-0 libgtk-3-0
+          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -f -y
+
+      - name: Install dependencies (fallback to npm install if no lockfile)
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Decode Service Account JSON
+        working-directory: "Property Appraiser Scripts"
+        run: base64 -d service-account_base64.txt > service-account.json
+
+      - name: Run Citrus County Property Appraiser script
+        working-directory: "Property Appraiser Scripts"
+        env:
+          HEADLESS: 'true'
+          CHROME_PATH: '/usr/bin/google-chrome-stable'
+          GOOGLE_APPLICATION_CREDENTIALS: './service-account.json'
+        run: node citrusPA_15.mjs
+
+  Citrus_PA-16:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
+
+      - name: Install Chrome and Chromedriver
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget unzip xvfb libxi6 libxss1 libnss3 libatk-bridge2.0-0 libgtk-3-0
+          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -f -y
+
+      - name: Install dependencies (fallback to npm install if no lockfile)
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Decode Service Account JSON
+        working-directory: "Property Appraiser Scripts"
+        run: base64 -d service-account_base64.txt > service-account.json
+
+      - name: Run Citrus County Property Appraiser script
+        working-directory: "Property Appraiser Scripts"
+        env:
+          HEADLESS: 'true'
+          CHROME_PATH: '/usr/bin/google-chrome-stable'
+          GOOGLE_APPLICATION_CREDENTIALS: './service-account.json'
+        run: node citrusPA_16.mjs
+
+  Citrus_PA-17:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
+
+      - name: Install Chrome and Chromedriver
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget unzip xvfb libxi6 libxss1 libnss3 libatk-bridge2.0-0 libgtk-3-0
+          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -f -y
+
+      - name: Install dependencies (fallback to npm install if no lockfile)
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Decode Service Account JSON
+        working-directory: "Property Appraiser Scripts"
+        run: base64 -d service-account_base64.txt > service-account.json
+
+      - name: Run Citrus County Property Appraiser script
+        working-directory: "Property Appraiser Scripts"
+        env:
+          HEADLESS: 'true'
+          CHROME_PATH: '/usr/bin/google-chrome-stable'
+          GOOGLE_APPLICATION_CREDENTIALS: './service-account.json'
+        run: node citrusPA_17.mjs
+
+  Citrus_PA-18:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
+
+      - name: Install Chrome and Chromedriver
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget unzip xvfb libxi6 libxss1 libnss3 libatk-bridge2.0-0 libgtk-3-0
+          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -f -y
+
+      - name: Install dependencies (fallback to npm install if no lockfile)
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Decode Service Account JSON
+        working-directory: "Property Appraiser Scripts"
+        run: base64 -d service-account_base64.txt > service-account.json
+
+      - name: Run Citrus County Property Appraiser script
+        working-directory: "Property Appraiser Scripts"
+        env:
+          HEADLESS: 'true'
+          CHROME_PATH: '/usr/bin/google-chrome-stable'
+          GOOGLE_APPLICATION_CREDENTIALS: './service-account.json'
+        run: node citrusPA_18.mjs
