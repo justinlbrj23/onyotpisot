@@ -29,6 +29,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const SERVICE_ACCOUNT_PATH = path.join(__dirname, "service-account.json");
 
+// optional throttle: set SHEETS_WRITE_PER_MINUTE env to match your project quota (default 60)
+const WRITE_PER_MINUTE = process.env.SHEETS_WRITE_PER_MINUTE ? Number(process.env.SHEETS_WRITE_PER_MINUTE) : 60;
+
 // -----------------------------
 // Helpers
 // -----------------------------
@@ -91,6 +94,7 @@ function similarityScore(a, b) {
   const maxLen = Math.max(a.length, b.length);
   return maxLen === 0 ? 1 : (1 - dist / maxLen);
 }
+
 // -----------------------------
 // Google Sheets
 // -----------------------------
@@ -105,6 +109,53 @@ async function getSheetsClient() {
   console.log(`[Sheets] Using service account file: ${keyPath}`);
   const auth = new google.auth.GoogleAuth({ keyFile: keyPath, scopes: ['https://www.googleapis.com/auth/spreadsheets'] });
   return google.sheets({ version: 'v4', auth });
+}
+
+// Robust sheets request wrapper with retries + exponential backoff
+async function sheetsRequestWithRetries(fn /* async function that performs the sheets op */, opts = {}) {
+  const {
+    retries = 5,
+    initialDelay = 500,
+    maxDelay = 30_000,
+    retriableStatus = (status) => status === 429 || (status >= 500 && status < 600),
+  } = opts;
+
+  let attempt = 0;
+  let delay = initialDelay;
+  while (true) {
+    try {
+      return await fn();
+    } catch (err) {
+      attempt++;
+      const status = err && err.response && err.response.status;
+      const isRetriable = status ? retriableStatus(status) : true; // network errors -> retry
+      if (attempt > retries || !isRetriable) {
+        throw err;
+      }
+      console.warn(`[Sheets] Request failed (attempt ${attempt}) status=${status || 'network'} message=${err.message}; backing off ${delay}ms`);
+      await sleep(delay);
+      delay = Math.min(maxDelay, Math.round(delay * 1.8));
+    }
+  }
+}
+
+// Simple write limiter (token-bucket style by minute window)
+let writesThisWindow = 0;
+let windowStart = Date.now();
+async function throttleWritesIfNeeded() {
+  const now = Date.now();
+  if (now - windowStart >= 60_000) {
+    windowStart = now;
+    writesThisWindow = 0;
+  }
+  if (writesThisWindow >= WRITE_PER_MINUTE) {
+    const waitMs = 60_000 - (now - windowStart) + 50;
+    console.log(`[Sheets] Throttling writes: sleeping ${waitMs}ms to respect ${WRITE_PER_MINUTE}/min`);
+    await sleep(waitMs);
+    windowStart = Date.now();
+    writesThisWindow = 0;
+  }
+  writesThisWindow++;
 }
 
 // Dismiss a modal if present. Returns true if dismissed, false if not found.
@@ -472,7 +523,7 @@ async function handleResultsAndMatch(driver, targetAddress, rowIndex) {
 }
 
 // -----------------------------
-// extractFromDetail (replaced with your exact selectors and writes)
+// extractFromDetail (replaced with batch writes and retries)
 // -----------------------------
 async function extractFromDetail(driver, sheets, rowIndexZeroBased, ranges) {
   // rowIndexZeroBased is zero-based index in arrays; convert to sheet row
@@ -495,54 +546,35 @@ async function extractFromDetail(driver, sheets, rowIndexZeroBased, ranges) {
     console.warn(`[Row ${row}] dismissPopupModalIfPresent error: ${e.message}`);
   }
 
+  // Local holders for values we'll write
+  let dorOwner = '';
+  let mailingAddress = '';
+  let extraText = '';
+  let soldAmount = '';
+  let saleDate = '';
+
   // 1. Owner + Mailing Info
   try {
     const ownerSel = By.css('#datalet_header_row > td > table > tbody > tr.DataletHeaderBottom > td:nth-child(1)');
     const mailingSel = By.css('#datalet_header_row > td > table > tbody > tr.DataletHeaderBottom > td:nth-child(2)');
-  
-    console.log(`[Row ${row}] Waiting for owner selector`); 
+
+    console.log(`[Row ${row}] Waiting for owner selector`);
     await driver.wait(until.elementLocated(ownerSel), ELEMENT_TIMEOUT_MS);
     const ownerEl = await driver.findElement(ownerSel);
     await scrollIntoView(driver, ownerEl);
     const ownerRaw = (await ownerEl.getText()).trim();
     const ownerLines = ownerRaw.split('\n').map(s => s.trim()).filter(Boolean);
-    const dorOwner = ownerLines.join(' + '); // adjust joining logic if needed
+    dorOwner = ownerLines.join(' + '); // adjust joining logic if needed
     console.log(`[Row ${row}] Owner text:`, ownerLines.slice(0,5).join(' | '));
-  
+
     console.log(`[Row ${row}] Waiting for mailing selector`);
     await driver.wait(until.elementLocated(mailingSel), ELEMENT_TIMEOUT_MS);
     const mailingEl = await driver.findElement(mailingSel);
     await scrollIntoView(driver, mailingEl);
     const mailingRaw = (await mailingEl.getText()).trim();
     const mailingLines = mailingRaw.split('\n').map(s => s.trim()).filter(Boolean);
-    const mailingAddress = mailingLines.join(' '); // combine lines into single-line address
+    mailingAddress = mailingLines.join(' '); // combine lines into single-line address
     console.log(`[Row ${row}] Mailing address preview:`, mailingLines.slice(0,5).join(' | '));
-  
-    // write dorOwner
-    try {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: SHEET_ID,
-        range: dorOwnerA1,
-        valueInputOption: 'USER_ENTERED',
-        requestBody: { values: [[dorOwner]] },
-      });
-      console.log(`[Row ${row}] Wrote dorOwner to ${dorOwnerA1}`);
-    } catch (e) {
-      console.error(`[Row ${row}] Failed writing dorOwner: ${e.message}`);
-    }
-  
-    // write mailingAddress
-    try {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: SHEET_ID,
-        range: mailingAddrA1,
-        valueInputOption: 'USER_ENTERED',
-        requestBody: { values: [[mailingAddress]] },
-      });
-      console.log(`[Row ${row}] Wrote mailingAddress to ${mailingAddrA1}`);
-    } catch (e) {
-      console.error(`[Row ${row}] Failed writing mailingAddress: ${e.message}`);
-    }
   } catch (e) {
     console.warn(`[Row ${row}] Owner/mailing extraction failed: ${e.message}`);
   }
@@ -554,14 +586,8 @@ async function extractFromDetail(driver, sheets, rowIndexZeroBased, ranges) {
     if (await exists(driver, extraFieldSel, ELEMENT_TIMEOUT_MS)) {
       const extraField = await driver.findElement(extraFieldSel);
       await scrollIntoView(driver, extraField);
-      const extraText = (await extraField.getText()).trim();
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: SHEET_ID,
-        range: extraFieldA1,
-        valueInputOption: 'USER_ENTERED',
-        requestBody: { values: [[extraText]] },
-      });
-      console.log(`[Row ${row}] Wrote extraText to ${extraFieldA1}${row}`);
+      extraText = (await extraField.getText()).trim();
+      console.log(`[Row ${row}] extraText found: ${String(extraText).slice(0,120)}`);
     } else {
       console.log(`[Row ${row}] No extra field found`);
     }
@@ -587,9 +613,6 @@ async function extractFromDetail(driver, sheets, rowIndexZeroBased, ranges) {
       const soldAmountSel = By.css('#Sales > tbody > tr:nth-child(2) > td:nth-child(2)');
       const saleDateSel = By.css('#Sales > tbody > tr:nth-child(2) > td:nth-child(1)');
 
-      let soldAmount = '';
-      let saleDate = '';
-
       try {
         if (await exists(driver, soldAmountSel, ELEMENT_TIMEOUT_MS)) {
           soldAmount = (await driver.findElement(soldAmountSel).getText()).trim();
@@ -607,30 +630,6 @@ async function extractFromDetail(driver, sheets, rowIndexZeroBased, ranges) {
       }
 
       console.log(`[Row ${row}] Extracted soldAmount: "${soldAmount}" saleDate: "${saleDate}"`);
-
-      try {
-        if (soldAmount) {
-          await sheets.spreadsheets.values.update({
-            spreadsheetId: SHEET_ID,
-            range: soldAmountA1,
-            valueInputOption: 'USER_ENTERED',
-            requestBody: { values: [[soldAmount]] },
-          });
-          console.log(`[Row ${row}] Wrote soldAmount to ${soldAmountA1}${row}`);
-        }
-      } catch (e) { console.error(`[Row ${row}] Failed writing soldAmount: ${e.message}`); }
-
-      try {
-        if (saleDate) {
-          await sheets.spreadsheets.values.update({
-            spreadsheetId: SHEET_ID,
-            range: saleDateA1,
-            valueInputOption: 'USER_ENTERED',
-            requestBody: { values: [[saleDate]] },
-          });
-          console.log(`[Row ${row}] Wrote saleDate to ${saleDateA1}${row}`);
-        }
-      } catch (e) { console.error(`[Row ${row}] Failed writing saleDate: ${e.message}`); }
     } else {
       console.log(`[Row ${row}] Sales link not found`);
     }
@@ -638,17 +637,50 @@ async function extractFromDetail(driver, sheets, rowIndexZeroBased, ranges) {
     console.warn(`[Row ${row}] Sales extraction flow failed: ${e.message}`);
   }
 
+  // Prepare batch write for only non-empty values
+  const rowWrites = [];
+  if (dorOwner) rowWrites.push({ range: dorOwnerA1, values: [[dorOwner]] });
+  if (mailingAddress) rowWrites.push({ range: mailingAddrA1, values: [[mailingAddress]] });
+  if (extraText) rowWrites.push({ range: extraFieldA1, values: [[extraText]] });
+  if (soldAmount) rowWrites.push({ range: soldAmountA1, values: [[soldAmount]] });
+  if (saleDate) rowWrites.push({ range: saleDateA1, values: [[saleDate]] });
+
   // final status marker if none already set
-  try {
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SHEET_ID,
-      range: statusA1,
-      valueInputOption: 'USER_ENTERED',
-      requestBody: { values: [['processed']] },
-    });
-    console.log(`[Row ${row}] Marked processed in ${statusA1}${row}`);
-  } catch (e) {
-    console.warn(`[Row ${row}] Failed to write status marker: ${e.message}`);
+  const statusVal = 'processed';
+  rowWrites.push({ range: statusA1, values: [[statusVal]] });
+
+  if (rowWrites.length > 0) {
+    try {
+      await throttleWritesIfNeeded();
+      await sheetsRequestWithRetries(() =>
+        sheets.spreadsheets.values.batchUpdate({
+          spreadsheetId: SHEET_ID,
+          requestBody: {
+            valueInputOption: 'USER_ENTERED',
+            data: rowWrites,
+          }
+        })
+      );
+      console.log(`[Row ${row}] Batch wrote ${rowWrites.length} ranges`);
+    } catch (e) {
+      console.error(`[Row ${row}] Batch write failed: ${e.message}`);
+      // attempt to write status with error message so row is marked and won't be retried immediately
+      try {
+        await throttleWritesIfNeeded();
+        await sheetsRequestWithRetries(() =>
+          sheets.spreadsheets.values.update({
+            spreadsheetId: SHEET_ID,
+            range: statusA1,
+            valueInputOption: 'RAW',
+            requestBody: { values: [[`error: ${String(e).slice(0,160)}`]] },
+          })
+        );
+      } catch (ee) {
+        console.error(`[Row ${row}] Failed to write error status: ${ee.message}`);
+      }
+    }
+  } else {
+    console.log(`[Row ${row}] Nothing to write for this row`);
   }
 
   console.log(`[Row ${row}] extractFromDetail: done`);
@@ -755,12 +787,15 @@ async function fetchDataAndUpdateSheet() {
           } catch (e) {
             console.error(`[Row ${rowIndex}] Detailed flow error: ${e.stack || e.message}`);
             try {
-              await sheets.spreadsheets.values.update({
-                spreadsheetId: SHEET_ID,
-                range: `${ranges.statusPrefix}${rowIndex}`,
-                valueInputOption: 'RAW',
-                requestBody: { values: [[`error: ${String(e).slice(0,200)}`]] },
-              });
+              await throttleWritesIfNeeded();
+              await sheetsRequestWithRetries(() =>
+                sheets.spreadsheets.values.update({
+                  spreadsheetId: SHEET_ID,
+                  range: `${ranges.statusPrefix}${rowIndex}`,
+                  valueInputOption: 'RAW',
+                  requestBody: { values: [[`error: ${String(e).slice(0,200)}`]] },
+                })
+              );
             } catch {}
           }
         } else {
@@ -790,12 +825,15 @@ async function fetchDataAndUpdateSheet() {
                 } catch (e) {
                   console.error(`[Row ${rowIndex}] Detailed flow error: ${e.stack || e.message}`);
                   try {
-                    await sheets.spreadsheets.values.update({
-                      spreadsheetId: SHEET_ID,
-                      range: `${ranges.statusPrefix}${rowIndex}`,
-                      valueInputOption: 'RAW',
-                      requestBody: { values: [[`error: ${String(e).slice(0,200)}`]] },
-                    });
+                    await throttleWritesIfNeeded();
+                    await sheetsRequestWithRetries(() =>
+                      sheets.spreadsheets.values.update({
+                        spreadsheetId: SHEET_ID,
+                        range: `${ranges.statusPrefix}${rowIndex}`,
+                        valueInputOption: 'RAW',
+                        requestBody: { values: [[`error: ${String(e).slice(0,200)}`]] },
+                      })
+                    );
                   } catch {}
                 }
               }
@@ -807,52 +845,73 @@ async function fetchDataAndUpdateSheet() {
                 const txt = (await getTextSafe(driver, noResultsXpath)).toLowerCase();
                 if (txt.includes('no result') || txt.includes('no results') || txt.includes('nothing found')) {
                   console.log(`[Row ${rowIndex}] Explicit no-results text found: "${txt}" -> marking no results`);
-                  await sheets.spreadsheets.values.update({
-                    spreadsheetId: SHEET_ID,
-                    range: `${ranges.statusPrefix}${rowIndex}`,
-                    valueInputOption: 'RAW',
-                    requestBody: { values: [['no results']] },
-                  });
+                  try {
+                    await throttleWritesIfNeeded();
+                    await sheetsRequestWithRetries(() =>
+                      sheets.spreadsheets.values.update({
+                        spreadsheetId: SHEET_ID,
+                        range: `${ranges.statusPrefix}${rowIndex}`,
+                        valueInputOption: 'RAW',
+                        requestBody: { values: [['no results']] },
+                      })
+                    );
+                  } catch {}
                 } else {
                   console.log(`[Row ${rowIndex}] Results present but no match -> marking no match`);
-                  await sheets.spreadsheets.values.update({
-                    spreadsheetId: SHEET_ID,
-                    range: `${ranges.statusPrefix}${rowIndex}`,
-                    valueInputOption: 'RAW',
-                    requestBody: { values: [['no match']] },
-                  });
+                  try {
+                    await throttleWritesIfNeeded();
+                    await sheetsRequestWithRetries(() =>
+                      sheets.spreadsheets.values.update({
+                        spreadsheetId: SHEET_ID,
+                        range: `${ranges.statusPrefix}${rowIndex}`,
+                        valueInputOption: 'RAW',
+                        requestBody: { values: [['no match']] },
+                      })
+                    );
+                  } catch {}
                 }
               } else {
                 console.log(`[Row ${rowIndex}] No explicit no-results element; marking no match`);
-                await sheets.spreadsheets.values.update({
-                  spreadsheetId: SHEET_ID,
-                  range: `${ranges.statusPrefix}${rowIndex}`,
-                  valueInputOption: 'RAW',
-                  requestBody: { values: [['no match']] },
-                });
+                try {
+                  await throttleWritesIfNeeded();
+                  await sheetsRequestWithRetries(() =>
+                    sheets.spreadsheets.values.update({
+                      spreadsheetId: SHEET_ID,
+                      range: `${ranges.statusPrefix}${rowIndex}`,
+                      valueInputOption: 'RAW',
+                      requestBody: { values: [['no match']] },
+                    })
+                  );
+                } catch {}
               }
             }
           } catch (e) {
             console.error(`[Row ${rowIndex}] Results flow error: ${e.stack || e.message}`);
             try {
-              await sheets.spreadsheets.values.update({
-                spreadsheetId: SHEET_ID,
-                range: `${ranges.statusPrefix}${rowIndex}`,
-                valueInputOption: 'RAW',
-                requestBody: { values: [[`error: ${String(e).slice(0,200)}`]] },
-              });
+              await throttleWritesIfNeeded();
+              await sheetsRequestWithRetries(() =>
+                sheets.spreadsheets.values.update({
+                  spreadsheetId: SHEET_ID,
+                  range: `${ranges.statusPrefix}${rowIndex}`,
+                  valueInputOption: 'RAW',
+                  requestBody: { values: [[`error: ${String(e).slice(0,200)}`]] },
+                })
+              );
             } catch {}
           }
         }
       } catch (err) {
         console.error(`[Row ${rowIndex}] Navigation/processing error: ${err.stack || err.message}`);
         try {
-          await sheets.spreadsheets.values.update({
-            spreadsheetId: SHEET_ID,
-            range: `${ranges.statusPrefix}${rowIndex}`,
-            valueInputOption: 'RAW',
-            requestBody: { values: [[`error: ${String(err).slice(0,200)}`]] },
-          });
+          await throttleWritesIfNeeded();
+          await sheetsRequestWithRetries(() =>
+            sheets.spreadsheets.values.update({
+              spreadsheetId: SHEET_ID,
+              range: `${ranges.statusPrefix}${rowIndex}`,
+              valueInputOption: 'RAW',
+              requestBody: { values: [[`error: ${String(err).slice(0,200)}`]] },
+            })
+          );
         } catch {}
       } finally {
         // ensure no dangling detail tabs
@@ -877,14 +936,14 @@ async function fetchDataAndUpdateSheet() {
     } catch (e) {
       console.warn('[Browser] Driver quit error:', e.message);
     }
-  
+
     // Perform cleanup if available
     if (driver.cleanupUserDataDir) driver.cleanupUserDataDir();
   }
 
   console.log('[Main] fetchDataAndUpdateSheet completed');
 }
-  
+
 // -----------------------------
 // Entrypoint
 // -----------------------------
