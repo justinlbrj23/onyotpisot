@@ -25,10 +25,10 @@ jobs:
             fi
   
         - name: Decode Service Account JSON
-          working-directory: "leadOrganizer"
+          working-directory: "onyotpisot"
           run: echo "${{ secrets.GCP_KEY_BASE64 }}" | base64 -d > service-account.json
-        - name: Run corpTracer-1.js
-          working-directory: "leadOrganizer"
+        - name: Run organizer_headers_tssf.js
+          working-directory: "onyotpisot"
           env:
             GOOGLE_APPLICATION_CREDENTIALS: "./service-account.json"
             GOOGLE_TOKEN_JSON: "./google-token.json"
