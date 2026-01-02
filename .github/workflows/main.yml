@@ -32,4 +32,4 @@ jobs:
           env:
             GOOGLE_APPLICATION_CREDENTIALS: "./service-account.json"
             GOOGLE_TOKEN_JSON: "./google-token.json"
-          run: node organizer_header_tssf.js
+          run: node organizer_headers_tssf.js
