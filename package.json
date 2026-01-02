@@ -1,23 +1,30 @@
 {
-  "name": "otment",
+  "name": "onyot-ai-scrapers",
   "version": "1.0.0",
-  "description": "",
-  "main": "leePA.mjs",
+  "description": "Property Appraiser Scraper Suite",
+  "main": "Property Appraiser Scripts/corpTracer.js",
   "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node Property\\ Appraiser\\ Scripts/corpTracer.js",
+    "test": "echo \"No tests defined\" && exit 0",
+    "lint": "eslint ."
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
     "axios": "^1.6.0",
     "chromedriver": "^140.0.4",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
     "googleapis": "^159.0.0",
+    "puppeteer": "^22.0.0",
     "selenium-webdriver": "^4.35.0",
     "uuidv4": "^6.2.13",
-    "puppeteer-core": "^22.0.0"
-  }
+    "node-fetch": "^2.7.0",
+    "p-limit": "^7.2.0",
+    "cheerio": "^1.1.2"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "author": "Justin Otment",
+  "license": "ISC"
 }
