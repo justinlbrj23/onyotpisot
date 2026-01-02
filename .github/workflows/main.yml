@@ -1,46 +1,35 @@
-workflow:
-  name: tssf-existing-sheet-setup
-  version: 1.1
+name: Run Surplus AI_bots
 
-  environment:
-    runtime: nodejs
-    node_version: "18+"
-    credentials:
-      google_service_account: service-account.json
+on:
+  workflow_dispatch:
 
-  parameters:
-    spreadsheet_id: 1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA
-    sheet_name: Sheet1
+jobs:
 
-  steps:
-    - id: init
-      action: system.log
-      message: "Organizing headers for existing TSSF Google Sheet"
+  corpTracer:
+      runs-on: ubuntu-latest
+      steps:
+        - name: Checkout repository
+          uses: actions/checkout@v3
 
-    - id: write_headers
-      action: node.execute
-      script: organize_tssf_headers.js
+        - name: Set up Node.js
+          uses: actions/setup-node@v3
+          with:
+            node-version: 20
 
-    - id: freeze_header
-      action: sheets.format
-      properties:
-        freeze_rows: 1
-
-    - id: validate
-      action: sheets.validate
-      rules:
-        required_headers:
-          - State
-          - County
-          - Property Address
-          - Auction Date
-          - Sale Price
-          - Opening / Minimum Bid
-          - Estimated Surplus
-          - Deal Viable? (Yes/No)
-          - File Complete? (Yes/No)
-          - Accepted / Rejected
-
-    - id: done
-      action: system.log
-      message: "TSSF sheet structure finalized"
+        - name: Install dependencies
+          run: |
+            if [ -f package-lock.json ]; then
+              npm ci
+            else
+              npm install
+            fi
+  
+        - name: Decode Service Account JSON
+          working-directory: "leadOrganizer"
+          run: echo "${{ secrets.GCP_KEY_BASE64 }}" | base64 -d > service-account.json
+        - name: Run corpTracer-1.js
+          working-directory: "leadOrganizer"
+          env:
+            GOOGLE_APPLICATION_CREDENTIALS: "./service-account.json"
+            GOOGLE_TOKEN_JSON: "./google-token.json"
+          run: node organizer_header_tssf.js
