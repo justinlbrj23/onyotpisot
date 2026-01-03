@@ -1,35 +1,38 @@
-name: Run Surplus AI_bots
+name: Run Surplus AI Bots
 
 on:
   workflow_dispatch:
 
 jobs:
-
   corpTracer:
-      runs-on: ubuntu-latest
-      steps:
-        - name: Checkout repository
-          uses: actions/checkout@v3
+    runs-on: ubuntu-latest
 
-        - name: Set up Node.js
-          uses: actions/setup-node@v3
-          with:
-            node-version: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-        - name: Install dependencies
-          run: |
-            if [ -f package-lock.json ]; then
-              npm ci
-            else
-              npm install
-            fi
-  
-        - name: Decode Service Account JSON
-          working-directory: "onyotpisot"
-          run: echo "${{ secrets.GCP_KEY_BASE64 }}" | base64 -d > service-account.json
-        - name: Run organizer_headers_tssf.js
-          
-          env:
-            GOOGLE_APPLICATION_CREDENTIALS: "./service-account.json"
-            GOOGLE_TOKEN_JSON: "./google-token.json"
-          run: node organizer_headers_tssf.js
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Write Service Account JSON
+        run: |
+          echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
+
+      - name: Verify service account file
+        run: |
+          node -e "JSON.parse(require('fs').readFileSync('service-account.json')) && console.log('JSON valid')"
+
+      - name: Run organizer_headers_tssf.js
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: service-account.json
+        run: node organizer_headers_tssf.js
