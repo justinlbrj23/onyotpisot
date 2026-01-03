@@ -32,7 +32,7 @@ jobs:
         run: |
           node -e "JSON.parse(require('fs').readFileSync('service-account.json')) && console.log('JSON valid')"
 
-      - name: Run organizer_headers_tssf.js
+      - name: Run organizer_headers_tssf.cjs
         env:
           GOOGLE_APPLICATION_CREDENTIALS: service-account.json
-        run: node organizer_headers_tssf.js
+        run: node organizer_headers_tssf.cjs
