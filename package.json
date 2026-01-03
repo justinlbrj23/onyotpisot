@@ -2,10 +2,10 @@
   "name": "onyot-ai-scrapers",
   "version": "1.0.0",
   "description": "Property Appraiser Scraper Suite",
-  "main": "Property Appraiser Scripts/corpTracer.js",
-  "type": "commonJS",
+  "main": "organizer_headers_tssf.js",
+  "type": "module",
   "scripts": {
-    "start": "node Property\\ Appraiser\\ Scripts/corpTracer.js",
+    "start": "node organizer_headers_tssf.js",
     "test": "echo \"No tests defined\" && exit 0",
     "lint": "eslint ."
   },
