@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Property Appraiser Scraper Suite",
   "main": "Property Appraiser Scripts/corpTracer.js",
-  "type": "module",
+  "type": "commonJS",
   "scripts": {
     "start": "node Property\\ Appraiser\\ Scripts/corpTracer.js",
     "test": "echo \"No tests defined\" && exit 0",
