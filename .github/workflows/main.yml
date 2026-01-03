@@ -34,14 +34,14 @@ jobs:
           fi
 
       # --------------------------------------------------
-      # Decode Service Account (BASE64 → JSON)
+      # Write RAW Service Account JSON (NO BASE64)
       # --------------------------------------------------
-      - name: Decode Service Account JSON
+      - name: Write Service Account JSON
         run: |
-          echo "${{ secrets.SERVICE_ACCOUNT_JSON_B64 }}" | base64 -d > service-account.json
+          echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
 
       # --------------------------------------------------
-      # Validate Service Account File (Fail Fast)
+      # Validate Service Account JSON (fail fast)
       # --------------------------------------------------
       - name: Validate service account JSON
         run: |
