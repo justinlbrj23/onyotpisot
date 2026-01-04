@@ -1,35 +1,71 @@
-name: Inspect MiamiDade Page
+name: Inspect Webpage & Sync to Google Sheets
 
 on:
-  workflow_dispatch:   # manual trigger only
+  workflow_dispatch:   # manual trigger
+  # Uncomment if you want scheduled runs
+  # schedule:
+  #   - cron: "0 2 * * *"  # daily at 02:00 UTC
 
 jobs:
   inspect:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      NODE_ENV: production
 
     steps:
+      # -------------------------
+      # Checkout repository
+      # -------------------------
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
+      # -------------------------
+      # Setup Node.js
+      # -------------------------
       - name: Setup Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
-          node-version: '20'   # matches "engines": { "node": ">=20" }
-          cache: 'npm'         # requires package-lock.json committed
+          node-version: 20
+          cache: npm
 
+      # -------------------------
+      # Install dependencies
+      # -------------------------
       - name: Install dependencies
-        run: npm ci            # clean install using package-lock.json
+        run: npm ci
 
-      - name: Run inspection script
-        env:
-          CLIENT_ID: ${{ secrets.CLIENT_ID }}
-          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
-          REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
-        run: node inspectMiamidade.cjs
+      # -------------------------
+      # Create Google Service Account file
+      # -------------------------
+      - name: Create service account credentials
+        run: |
+          echo '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}' > service-account.json
 
-      # Optional: upload results if you write them to a file
-      # - name: Upload inspection results
-      #   uses: actions/upload-artifact@v3
-      #   with:
-      #     name: inspection-results
-      #     path: results.json
+      # -------------------------
+      # Verify credentials (optional but helpful)
+      # -------------------------
+      - name: Validate service account file
+        run: |
+          node -e "
+          const fs = require('fs');
+          const json = JSON.parse(fs.readFileSync('service-account.json'));
+          if (!json.client_email || !json.private_key) {
+            throw new Error('Invalid service account JSON');
+          }
+          console.log('Service account OK');
+          "
+
+      # -------------------------
+      # Run scraper
+      # -------------------------
+      - name: Run webpage inspector
+        run: node inspectWebpage.cjs
+
+      # -------------------------
+      # Cleanup credentials
+      # -------------------------
+      - name: Cleanup secrets
+        if: always()
+        run: rm -f service-account.json
