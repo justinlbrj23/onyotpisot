@@ -1,61 +1,58 @@
-name: Inspect Webpage & Sync to Google Sheets
+name: Run Surplus AI Bots
 
 on:
-  workflow_dispatch
+  workflow_dispatch:
 
 jobs:
-  inspect:
+  corpTracer:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    env:
-      NODE_ENV: production
 
     steps:
-      # -------------------------
+      # --------------------------------------------------
       # Checkout repository
-      # -------------------------
+      # --------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # -------------------------
+      # --------------------------------------------------
       # Setup Node.js
-      # -------------------------
-      - name: Setup Node.js
+      # --------------------------------------------------
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      # -------------------------
+      # --------------------------------------------------
       # Install dependencies
-      # -------------------------
+      # --------------------------------------------------
       - name: Install dependencies
-        run: npm install
-
-      # -------------------------
-      # Create Google Service Account file (SAFE)
-      # -------------------------
-      - name: Create service account credentials
         run: |
-          printf '%s' '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}' > service-account.json
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
 
-      # -------------------------
-      # Validate service account file (SAFE)
-      # -------------------------
-      - name: Validate service account file
+      # --------------------------------------------------
+      # Write RAW Service Account JSON (NO BASE64)
+      # --------------------------------------------------
+      - name: Write Service Account JSON
         run: |
-          node <<'EOF'
-          const fs = require('fs');
+          echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
 
-          const raw = fs.readFileSync('service-account.json', 'utf8');
-          const json = JSON.parse(raw);
-
-          if (!json.client_email || !json.private_key) {
-            throw new Error('Invalid service account JSON');
-          }
-
-          console.log('✅ Service account OK');
-          EOF
+      # --------------------------------------------------
+      # Validate Service Account JSON (fail fast)
+      # --------------------------------------------------
+      - name: Validate service account JSON
+        run: |
+          node -e "
+            const fs = require('fs');
+            const j = JSON.parse(fs.readFileSync('service-account.json','utf8'));
+            if (!j.private_key || !j.client_email) {
+              throw new Error('Invalid service account JSON');
+            }
+            console.log('Service account OK:', j.client_email);
+          "
 
       # -------------------------
       # Run scraper
