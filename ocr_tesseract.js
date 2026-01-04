@@ -6,11 +6,11 @@ import path from "path";
 // Config
 // ------------------------------
 const inputFile = process.argv[2];
-const OUT_DIR = "W8-BEN(2).pdf";
+const OUT_DIR = "ocr_output"; // safer than using the PDF filename
 fs.mkdirSync(OUT_DIR, { recursive: true });
 
 if (!inputFile) {
-  console.error("❌ Usage: node ocr_tesseract.cjs <image|pdf>");
+  console.error("❌ Usage: node ocr_tesseract.js <image|pdf>");
   process.exit(1);
 }
 
@@ -79,13 +79,12 @@ async function runOCR() {
       }
 
       pageImages = fs.readdirSync(OUT_DIR)
-  .filter(f => f.startsWith("page-") && f.endsWith(".png'))
-  .filter(f => fs.statSync(path.join(OUT_DIR, f)).isFile()) // <-- only files
-  .sort((a, b) => {
-    const na = parseInt(a.match(/page-(\d+)/)[1], 10);
-    const nb = parseInt(b.match(/page-(\d+)/)[1], 10);
-    return na - nb;
-  });
+        .filter(f => f.startsWith("page-") && f.endsWith(".png")) // ✅ fixed quotes
+        .sort((a, b) => {
+          const na = parseInt(a.match(/page-(\d+)/)[1], 10);
+          const nb = parseInt(b.match(/page-(\d+)/)[1], 10);
+          return na - nb;
+        });
 
     } else {
       // Single image input
