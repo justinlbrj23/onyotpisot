@@ -12,7 +12,7 @@ const { google } = require('googleapis');
 const SERVICE_ACCOUNT_FILE = './service-account.json';
 const SPREADSHEET_ID = '12qESHoxzkSXwUc5Pa1gAzt8-hIw7QyiExkIh6UeDCMM';
 const SHEET_RANGE = 'Property Appraiser!A:D'; 
-const TARGET_URL = 'https://www.miamidadepa.gov/pa/real-estate/property-search.page';
+const TARGET_URL = 'https://sacramento.mytaxsale.com/reports/total_sales';
 
 // =========================
 // GOOGLE AUTH
