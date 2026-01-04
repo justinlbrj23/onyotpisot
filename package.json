@@ -7,6 +7,8 @@
   "scripts": {
     "start": "node organizer_headers_tssf.js",
     "ocr": "node ocr_tesseract.cjs",
+    "ocr:pdf": "node ocr_tesseract.cjs sample.pdf",
+    "ocr:image": "node ocr_tesseract.cjs sample.png",
     "test": "echo \"No tests defined\" && exit 0",
     "lint": "eslint ."
   },
