@@ -1,10 +1,10 @@
-name: Run Surplus AI Bots
+name: Surplus Scraping Pipeline (Artifact Mode)
 
 on:
   workflow_dispatch:
 
 jobs:
-  corpTracer:
+  TDA_webMgt:
     runs-on: ubuntu-latest
 
     steps:
@@ -55,9 +55,38 @@ jobs:
           "
 
       # --------------------------------------------------
-      # Run TSSF Header Organizer
+      # Step 1: Run TSSF Header Organizer
       # --------------------------------------------------
       - name: Run organizer_headers_tssf.cjs
-        env:
-          GOOGLE_APPLICATION_CREDENTIALS: service-account.json
         run: node organizer_headers_tssf.cjs
+
+      # --------------------------------------------------
+      # Step 2: Run Webpage Inspector (save JSON artifact)
+      # --------------------------------------------------
+      - name: Run inspectWebpage.cjs
+        run: node inspectWebpage.cjs > raw-scrape.json
+
+      - name: Upload raw scrape artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-scrape
+          path: raw-scrape.json
+
+      # --------------------------------------------------
+      # Step 3: Run Mapping Scraper (consume JSON artifact)
+      # --------------------------------------------------
+      - name: Download raw scrape artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: raw-scrape
+          path: .
+
+      - name: Run mappingScraper.cjs
+        run: node mappingScraper.cjs raw-scrape.json
+
+      # --------------------------------------------------
+      # Cleanup credentials
+      # --------------------------------------------------
+      - name: Cleanup secrets
+        if: always()
+        run: rm -f service-account.json
