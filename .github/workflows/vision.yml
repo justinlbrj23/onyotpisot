@@ -6,7 +6,7 @@ on:
       input_file:
         description: "Path to PDF or image file to OCR (relative to repo root)"
         required: true
-        default: "sample.pdf"
+        default: "W8-BEN(2).pdf"
 
 jobs:
   ocr:
@@ -40,7 +40,7 @@ jobs:
       # --------------------------------------------------
       - name: Run OCR
         run: |
-          node ocr_tesseract.cjs "${{ github.event.inputs.input_file }}"
+          node ocr_tesseract.js "${{ github.event.inputs.input_file }}"
 
       # --------------------------------------------------
       # Upload OCR output
