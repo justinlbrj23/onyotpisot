@@ -1,0 +1,78 @@
+name: OCR via Google Vision
+
+on:
+  workflow_dispatch:
+    inputs:
+      input_file:
+        description: "Path to PDF or image file to OCR (relative to repo root)"
+        required: true
+        default: "sample.png"
+
+jobs:
+  ocr:
+    runs-on: ubuntu-latest
+
+    steps:
+      # --------------------------------------------------
+      # Checkout repository
+      # --------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # --------------------------------------------------
+      # Setup Node.js
+      # --------------------------------------------------
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # --------------------------------------------------
+      # Install Node dependencies
+      # --------------------------------------------------
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      # --------------------------------------------------
+      # Write RAW Service Account JSON (NO base64)
+      # --------------------------------------------------
+      - name: Write Service Account JSON
+        run: |
+          echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
+
+      # --------------------------------------------------
+      # Validate Service Account JSON (fail fast)
+      # --------------------------------------------------
+      - name: Validate service account JSON
+        run: |
+          node -e "
+            const fs = require('fs');
+            const j = JSON.parse(fs.readFileSync('service-account.json','utf8'));
+            if (!j.private_key || !j.client_email) {
+              throw new Error('Invalid service account JSON');
+            }
+            console.log('Service account OK:', j.client_email);
+          "
+
+      # --------------------------------------------------
+      # Run Google Vision OCR
+      # --------------------------------------------------
+      - name: Run Google Vision OCR
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: service-account.json
+        run: |
+          node ocr_google_vision.cjs "${{ github.event.inputs.input_file }}"
+
+      # --------------------------------------------------
+      # Upload OCR output
+      # --------------------------------------------------
+      - name: Upload OCR output
+        uses: actions/upload-artifact@v4
+        with:
+          name: ocr-output
+          path: ocr_output.txt
