@@ -30,31 +30,34 @@ jobs:
 
       # -------------------------
       # Install dependencies
-      # (No lock file present, so npm install is correct)
       # -------------------------
       - name: Install dependencies
         run: npm install
 
       # -------------------------
-      # Create Google Service Account file
+      # Create Google Service Account file (SAFE)
       # -------------------------
       - name: Create service account credentials
         run: |
-          echo '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}' > service-account.json
+          printf '%s' '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}' > service-account.json
 
       # -------------------------
-      # Validate credentials
+      # Validate service account file (SAFE)
       # -------------------------
       - name: Validate service account file
         run: |
-          node -e "
+          node <<'EOF'
           const fs = require('fs');
-          const json = JSON.parse(fs.readFileSync('service-account.json'));
+
+          const raw = fs.readFileSync('service-account.json', 'utf8');
+          const json = JSON.parse(raw);
+
           if (!json.client_email || !json.private_key) {
             throw new Error('Invalid service account JSON');
           }
-          console.log('Service account OK');
-          "
+
+          console.log('✅ Service account OK');
+          EOF
 
       # -------------------------
       # Run scraper
