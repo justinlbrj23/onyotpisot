@@ -1,35 +1,151 @@
-name: OCR Tesseract Pipeline
+import { execSync } from "child_process";
+import fs from "fs";
+import path from "path";
 
-on:
-  workflow_dispatch:
-  push:
-    branches:
-      - main
+// ------------------------------
+// Config
+// ------------------------------
+const inputFile = process.argv[2];
+const OUT_DIR = "ocr_output";
 
-jobs:
-  ocr:
-    runs-on: ubuntu-latest
+// ------------------------------
+// Helper: clean output folder
+// ------------------------------
+if (fs.existsSync(OUT_DIR)) {
+  fs.rmSync(OUT_DIR, { recursive: true, force: true });
+}
+fs.mkdirSync(OUT_DIR, { recursive: true });
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+// ------------------------------
+// Check input file exists
+// ------------------------------
+if (!inputFile) {
+  console.error("❌ Usage: node ocr_tesseract.cjs <image|pdf>");
+  process.exit(1);
+}
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y poppler-utils ghostscript imagemagick tesseract-ocr
+if (!fs.existsSync(inputFile)) {
+  console.error(`❌ File not found: ${inputFile}`);
+  process.exit(1);
+}
 
-      - name: Show working directory and files
-        run: |
-          echo "Workspace: ${{ github.workspace }}"
-          ls -l ${{ github.workspace }}
+const ext = path.extname(inputFile).toLowerCase();
 
-      - name: Run OCR on W8-BEN(2).pdf
-        run: |
-          node ocr_tesseract.js '${{ github.workspace }}/W8-BEN(2).pdf'
+// ------------------------------
+// Validate real PDF
+// ------------------------------
+function isRealPDF(filePath) {
+  const fd = fs.openSync(filePath, "r");
+  const buffer = Buffer.alloc(5);
+  fs.readSync(fd, buffer, 0, 5, 0);
+  fs.closeSync(fd);
+  return buffer.toString() === "%PDF-";
+}
 
-      - name: Upload OCR results
-        uses: actions/upload-artifact@v4
-        with:
-          name: ocr-output
-          path: ocr_output/
+// ------------------------------
+// Regex entity extraction
+// ------------------------------
+function extractEntities(text) {
+  return {
+    amounts: text.match(/\b(?:₱|\$)?\d{1,3}(?:,\d{3})*(?:\.\d{2})?\b/g) || [],
+    dates: text.match(/\b\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b/g) || [],
+    ids: text.match(/\b[A-Z0-9]{6,}\b/g) || []
+  };
+}
+
+// ------------------------------
+// Image preprocessing
+// ------------------------------
+function preprocessImage(inputPath, outputPath) {
+  execSync(
+    `convert "${inputPath}" -colorspace Gray -resize 300% -contrast-stretch 0 "${outputPath}"`
+  );
+}
+
+// ------------------------------
+// OCR pipeline
+// ------------------------------
+async function runOCR() {
+  try {
+    let pageImages = [];
+
+    if (ext === ".pdf") {
+      console.log("📄 PDF detected — validating...");
+
+      if (!isRealPDF(inputFile)) {
+        throw new Error("File has .pdf extension but is NOT a valid PDF");
+      }
+
+      console.log("✅ PDF valid — converting pages to images...");
+      try {
+        execSync(`pdftoppm "${inputFile}" ${OUT_DIR}/page -png`);
+      } catch {
+        console.warn("⚠️ pdftoppm failed — attempting PDF normalization...");
+        const normalizedPDF = `${OUT_DIR}/normalized.pdf`;
+        execSync(
+          `gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dNOPAUSE -dQUIET -dBATCH -sOutputFile="${normalizedPDF}" "${inputFile}"`
+        );
+        execSync(`pdftoppm "${normalizedPDF}" ${OUT_DIR}/page -png`);
+      }
+
+      // Only keep actual files (fixes EISDIR)
+      pageImages = fs.readdirSync(OUT_DIR)
+        .filter(f => f.startsWith("page-") && f.endsWith(".png"))
+        .filter(f => fs.statSync(path.join(OUT_DIR, f)).isFile())
+        .sort((a, b) => {
+          const na = parseInt(a.match(/page-(\d+)/)[1], 10);
+          const nb = parseInt(b.match(/page-(\d+)/)[1], 10);
+          return na - nb;
+        });
+
+    } else {
+      // Single image input
+      const target = `${OUT_DIR}/page-1.png`;
+      fs.copyFileSync(inputFile, target);
+      pageImages = ["page-1.png"];
+    }
+
+    if (pageImages.length === 0) {
+      throw new Error("No pages found to OCR after conversion");
+    }
+
+    console.log("Files to process:", pageImages);
+
+    let combinedText = "";
+    const jsonResults = [];
+
+    for (let i = 0; i < pageImages.length; i++) {
+      const pageNum = i + 1;
+      const rawPath = `${OUT_DIR}/${pageImages[i]}`;
+      const cleanPath = `${OUT_DIR}/clean-page-${pageNum}.png`;
+
+      console.log(`🔍 OCR page ${pageNum}`);
+      preprocessImage(rawPath, cleanPath);
+
+      let text = "";
+      try {
+        text = execSync(`tesseract "${cleanPath}" stdout`, { encoding: "utf8" });
+      } catch (e) {
+        console.warn(`⚠️ Tesseract failed on page ${pageNum}: ${e.message}`);
+        // Optional: call Google Vision API as fallback here
+      }
+
+      const entities = extractEntities(text);
+      fs.writeFileSync(`${OUT_DIR}/page-${pageNum}.txt`, text);
+
+      jsonResults.push({ page: pageNum, entities, text });
+      combinedText += `\n\n===== PAGE ${pageNum} =====\n\n${text}`;
+    }
+
+    fs.writeFileSync(`${OUT_DIR}/full_text.txt`, combinedText);
+    fs.writeFileSync(`${OUT_DIR}/output.json`, JSON.stringify(jsonResults, null, 2));
+
+    console.log("✅ OCR complete (Tesseract + PDF normalization + EISDIR safe)");
+
+  } catch (err) {
+    console.error("❌ OCR failed:", err.message);
+    process.exit(1);
+  }
+}
+
+runOCR();
