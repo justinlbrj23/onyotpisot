@@ -28,9 +28,9 @@ jobs:
           node-version: 20
 
       # --------------------------------------------------
-      # Install Node dependencies
+      # Install dependencies
       # --------------------------------------------------
-      - name: Install dependencies
+      - name: Install base dependencies
         run: |
           if [ -f package-lock.json ]; then
             npm ci
@@ -39,14 +39,20 @@ jobs:
           fi
 
       # --------------------------------------------------
-      # Write RAW Service Account JSON (NO base64)
+      # Ensure Google Vision is installed
+      # --------------------------------------------------
+      - name: Install Google Vision dependency
+        run: npm install @google-cloud/vision
+
+      # --------------------------------------------------
+      # Write RAW Service Account JSON
       # --------------------------------------------------
       - name: Write Service Account JSON
         run: |
           echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
 
       # --------------------------------------------------
-      # Validate Service Account JSON (fail fast)
+      # Validate Service Account JSON
       # --------------------------------------------------
       - name: Validate service account JSON
         run: |
