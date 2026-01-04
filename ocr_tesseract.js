@@ -79,12 +79,13 @@ async function runOCR() {
       }
 
       pageImages = fs.readdirSync(OUT_DIR)
-        .filter(f => f.startsWith("page-") && f.endsWith(".png"))
-        .sort((a, b) => {
-          const na = parseInt(a.match(/page-(\d+)/)[1], 10);
-          const nb = parseInt(b.match(/page-(\d+)/)[1], 10);
-          return na - nb;
-        });
+  .filter(f => f.startsWith("page-") && f.endsWith(".png'))
+  .filter(f => fs.statSync(path.join(OUT_DIR, f)).isFile()) // <-- only files
+  .sort((a, b) => {
+    const na = parseInt(a.match(/page-(\d+)/)[1], 10);
+    const nb = parseInt(b.match(/page-(\d+)/)[1], 10);
+    return na - nb;
+  });
 
     } else {
       // Single image input
