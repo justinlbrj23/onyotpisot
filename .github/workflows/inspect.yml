@@ -1,0 +1,35 @@
+name: Inspect MiamiDade Page
+
+on:
+  workflow_dispatch:   # manual trigger only
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'   # matches "engines": { "node": ">=20" }
+          cache: 'npm'         # requires package-lock.json committed
+
+      - name: Install dependencies
+        run: npm ci            # clean install using package-lock.json
+
+      - name: Run inspection script
+        env:
+          CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
+        run: node inspectMiamidade.cjs
+
+      # Optional: upload results if you write them to a file
+      # - name: Upload inspection results
+      #   uses: actions/upload-artifact@v3
+      #   with:
+      #     name: inspection-results
+      #     path: results.json
