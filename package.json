@@ -1,15 +1,17 @@
 {
   "name": "onyot-ai-scrapers",
   "version": "1.0.0",
-  "description": "Property Appraiser Scraper Suite",
+  "description": "Property Appraiser Scraper Suite with OCR and Google Sheets automation",
   "main": "organizer_headers_tssf.js",
   "type": "module",
   "scripts": {
     "start": "node organizer_headers_tssf.js",
+    "ocr": "node ocr_google_vision.cjs",
     "test": "echo \"No tests defined\" && exit 0",
     "lint": "eslint ."
   },
   "dependencies": {
+    "@google-cloud/vision": "^4.3.2",
     "axios": "^1.6.0",
     "chromedriver": "^140.0.4",
     "dotenv": "^17.2.1",
