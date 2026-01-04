@@ -1,4 +1,4 @@
-name: Run Surplus AI Bots
+name: Run Webpage Element-iNnator
 
 on:
   workflow_dispatch:
