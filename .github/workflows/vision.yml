@@ -1,52 +1,41 @@
-name: Free OCR via Tesseract
+name: OCR Tesseract Pipeline
 
 on:
   workflow_dispatch:
-    inputs:
-      input_file:
-        description: "Path to PDF or image file to OCR (relative to repo root)"
-        required: true
-        default: "W8-BEN(2).pdf"
+  push:
+    branches:
+      - main
 
 jobs:
   ocr:
     runs-on: ubuntu-latest
 
     steps:
-      # --------------------------------------------------
-      # Checkout repository
-      # --------------------------------------------------
+      # Checkout repo
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # --------------------------------------------------
-      # Setup Node.js
-      # --------------------------------------------------
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      # --------------------------------------------------
-      # Install OCR system dependencies (FREE)
-      # --------------------------------------------------
-      - name: Install Tesseract OCR
+      # Ensure dependencies are installed
+      - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y tesseract-ocr poppler-utils
+          sudo apt-get install -y poppler-utils ghostscript imagemagick tesseract-ocr
 
-      # --------------------------------------------------
-      # Run OCR (Tesseract)
-      # --------------------------------------------------
-      - name: Run OCR
+      # Confirm working directory and list files
+      - name: Show working directory and files
         run: |
-          node ocr_tesseract.js "${{ github.event.inputs.input_file }}"
+          echo "Current working directory: $(pwd)"
+          ls -l
 
-      # --------------------------------------------------
-      # Upload OCR output
-      # --------------------------------------------------
-      - name: Upload OCR output
+      # Run OCR script
+      - name: Run OCR on W8-BEN(2).pdf
+        working-directory: ${{ github.workspace }}
+        run: |
+          node ocr_tesseract.js "./W8-BEN(2).pdf"
+
+      # Upload results as artifacts
+      - name: Upload OCR results
         uses: actions/upload-artifact@v4
         with:
           name: ocr-output
-          path: ocr_output.txt
+          path: ocr_output/
