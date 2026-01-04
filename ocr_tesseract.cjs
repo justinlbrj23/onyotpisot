@@ -6,7 +6,7 @@ import path from "path";
 // Config
 // ------------------------------
 const inputFile = process.argv[2];
-const OUT_DIR = "ocr_output";
+const OUT_DIR = "W8-BEN(2).pdf";
 fs.mkdirSync(OUT_DIR, { recursive: true });
 
 if (!inputFile) {
