@@ -1,12 +1,12 @@
 name: OCR Pipeline
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:   # Manual trigger
     inputs:
-      pdf_file:
-        description: 'PDF file to OCR'
+      pdf_folder:
+        description: 'Folder containing PDFs to OCR'
         required: true
-        default: 'sample.pdf'
+        default: 'pdfs'
 
 jobs:
   ocr:
@@ -29,11 +29,26 @@ jobs:
       - name: Install npm dependencies
         run: npm install
 
-      - name: Run OCR
+      - name: Run OCR on all PDFs
         run: |
-          FILE="${{ github.event.inputs.pdf_file }}"
-          echo "📄 Running OCR on $FILE..."
-          node ocr_tesseract.js "$FILE"
+          FOLDER="${{ github.event.inputs.pdf_folder }}"
+          if [ ! -d "$FOLDER" ]; then
+            echo "❌ Folder '$FOLDER' does not exist!"
+            exit 1
+          fi
+
+          shopt -s nullglob
+          PDF_FILES=("$FOLDER"/*.pdf)
+
+          if [ ${#PDF_FILES[@]} -eq 0 ]; then
+            echo "❌ No PDF files found in $FOLDER"
+            exit 1
+          fi
+
+          for FILE in "${PDF_FILES[@]}"; do
+            echo "📄 Running OCR on $FILE..."
+            node ocr_tesseract.js "$FILE"
+          done
 
       - name: List OCR output
         run: ls -lh ocr_output/
