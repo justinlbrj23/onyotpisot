@@ -1,19 +1,30 @@
 // mappingScraper.cjs
-const puppeteer = require("puppeteer");
-const cheerio = require("cheerio");
+// Requires:
+// npm install googleapis
+
+const fs = require("fs");
 const { google } = require("googleapis");
 
+// =========================
+// CONFIG
+// =========================
 const SERVICE_ACCOUNT_FILE = "./service-account.json";
 const SPREADSHEET_ID = "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
 const SHEET_NAME = "raw_main";
-const TARGET_URL = "https://sacramento.mytaxsale.com/reports/total_sales";
+const INPUT_FILE = process.argv[2] || "raw-scrape.json"; // JSON artifact from inspectWebpage.cjs
 
+// =========================
+// GOOGLE AUTH
+// =========================
 const auth = new google.auth.GoogleAuth({
   keyFile: SERVICE_ACCOUNT_FILE,
   scopes: ["https://www.googleapis.com/auth/spreadsheets"],
 });
 const sheets = google.sheets({ version: "v4", auth });
 
+// =========================
+// HEADERS (TSSF-COMPLIANT)
+// =========================
 const HEADERS = [
   "State","County","Property Address","City","ZIP Code","Parcel / APN Number","Case Number",
   "Auction Date","Sale Finalized (Yes/No)","Sale Price","Opening / Minimum Bid","Estimated Surplus","Meets Minimum Surplus? (Yes/No)",
@@ -25,85 +36,76 @@ const HEADERS = [
   "File Submitted? (Yes/No)","Submission Date","Accepted / Rejected","Kickback Reason","Researcher Name"
 ];
 
-// -------------------------
-// RULES: keyword/regex mapping
-// -------------------------
-const mappingRules = {
-  "Parcel / APN Number": [/parcel/i, /APN/i],
-  "ZIP Code": [/^\d{5}$/],
-  "Sale Price": [/sale price/i, /\$\d+/],
-  "Auction Date": [/auction date/i, /\d{2}\/\d{2}\/\d{4}/],
-  "County": [/county/i],
-  "State": [/california/i, /CA\b/],
-  "Property Address": [/address/i],
-  "Case Number": [/case/i],
-  // … expand rules for other headers
-};
+// =========================
+// FUNCTION: Map raw scrape row → TSSF headers
+// =========================
+function mapRow(raw) {
+  const mapped = {};
+  HEADERS.forEach(h => (mapped[h] = "")); // initialize all headers
 
-// -------------------------
-// Scrape page
-// -------------------------
-async function inspectPage(url) {
-  const browser = await puppeteer.launch({ headless: "new", args: ["--no-sandbox"] });
-  const page = await browser.newPage();
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 120000 });
-  const html = await page.content();
-  await browser.close();
-  return cheerio.load(html);
-}
+  // Basic mappings from table fields
+  mapped["Parcel / APN Number"] = raw.apn;
+  mapped["Auction Date"] = raw.saleDate;
+  mapped["Opening / Minimum Bid"] = raw.openingBid;
+  mapped["Sale Price"] = raw.winningBid;
+  mapped["Case Number"] = raw.id;
+  mapped["Notes"] = raw.notes || "";
 
-// -------------------------
-// Match text to header
-// -------------------------
-function matchHeader(text) {
-  for (const [header, patterns] of Object.entries(mappingRules)) {
-    for (const p of patterns) {
-      if (p.test(text)) return header;
-    }
+  // Optional: derive surplus if both bids are numeric
+  const open = parseCurrency(raw.openingBid);
+  const win = parseCurrency(raw.winningBid);
+  if (open !== null && win !== null) {
+    const surplus = win - open;
+    mapped["Estimated Surplus"] = surplus.toString();
+    mapped["Meets Minimum Surplus? (Yes/No)"] = surplus > 0 ? "Yes" : "No";
   }
-  return null;
+
+  // Static context (since site is Sacramento County, CA)
+  mapped["State"] = "California";
+  mapped["County"] = "Sacramento";
+
+  return mapped;
 }
 
-// -------------------------
-// Build row object
-// -------------------------
-function buildRow($) {
-  const row = {};
-  HEADERS.forEach(h => row[h] = ""); // initialize empty row
-
-  $("*").each((_, el) => {
-    const text = $(el).text().replace(/\s+/g, " ").trim();
-    if (!text) return;
-    const header = matchHeader(text);
-    if (header) {
-      row[header] = text;
-      console.log(`Mapped "${text}" → ${header}`);
-    }
-  });
-
-  return row;
+// =========================
+// Helper: parse currency string → number
+// =========================
+function parseCurrency(str) {
+  if (!str) return null;
+  const num = parseFloat(str.replace(/[^0-9.-]/g, ""));
+  return isNaN(num) ? null : num;
 }
 
-// -------------------------
-// Append to sheet
-// -------------------------
-async function appendRow(row) {
-  const values = HEADERS.map(h => row[h] || "");
+// =========================
+// FUNCTION: Append rows to sheet
+// =========================
+async function appendRows(rows) {
+  const values = rows.map(row => HEADERS.map(h => row[h] || ""));
   await sheets.spreadsheets.values.append({
     spreadsheetId: SPREADSHEET_ID,
     range: SHEET_NAME,
     valueInputOption: "RAW",
     insertDataOption: "INSERT_ROWS",
-    requestBody: { values: [values] },
+    requestBody: { values },
   });
-  console.log("✅ Row appended.");
+  console.log(`✅ Appended ${values.length} mapped rows.`);
 }
 
-// -------------------------
-// MAIN
-// -------------------------
+// =========================
+// MAIN EXECUTION
+// =========================
 (async () => {
-  const $ = await inspectPage(TARGET_URL);
-  const row = buildRow($);
-  await appendRow(row);
+  if (!fs.existsSync(INPUT_FILE)) {
+    console.error(`❌ Input file not found: ${INPUT_FILE}`);
+    process.exit(1);
+  }
+
+  const rawData = JSON.parse(fs.readFileSync(INPUT_FILE, "utf8"));
+  console.log(`📦 Loaded ${rawData.length} raw rows from ${INPUT_FILE}`);
+
+  const mappedRows = rawData.map(mapRow);
+  console.log("🧪 Sample mapped row:", mappedRows[0]);
+
+  await appendRows(mappedRows);
+  console.log("🏁 Done.");
 })();
