@@ -61,10 +61,43 @@ jobs:
         run: node organizer_headers_tssf.cjs
 
       # --------------------------------------------------
-      # Step 2: Run Webpage Inspector (save JSON artifact)
+      # Step 2: Run Webpage Inspector (writes JSON internally)
       # --------------------------------------------------
       - name: Run inspectWebpage.cjs
-        run: node inspectWebpage.cjs > raw-scrape.json
+        run: node inspectWebpage.cjs
+
+      # --------------------------------------------------
+      # Sanity check: validate raw-scrape.json
+      # --------------------------------------------------
+      - name: Validate raw-scrape.json
+        run: |
+          node -e "
+            const fs = require('fs');
+            const data = fs.readFileSync('raw-scrape.json','utf8');
+            let parsed;
+            try {
+              parsed = JSON.parse(data);
+            } catch (err) {
+              console.error('❌ Invalid JSON in raw-scrape.json:', err.message);
+              process.exit(1);
+            }
+            if (!Array.isArray(parsed)) {
+              console.error('❌ raw-scrape.json must be an array of rows');
+              process.exit(1);
+            }
+            if (parsed.length === 0) {
+              console.error('❌ raw-scrape.json is empty');
+              process.exit(1);
+            }
+            const sample = parsed[0];
+            const required = ['id','apn','saleDate','openingBid','winningBid','notes'];
+            const missing = required.filter(k => !(k in sample));
+            if (missing.length) {
+              console.error('❌ Missing keys in sample row:', missing.join(', '));
+              process.exit(1);
+            }
+            console.log('✅ raw-scrape.json is valid and schema-compliant');
+          "
 
       - name: Upload raw scrape artifact
         uses: actions/upload-artifact@v4
