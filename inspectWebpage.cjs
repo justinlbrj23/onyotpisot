@@ -52,7 +52,7 @@ async function scrapePaginatedTable(url) {
         trs
           .map(tr => {
             const tds = Array.from(tr.querySelectorAll('td'));
-            if (tds.length < 6) return null; // skip header or malformed rows
+            if (tds.length < 6) return null;
             return {
               id: tds[0]?.innerText.trim() || '',
               apn: tds[1]?.innerText.trim() || '',
@@ -81,26 +81,33 @@ async function scrapePaginatedTable(url) {
       allRows.push(...rows);
       console.log(`📦 Page ${pageIndex} rows: ${rows.length}`);
 
-      // Try to find "Next" button in paginator
-      const nextButton = await page.$('a.next, button.next, a[aria-label="Next"]');
-      if (!nextButton) {
+      // Capture current table HTML to detect change
+      const previousTable = await page.$eval('table', el => el.innerHTML);
+
+      // Try to find "Next" button using XPath
+      const nextButton = await page.$x("//a[contains(text(),'Next') or contains(text(),'Next »')]");
+      if (nextButton.length === 0) {
         console.log('⏹ No Next button found, stopping.');
         break;
       }
 
       const isDisabled = await page.evaluate(el =>
         el.hasAttribute('disabled') || el.classList.contains('disabled'),
-        nextButton
+        nextButton[0]
       );
       if (isDisabled) {
         console.log('⏹ Next button disabled, stopping.');
         break;
       }
 
-      // Click next and wait for table to reload
+      // Click next and wait for table content to change
       await Promise.all([
-        nextButton.click(),
-        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }),
+        nextButton[0].click(),
+        page.waitForFunction(
+          prev => document.querySelector('table')?.innerHTML !== prev,
+          { timeout: 60000 },
+          previousTable
+        ),
       ]);
 
       pageIndex++;
