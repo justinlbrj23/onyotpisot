@@ -56,7 +56,7 @@ async function scrapePaginatedTable(url) {
             if (tds.length < 3) return null; // at least APN, Case Number, Auction Date
             return {
               apn: tds[0]?.innerText.trim() || '',
-              caseNumber: tds[1]?.innerText.trim() || '',
+              id: tds[1]?.innerText.trim() || '',
               saleDate: tds[2]?.innerText.trim() || '',
               openingBid: tds[3]?.innerText.trim() || '',
               winningBid: tds[4]?.innerText.trim() || '',
