@@ -51,13 +51,12 @@ function mapRow(raw) {
   mapped["Case Number"] = raw.id;
   mapped["Notes"] = raw.notes || "";
 
-  // Optional: derive surplus if both bids are numeric
-  const open = parseCurrency(raw.openingBid);
-  const win = parseCurrency(raw.winningBid);
-  if (open !== null && win !== null) {
-    const surplus = win - open;
-    mapped["Estimated Surplus"] = surplus.toString();
-    mapped["Meets Minimum Surplus? (Yes/No)"] = surplus > 0 ? "Yes" : "No";
+  // Use surplus fields directly from raw JSON
+  if (raw.surplus !== undefined && raw.surplus !== null) {
+    mapped["Estimated Surplus"] = raw.surplus.toString();
+  }
+  if (raw.meetsMinimumSurplus) {
+    mapped["Meets Minimum Surplus? (Yes/No)"] = raw.meetsMinimumSurplus;
   }
 
   // Static context (since site is Sacramento County, CA)
@@ -65,15 +64,6 @@ function mapRow(raw) {
   mapped["County"] = "Sacramento";
 
   return mapped;
-}
-
-// =========================
-// Helper: parse currency string → number
-// =========================
-function parseCurrency(str) {
-  if (!str) return null;
-  const num = parseFloat(str.replace(/[^0-9.-]/g, ""));
-  return isNaN(num) ? null : num;
 }
 
 // =========================
