@@ -1,6 +1,6 @@
 // inspectWebpage.cjs
 // Requires:
-// npm install puppeteer cheerio
+// npm install puppeteer
 
 const puppeteer = require('puppeteer');
 const fs = require('fs');
@@ -36,20 +36,19 @@ async function scrapePaginatedTable(url) {
 
     while (true) {
       console.log(`🔄 Scraping page ${pageIndex}...`);
-      await page.waitForSelector('table', { timeout: 60000 });
+      await page.waitForSelector('table tr td', { timeout: 60000 });
 
+      // Extract rows from current page
       const rows = await page.$$eval('table tr', trs =>
         trs
           .map(tr => {
             const tds = Array.from(tr.querySelectorAll('td'));
-            if (tds.length === 0) return null;
+            if (tds.length < 3) return null; // skip header or malformed rows
             return {
-              id: tds[0]?.innerText.trim() || '',
-              apn: tds[1]?.innerText.trim() || '',
+              apn: tds[0]?.innerText.trim() || '',
+              caseNumber: tds[1]?.innerText.trim() || '',
               saleDate: tds[2]?.innerText.trim() || '',
-              openingBid: tds[3]?.innerText.trim() || '',
-              winningBid: tds[4]?.innerText.trim() || '',
-              notes: tds[5]?.innerText.trim() || '',
+              // optional: add more if table has extra columns
             };
           })
           .filter(Boolean)
@@ -58,15 +57,23 @@ async function scrapePaginatedTable(url) {
       allRows.push(...rows);
       console.log(`📦 Page ${pageIndex} rows: ${rows.length}`);
 
-      const nextButton = await page.$('a[aria-label="Next"], button:contains("Next")');
-      if (!nextButton) break;
+      // Try to find "Next" button in paginator
+      const nextButton = await page.$('a.next, button.next, a[aria-label="Next"]');
+      if (!nextButton) {
+        console.log('⏹ No Next button found, stopping.');
+        break;
+      }
 
       const isDisabled = await page.evaluate(el =>
         el.hasAttribute('disabled') || el.classList.contains('disabled'),
         nextButton
       );
-      if (isDisabled) break;
+      if (isDisabled) {
+        console.log('⏹ Next button disabled, stopping.');
+        break;
+      }
 
+      // Click next and wait for table to reload
       await Promise.all([
         nextButton.click(),
         page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }),
