@@ -9,7 +9,7 @@ const { google } = require('googleapis');
 // =========================
 // CONFIG
 // =========================
-const SPREADSHEET_ID = '1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA'; // REQUIRED
+const SPREADSHEET_ID = '1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA';
 const SHEET_NAME = 'web_tda';
 const URL_RANGE = 'C2:C';
 
@@ -48,7 +48,7 @@ async function loadTargetUrls() {
 }
 
 // =========================
-// Scrape paginated table
+// Scrape paginated table (DETACHED-NODE SAFE)
 // =========================
 async function scrapePaginatedTable(browser, url) {
   const page = await browser.newPage();
@@ -62,8 +62,18 @@ async function scrapePaginatedTable(browser, url) {
 
   while (pageIndex <= MAX_PAGES) {
     console.log(`🔄 Page ${pageIndex}`);
+
     await page.waitForSelector('table tr td', { timeout: 60000 });
 
+    // Fingerprint table to detect real change
+    const tableFingerprint = await page.$$eval(
+      'table tr td:first-child',
+      tds => tds.map(td => td.innerText.trim()).join('|')
+    );
+
+    // -------------------------
+    // Extract VALID rows only
+    // -------------------------
     const rows = await page.$$eval('table tr', trs =>
       trs
         .map(tr => {
@@ -77,7 +87,7 @@ async function scrapePaginatedTable(browser, url) {
           const winningBid = tds[4].innerText.trim();
           const notes = tds[5].innerText.trim();
 
-          // HARD VALIDATION (kills headers, footers, announcements)
+          // HARD VALIDATION
           if (!/^\d+$/.test(id)) return null;
           if (!saleDate.includes('/')) return null;
           if (!openingBid.includes('$')) return null;
@@ -110,30 +120,34 @@ async function scrapePaginatedTable(browser, url) {
     collected.push(...rows);
     console.log(`📦 Valid rows: ${rows.length}`);
 
-    const previousTable = await page.$eval('table', el => el.innerHTML);
-
-    const nextHandle = await page.evaluateHandle(() => {
-      return [...document.querySelectorAll('a')]
-        .find(a => a.textContent.trim().toLowerCase().startsWith('next')) || null;
+    // -------------------------
+    // SAFE pagination (no ElementHandle)
+    // -------------------------
+    const hasNext = await page.evaluate(() => {
+      const next = [...document.querySelectorAll('a')]
+        .find(a => a.textContent.trim().toLowerCase().startsWith('next'));
+      if (!next) return false;
+      if (next.classList.contains('disabled')) return false;
+      if (next.hasAttribute('disabled')) return false;
+      next.click();
+      return true;
     });
 
-    const nextExists = await nextHandle.jsonValue();
-    if (!nextExists) break;
+    if (!hasNext) {
+      console.log('⏹ No Next page available');
+      break;
+    }
 
-    const disabled = await page.evaluate(
-      el => el.hasAttribute('disabled') || el.classList.contains('disabled'),
-      nextHandle
+    await page.waitForFunction(
+      prev => {
+        const cells = [...document.querySelectorAll('table tr td:first-child')]
+          .map(td => td.innerText.trim())
+          .join('|');
+        return cells !== prev;
+      },
+      { timeout: 60000 },
+      tableFingerprint
     );
-    if (disabled) break;
-
-    await Promise.all([
-      nextHandle.click(),
-      page.waitForFunction(
-        prev => document.querySelector('table')?.innerHTML !== prev,
-        { timeout: 60000 },
-        previousTable
-      ),
-    ]);
 
     pageIndex++;
   }
@@ -146,15 +160,13 @@ async function scrapePaginatedTable(browser, url) {
 // MAIN
 // =========================
 (async () => {
-  console.log('📥 Loading target URLs from Google Sheets...');
-  const targetUrls = await loadTargetUrls();
+  console.log('📥 Loading URLs from Google Sheets...');
+  const urls = await loadTargetUrls();
 
-  if (!targetUrls.length) {
-    console.error('❌ No URLs found in sheet.');
+  if (!urls.length) {
+    console.error('❌ No URLs found in sheet');
     process.exit(1);
   }
-
-  console.log(`✅ ${targetUrls.length} URLs loaded`);
 
   const browser = await puppeteer.launch({
     headless: 'new',
@@ -167,19 +179,19 @@ async function scrapePaginatedTable(browser, url) {
 
   const allResults = [];
 
-  for (const url of targetUrls) {
+  for (const url of urls) {
     try {
       const rows = await scrapePaginatedTable(browser, url);
       rows.forEach(r => (r.sourceUrl = url));
       allResults.push(...rows);
     } catch (err) {
-      console.error(`❌ Failed scraping ${url}`, err);
+      console.error(`❌ Failed scraping ${url}`, err.message);
     }
   }
 
   await browser.close();
 
-  // Deduplicate (ID + APN + Sale Date)
+  // Deduplicate
   const deduped = Array.from(
     new Map(
       allResults.map(r => [`${r.id}-${r.apn}-${r.saleDate}`, r])
@@ -187,7 +199,6 @@ async function scrapePaginatedTable(browser, url) {
   );
 
   fs.writeFileSync(OUTPUT_FILE, JSON.stringify(deduped, null, 2));
-
-  console.log(`✅ Saved ${deduped.length} VALID rows to ${OUTPUT_FILE}`);
-  console.log('🏁 Done.');
+  console.log(`✅ Saved ${deduped.length} rows to ${OUTPUT_FILE}`);
+  console.log('🏁 Done');
 })();
