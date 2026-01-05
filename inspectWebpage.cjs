@@ -52,11 +52,13 @@ async function scrapePaginatedTable(url) {
         trs
           .map(tr => {
             const tds = Array.from(tr.querySelectorAll('td'));
-            if (tds.length < 6) return null;
+            // Adjusted for 3-column table: APN, Case Number, Auction Date
+            if (tds.length < 3) return null;
             return {
-              id: tds[0]?.innerText.trim() || '',
-              apn: tds[1]?.innerText.trim() || '',
+              apn: tds[0]?.innerText.trim() || '',
+              caseNumber: tds[1]?.innerText.trim() || '',
               saleDate: tds[2]?.innerText.trim() || '',
+              // If extra columns exist (Opening Bid, Winning Bid, Notes), capture them
               openingBid: tds[3]?.innerText.trim() || '',
               winningBid: tds[4]?.innerText.trim() || '',
               notes: tds[5]?.innerText.trim() || '',
@@ -65,7 +67,7 @@ async function scrapePaginatedTable(url) {
           .filter(Boolean)
       );
 
-      // Add surplus calculation
+      // Add surplus calculation if bid columns exist
       rows.forEach(r => {
         const open = parseCurrency(r.openingBid);
         const win = parseCurrency(r.winningBid);
