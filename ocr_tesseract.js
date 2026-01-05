@@ -8,6 +8,10 @@ import path from "path";
 const inputFile = process.argv[2];
 const OUT_DIR = "ocr_output";
 
+// Supported input types
+const ALLOWED_IMAGE_EXTS = [".png", ".jpg", ".jpeg"];
+const ALLOWED_PDF_EXTS = [".pdf"];
+
 // ------------------------------
 // Helper: clean output folder
 // ------------------------------
@@ -20,7 +24,7 @@ fs.mkdirSync(OUT_DIR, { recursive: true });
 // Check input file exists
 // ------------------------------
 if (!inputFile) {
-  console.error("❌ Usage: node ocr_tesseract.cjs <image|pdf>");
+  console.error("❌ Usage: node ocr_tesseract.js <image|pdf>");
   process.exit(1);
 }
 
@@ -69,7 +73,7 @@ async function runOCR() {
   try {
     let pageImages = [];
 
-    if (ext === ".pdf") {
+    if (ALLOWED_PDF_EXTS.includes(ext)) {
       console.log("📄 PDF detected — validating...");
 
       if (!isRealPDF(inputFile)) {
@@ -98,11 +102,15 @@ async function runOCR() {
           return na - nb;
         });
 
-    } else {
+    } else if (ALLOWED_IMAGE_EXTS.includes(ext)) {
       // Single image input
       const target = `${OUT_DIR}/page-1.png`;
       fs.copyFileSync(inputFile, target);
       pageImages = ["page-1.png"];
+    } else {
+      throw new Error(
+        `Unsupported file type: ${ext}. Supported types: ${ALLOWED_PDF_EXTS.concat(ALLOWED_IMAGE_EXTS).join(", ")}`
+      );
     }
 
     if (pageImages.length === 0) {
@@ -140,7 +148,7 @@ async function runOCR() {
     fs.writeFileSync(`${OUT_DIR}/full_text.txt`, combinedText);
     fs.writeFileSync(`${OUT_DIR}/output.json`, JSON.stringify(jsonResults, null, 2));
 
-    console.log("✅ OCR complete (Tesseract + PDF normalization + EISDIR safe)");
+    console.log("✅ OCR complete (Tesseract + PDF normalization + image support)");
 
   } catch (err) {
     console.error("❌ OCR failed:", err.message);
