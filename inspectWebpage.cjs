@@ -53,13 +53,11 @@ async function scrapePaginatedTable(url) {
         trs
           .map(tr => {
             const tds = Array.from(tr.querySelectorAll('td'));
-            // Adjusted for 3-column table: APN, Case Number, Auction Date
-            if (tds.length < 3) return null;
+            if (tds.length < 3) return null; // at least APN, Case Number, Auction Date
             return {
               apn: tds[0]?.innerText.trim() || '',
               caseNumber: tds[1]?.innerText.trim() || '',
               saleDate: tds[2]?.innerText.trim() || '',
-              // If extra columns exist (Opening Bid, Winning Bid, Notes), capture them
               openingBid: tds[3]?.innerText.trim() || '',
               winningBid: tds[4]?.innerText.trim() || '',
               notes: tds[5]?.innerText.trim() || '',
@@ -87,16 +85,20 @@ async function scrapePaginatedTable(url) {
       // Capture current table HTML to detect change
       const previousTable = await page.$eval('table', el => el.innerHTML);
 
-      // Try to find "Next" button using XPath
-      const nextButton = await page.$x("//a[contains(text(),'Next') or contains(text(),'Next »')]");
-      if (nextButton.length === 0) {
+      // Find "Next" link by text content
+      const nextHandle = await page.evaluateHandle(() => {
+        const links = Array.from(document.querySelectorAll('a'));
+        return links.find(a => a.textContent.trim().toLowerCase().startsWith('next')) || null;
+      });
+
+      if (!nextHandle) {
         console.log('⏹ No Next button found, stopping.');
         break;
       }
 
       const isDisabled = await page.evaluate(el =>
         el.hasAttribute('disabled') || el.classList.contains('disabled'),
-        nextButton[0]
+        nextHandle
       );
       if (isDisabled) {
         console.log('⏹ Next button disabled, stopping.');
@@ -105,7 +107,7 @@ async function scrapePaginatedTable(url) {
 
       // Click next and wait for table content to change (AJAX-safe)
       await Promise.all([
-        nextButton[0].click(),
+        nextHandle.click(),
         page.waitForFunction(
           prev => document.querySelector('table')?.innerHTML !== prev,
           { timeout: 60000 },
