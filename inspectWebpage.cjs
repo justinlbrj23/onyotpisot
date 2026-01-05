@@ -1,33 +1,21 @@
 // inspectWebpage.cjs
 // Requires:
-// npm install puppeteer cheerio googleapis
+// npm install puppeteer cheerio
 
 const puppeteer = require('puppeteer');
 const cheerio = require('cheerio');
-const { google } = require('googleapis');
+const fs = require('fs');
 
 // =========================
 // CONFIG
 // =========================
-const SERVICE_ACCOUNT_FILE = './service-account.json';
-const SPREADSHEET_ID = '12qESHoxzkSXwUc5Pa1gAzt8-hIw7QyiExkIh6UeDCMM';
-const SHEET_RANGE = 'Property Appraiser!A:D'; 
 const TARGET_URL = 'https://sacramento.mytaxsale.com/reports/total_sales';
+const OUTPUT_FILE = 'raw-scrape.json';
 
 // =========================
-// GOOGLE AUTH
+// FUNCTION: Scrape Table Rows
 // =========================
-const auth = new google.auth.GoogleAuth({
-  keyFile: SERVICE_ACCOUNT_FILE,
-  scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-});
-
-const sheets = google.sheets({ version: 'v4', auth });
-
-// =========================
-// FUNCTION: Inspect Web Page
-// =========================
-async function inspectPage(url) {
+async function scrapeTable(url) {
   let browser;
 
   try {
@@ -48,30 +36,32 @@ async function inspectPage(url) {
       timeout: 120000,
     });
 
-    await page.waitForSelector('body', { timeout: 60000 });
+    await page.waitForSelector('table', { timeout: 60000 });
 
     const html = await page.content();
     const $ = cheerio.load(html);
 
-    const elements = [];
+    const rows = [];
 
-    $('*').each((_, el) => {
-      const tag = el.tagName;
-      const text = $(el).text().replace(/\s+/g, ' ').trim();
-      const attrs = el.attribs || {};
+    $('table tr').each((i, el) => {
+      const cells = $(el).find('td');
+      if (cells.length === 0) return; // skip header row
 
-      if (text) {
-        elements.push({
-          tag,
-          text,
-          attrs,
-        });
-      }
+      const row = {
+        id: $(cells[0]).text().trim(),
+        apn: $(cells[1]).text().trim(),
+        saleDate: $(cells[2]).text().trim(),
+        openingBid: $(cells[3]).text().trim(),
+        winningBid: $(cells[4]).text().trim(),
+        notes: $(cells[5]).text().trim(),
+      };
+
+      rows.push(row);
     });
 
-    return elements;
+    return rows;
   } catch (err) {
-    console.error('❌ Error during page inspection:', err);
+    console.error('❌ Error during table scrape:', err);
     return [];
   } finally {
     if (browser) {
@@ -81,62 +71,21 @@ async function inspectPage(url) {
 }
 
 // =========================
-// FUNCTION: Append to Google Sheets
-// =========================
-async function appendToSheet(results) {
-  if (!results.length) {
-    console.warn('⚠️ No data to write to Google Sheets.');
-    return;
-  }
-
-  const timestamp = new Date().toISOString();
-
-  const values = results.map(r => {
-    const attrString = Object.entries(r.attrs)
-      .map(([k, v]) => `${k}=${v}`)
-      .join('; ');
-
-    return [timestamp, r.tag, r.text, attrString];
-  });
-
-  try {
-    // Check if the sheet already has data
-    const existing = await sheets.spreadsheets.values.get({
-      spreadsheetId: SPREADSHEET_ID,
-      range: SHEET_RANGE,
-    });
-
-    // Add header row if sheet is empty
-    if (!existing.data.values || existing.data.values.length === 0) {
-      values.unshift(['Timestamp', 'Tag', 'Text', 'Attributes']);
-    }
-
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: SPREADSHEET_ID,
-      range: SHEET_RANGE,
-      valueInputOption: 'RAW',
-      insertDataOption: 'INSERT_ROWS',
-      requestBody: { values },
-    });
-
-    console.log(`✅ Successfully appended ${values.length} rows.`);
-  } catch (err) {
-    console.error('❌ Error writing to Google Sheets:', err);
-  }
-}
-
-// =========================
 // MAIN EXECUTION
 // =========================
 (async () => {
-  console.log('🔍 Inspecting webpage...');
-  const results = await inspectPage(TARGET_URL);
+  console.log('🔍 Scraping table from webpage...');
+  const results = await scrapeTable(TARGET_URL);
 
-  console.log(`📦 Total elements parsed: ${results.length}`);
-  console.log('🧪 Sample output:', results.slice(0, 5));
+  console.log(`📦 Total rows extracted: ${results.length}`);
+  console.log('🧪 Sample row:', results[0]);
 
-  console.log('📤 Writing results to Google Sheets...');
-  await appendToSheet(results);
+  try {
+    fs.writeFileSync(OUTPUT_FILE, JSON.stringify(results, null, 2));
+    console.log(`✅ Saved to ${OUTPUT_FILE}`);
+  } catch (err) {
+    console.error('❌ Error writing JSON file:', err);
+  }
 
   console.log('🏁 Done.');
 })();
