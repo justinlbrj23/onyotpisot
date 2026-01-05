@@ -91,11 +91,14 @@ async function scrapePaginatedTable(url) {
         return links.find(a => a.textContent.trim().toLowerCase().startsWith('next')) || null;
       });
 
-      if (!nextHandle) {
+      // Convert to a DOM element to check null
+      const nextElement = await nextHandle.jsonValue();
+      if (!nextElement) {
         console.log('⏹ No Next button found, stopping.');
         break;
       }
 
+      // Check disabled state safely
       const isDisabled = await page.evaluate(el =>
         el.hasAttribute('disabled') || el.classList.contains('disabled'),
         nextHandle
