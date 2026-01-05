@@ -48,29 +48,44 @@ async function scrapePaginatedTable(url) {
       console.log(`🔄 Scraping page ${pageIndex}...`);
       await page.waitForSelector('table tr td', { timeout: 60000 });
 
-      // Extract rows from current page
+      // -------------------------
+      // Extract VALID data rows only
+      // -------------------------
       const rows = await page.$$eval('table tr', trs =>
         trs
           .map(tr => {
             const tds = Array.from(tr.querySelectorAll('td'));
-
-            // Real table has 6 columns:
-            // ID#, APN, Sale Date, Opening Bid, Winning Bid, Notes
             if (tds.length < 6) return null;
 
+            const id = tds[0].innerText.trim();
+            const apn = tds[1].innerText.trim();
+            const saleDate = tds[2].innerText.trim();
+            const openingBid = tds[3].innerText.trim();
+            const winningBid = tds[4].innerText.trim();
+            const notes = tds[5].innerText.trim();
+
+            // -------------------------
+            // HARD VALIDATION
+            // -------------------------
+            if (!/^\d+$/.test(id)) return null;          // ID# must be numeric
+            if (!saleDate.includes('/')) return null;   // must look like a date
+            if (!openingBid.includes('$')) return null; // must be money
+
             return {
-              id: tds[0]?.innerText.trim() || '',
-              apn: tds[1]?.innerText.trim() || '',
-              saleDate: tds[2]?.innerText.trim() || '',
-              openingBid: tds[3]?.innerText.trim() || '',
-              winningBid: tds[4]?.innerText.trim() || '',
-              notes: tds[5]?.innerText.trim() || '',
+              id,
+              apn,
+              saleDate,
+              openingBid,
+              winningBid,
+              notes,
             };
           })
           .filter(Boolean)
       );
 
-      // Add surplus calculation
+      // -------------------------
+      // Surplus calculation
+      // -------------------------
       rows.forEach(r => {
         const open = parseCurrency(r.openingBid);
         const win = parseCurrency(r.winningBid);
@@ -85,12 +100,13 @@ async function scrapePaginatedTable(url) {
       });
 
       allRows.push(...rows);
-      console.log(`📦 Page ${pageIndex} rows: ${rows.length}`);
+      console.log(`📦 Page ${pageIndex} valid rows: ${rows.length}`);
 
-      // Capture current table HTML to detect change
+      // -------------------------
+      // Pagination handling
+      // -------------------------
       const previousTable = await page.$eval('table', el => el.innerHTML);
 
-      // Find "Next" link by text
       const nextHandle = await page.evaluateHandle(() => {
         const links = Array.from(document.querySelectorAll('a'));
         return links.find(a =>
@@ -98,8 +114,8 @@ async function scrapePaginatedTable(url) {
         ) || null;
       });
 
-      const nextElement = await nextHandle.jsonValue();
-      if (!nextElement) {
+      const nextExists = await nextHandle.jsonValue();
+      if (!nextExists) {
         console.log('⏹ No Next button found, stopping.');
         break;
       }
@@ -114,7 +130,6 @@ async function scrapePaginatedTable(url) {
         break;
       }
 
-      // Click next and wait for table to change
       await Promise.all([
         nextHandle.click(),
         page.waitForFunction(
@@ -149,7 +164,7 @@ async function scrapePaginatedTable(url) {
   console.log('🔍 Scraping paginated table from webpage...');
   const results = await scrapePaginatedTable(TARGET_URL);
 
-  console.log(`📦 Total rows extracted: ${results.length}`);
+  console.log(`📦 Total VALID rows extracted: ${results.length}`);
   if (results.length > 0) {
     console.log('🧪 Sample row:', results[0]);
   }
