@@ -97,8 +97,12 @@ jobs:
               process.exit(1);
             }
             console.log('✅ raw-scrape.json is valid and schema-compliant');
+            console.log('🧪 Sample row:', JSON.stringify(sample, null, 2));
           "
 
+      # --------------------------------------------------
+      # Upload raw scrape artifact
+      # --------------------------------------------------
       - name: Upload raw scrape artifact
         uses: actions/upload-artifact@v4
         with:
