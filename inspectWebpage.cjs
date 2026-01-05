@@ -10,6 +10,7 @@ const fs = require('fs');
 // =========================
 const TARGET_URL = 'https://sacramento.mytaxsale.com/reports/total_sales';
 const OUTPUT_FILE = 'raw-scrape.json';
+const MAX_PAGES = 50; // safety limit
 
 // =========================
 // Helper: parse currency string → number
@@ -43,7 +44,7 @@ async function scrapePaginatedTable(url) {
     const allRows = [];
     let pageIndex = 1;
 
-    while (true) {
+    while (pageIndex <= MAX_PAGES) {
       console.log(`🔄 Scraping page ${pageIndex}...`);
       await page.waitForSelector('table tr td', { timeout: 60000 });
 
@@ -102,7 +103,7 @@ async function scrapePaginatedTable(url) {
         break;
       }
 
-      // Click next and wait for table content to change
+      // Click next and wait for table content to change (AJAX-safe)
       await Promise.all([
         nextButton[0].click(),
         page.waitForFunction(
@@ -113,6 +114,10 @@ async function scrapePaginatedTable(url) {
       ]);
 
       pageIndex++;
+    }
+
+    if (pageIndex > MAX_PAGES) {
+      console.log(`⚠️ Stopped after reaching maxPages=${MAX_PAGES}`);
     }
 
     return allRows;
