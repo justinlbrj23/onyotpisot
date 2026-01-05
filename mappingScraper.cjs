@@ -48,7 +48,7 @@ function mapRow(raw) {
   mapped["Auction Date"] = raw.saleDate;
   mapped["Opening / Minimum Bid"] = raw.openingBid;
   mapped["Sale Price"] = raw.winningBid;
-  mapped["Case Number"] = raw.id;
+  mapped["Case Number"] = raw.caseNumber;
   mapped["Notes"] = raw.notes || "";
 
   // Use surplus fields directly from raw JSON
