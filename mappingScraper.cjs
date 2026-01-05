@@ -10,7 +10,8 @@ const { google } = require("googleapis");
 // =========================
 const SERVICE_ACCOUNT_FILE = "./service-account.json";
 const SPREADSHEET_ID = "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
-const SHEET_NAME = "raw_main";
+const SHEET_NAME_URLS = "web_tda"; // where URLs, counties, states are
+const SHEET_NAME_RAW = "raw_main"; // where we append mapped rows
 const INPUT_FILE = process.argv[2] || "raw-scrape.json"; // JSON artifact from inspectWebpage.cjs
 
 // =========================
@@ -37,9 +38,28 @@ const HEADERS = [
 ];
 
 // =========================
+// FUNCTION: Fetch URL → County/State mapping from sheet
+// =========================
+async function getUrlMapping() {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${SHEET_NAME_URLS}!A2:C`, // County | State | URL
+  });
+
+  const rows = res.data.values || [];
+  const mapping = {};
+
+  rows.forEach(([county, state, url]) => {
+    if (url) mapping[url.trim()] = { county: county || "", state: state || "" };
+  });
+
+  return mapping; // { "https://sacramento.mytaxsale.com/...": {county, state}, ... }
+}
+
+// =========================
 // FUNCTION: Map raw scrape row → TSSF headers
 // =========================
-function mapRow(raw) {
+function mapRow(raw, urlMapping) {
   const mapped = {};
   HEADERS.forEach(h => (mapped[h] = "")); // initialize all headers
 
@@ -51,7 +71,7 @@ function mapRow(raw) {
   mapped["Case Number"] = raw.caseNumber;
   mapped["Notes"] = raw.notes || "";
 
-  // Use surplus fields directly from raw JSON
+  // Surplus fields
   if (raw.surplus !== undefined && raw.surplus !== null) {
     mapped["Estimated Surplus"] = raw.surplus.toString();
   }
@@ -59,9 +79,13 @@ function mapRow(raw) {
     mapped["Meets Minimum Surplus? (Yes/No)"] = raw.meetsMinimumSurplus;
   }
 
-  // Static context (since site is Sacramento County, CA)
-  mapped["State"] = "California";
-  mapped["County"] = "Sacramento";
+  // -------------------------
+  // Dynamic State/County from sheet
+  // -------------------------
+  const url = raw.sourceUrl || "";
+  const geo = urlMapping[url] || { county: "", state: "" };
+  mapped["State"] = geo.state;
+  mapped["County"] = geo.county;
 
   return mapped;
 }
@@ -73,7 +97,7 @@ async function appendRows(rows) {
   const values = rows.map(row => HEADERS.map(h => row[h] || ""));
   await sheets.spreadsheets.values.append({
     spreadsheetId: SPREADSHEET_ID,
-    range: SHEET_NAME,
+    range: SHEET_NAME_RAW,
     valueInputOption: "RAW",
     insertDataOption: "INSERT_ROWS",
     requestBody: { values },
@@ -93,7 +117,10 @@ async function appendRows(rows) {
   const rawData = JSON.parse(fs.readFileSync(INPUT_FILE, "utf8"));
   console.log(`📦 Loaded ${rawData.length} raw rows from ${INPUT_FILE}`);
 
-  const mappedRows = rawData.map(mapRow);
+  const urlMapping = await getUrlMapping();
+  console.log(`🌐 Fetched ${Object.keys(urlMapping).length} URL → County/State mappings from sheet`);
+
+  const mappedRows = rawData.map(raw => mapRow(raw, urlMapping));
   console.log("🧪 Sample mapped row:", mappedRows[0]);
 
   await appendRows(mappedRows);
