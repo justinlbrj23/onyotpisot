@@ -53,24 +53,28 @@ async function scrapePaginatedTable(url) {
         trs
           .map(tr => {
             const tds = Array.from(tr.querySelectorAll('td'));
-            if (tds.length < 3) return null; // at least APN, Case Number, Auction Date
+
+            // Real table has 6 columns:
+            // ID#, APN, Sale Date, Opening Bid, Winning Bid, Notes
+            if (tds.length < 6) return null;
+
             return {
-  id: `${tds[0]?.innerText.trim() || 'NOAPN'}-${tds[2]?.innerText.trim() || 'NODATE'}-${Math.random().toString(36).slice(2,8)}`,
-  apn: tds[0]?.innerText.trim() || '',
-  caseNumber: tds[1]?.innerText.trim() || '',
-  saleDate: tds[2]?.innerText.trim() || '',
-  openingBid: tds[3]?.innerText.trim() || '',
-  winningBid: tds[4]?.innerText.trim() || '',
-  notes: tds[5]?.innerText.trim() || '',
-};
+              id: tds[0]?.innerText.trim() || '',
+              apn: tds[1]?.innerText.trim() || '',
+              saleDate: tds[2]?.innerText.trim() || '',
+              openingBid: tds[3]?.innerText.trim() || '',
+              winningBid: tds[4]?.innerText.trim() || '',
+              notes: tds[5]?.innerText.trim() || '',
+            };
           })
           .filter(Boolean)
       );
 
-      // Add surplus calculation if bid columns exist
+      // Add surplus calculation
       rows.forEach(r => {
         const open = parseCurrency(r.openingBid);
         const win = parseCurrency(r.winningBid);
+
         if (open !== null && win !== null) {
           r.surplus = win - open;
           r.meetsMinimumSurplus = r.surplus > 0 ? 'Yes' : 'No';
@@ -86,30 +90,31 @@ async function scrapePaginatedTable(url) {
       // Capture current table HTML to detect change
       const previousTable = await page.$eval('table', el => el.innerHTML);
 
-      // Find "Next" link by text content
+      // Find "Next" link by text
       const nextHandle = await page.evaluateHandle(() => {
         const links = Array.from(document.querySelectorAll('a'));
-        return links.find(a => a.textContent.trim().toLowerCase().startsWith('next')) || null;
+        return links.find(a =>
+          a.textContent.trim().toLowerCase().startsWith('next')
+        ) || null;
       });
 
-      // Convert to a DOM element to check null
       const nextElement = await nextHandle.jsonValue();
       if (!nextElement) {
         console.log('⏹ No Next button found, stopping.');
         break;
       }
 
-      // Check disabled state safely
-      const isDisabled = await page.evaluate(el =>
-        el.hasAttribute('disabled') || el.classList.contains('disabled'),
+      const isDisabled = await page.evaluate(
+        el => el.hasAttribute('disabled') || el.classList.contains('disabled'),
         nextHandle
       );
+
       if (isDisabled) {
         console.log('⏹ Next button disabled, stopping.');
         break;
       }
 
-      // Click next and wait for table content to change (AJAX-safe)
+      // Click next and wait for table to change
       await Promise.all([
         nextHandle.click(),
         page.waitForFunction(
@@ -123,7 +128,7 @@ async function scrapePaginatedTable(url) {
     }
 
     if (pageIndex > MAX_PAGES) {
-      console.log(`⚠️ Stopped after reaching maxPages=${MAX_PAGES}`);
+      console.log(`⚠️ Stopped after reaching MAX_PAGES=${MAX_PAGES}`);
     }
 
     return allRows;
