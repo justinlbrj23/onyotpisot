@@ -3,7 +3,6 @@
 // npm install puppeteer cheerio
 
 const puppeteer = require('puppeteer');
-const cheerio = require('cheerio');
 const fs = require('fs');
 
 // =========================
@@ -13,9 +12,9 @@ const TARGET_URL = 'https://sacramento.mytaxsale.com/reports/total_sales';
 const OUTPUT_FILE = 'raw-scrape.json';
 
 // =========================
-// FUNCTION: Scrape Table Rows
+// FUNCTION: Scrape Paginated Table
 // =========================
-async function scrapeTable(url) {
+async function scrapePaginatedTable(url) {
   let browser;
 
   try {
@@ -30,38 +29,55 @@ async function scrapeTable(url) {
 
     const page = await browser.newPage();
     page.setDefaultNavigationTimeout(120000);
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 120000 });
 
-    await page.goto(url, {
-      waitUntil: 'domcontentloaded',
-      timeout: 120000,
-    });
+    const allRows = [];
+    let pageIndex = 1;
 
-    await page.waitForSelector('table', { timeout: 60000 });
+    while (true) {
+      console.log(`🔄 Scraping page ${pageIndex}...`);
+      await page.waitForSelector('table', { timeout: 60000 });
 
-    const html = await page.content();
-    const $ = cheerio.load(html);
+      const rows = await page.$$eval('table tr', trs =>
+        trs
+          .map(tr => {
+            const tds = Array.from(tr.querySelectorAll('td'));
+            if (tds.length === 0) return null;
+            return {
+              id: tds[0]?.innerText.trim() || '',
+              apn: tds[1]?.innerText.trim() || '',
+              saleDate: tds[2]?.innerText.trim() || '',
+              openingBid: tds[3]?.innerText.trim() || '',
+              winningBid: tds[4]?.innerText.trim() || '',
+              notes: tds[5]?.innerText.trim() || '',
+            };
+          })
+          .filter(Boolean)
+      );
 
-    const rows = [];
+      allRows.push(...rows);
+      console.log(`📦 Page ${pageIndex} rows: ${rows.length}`);
 
-    $('table tr').each((i, el) => {
-      const cells = $(el).find('td');
-      if (cells.length === 0) return; // skip header row
+      const nextButton = await page.$('a[aria-label="Next"], button:contains("Next")');
+      if (!nextButton) break;
 
-      const row = {
-        id: $(cells[0]).text().trim(),
-        apn: $(cells[1]).text().trim(),
-        saleDate: $(cells[2]).text().trim(),
-        openingBid: $(cells[3]).text().trim(),
-        winningBid: $(cells[4]).text().trim(),
-        notes: $(cells[5]).text().trim(),
-      };
+      const isDisabled = await page.evaluate(el =>
+        el.hasAttribute('disabled') || el.classList.contains('disabled'),
+        nextButton
+      );
+      if (isDisabled) break;
 
-      rows.push(row);
-    });
+      await Promise.all([
+        nextButton.click(),
+        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }),
+      ]);
 
-    return rows;
+      pageIndex++;
+    }
+
+    return allRows;
   } catch (err) {
-    console.error('❌ Error during table scrape:', err);
+    console.error('❌ Error during paginated scrape:', err);
     return [];
   } finally {
     if (browser) {
@@ -74,11 +90,13 @@ async function scrapeTable(url) {
 // MAIN EXECUTION
 // =========================
 (async () => {
-  console.log('🔍 Scraping table from webpage...');
-  const results = await scrapeTable(TARGET_URL);
+  console.log('🔍 Scraping paginated table from webpage...');
+  const results = await scrapePaginatedTable(TARGET_URL);
 
   console.log(`📦 Total rows extracted: ${results.length}`);
-  console.log('🧪 Sample row:', results[0]);
+  if (results.length > 0) {
+    console.log('🧪 Sample row:', results[0]);
+  }
 
   try {
     fs.writeFileSync(OUTPUT_FILE, JSON.stringify(results, null, 2));
