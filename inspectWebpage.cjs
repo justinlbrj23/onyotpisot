@@ -9,7 +9,7 @@ const { google } = require('googleapis');
 // =========================
 // CONFIG
 // =========================
-const SPREADSHEET_ID = process.env.GSHEET_ID; // REQUIRED
+const SPREADSHEET_ID = '1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA'; // REQUIRED
 const SHEET_NAME = 'web_tda';
 const URL_RANGE = 'C2:C';
 
