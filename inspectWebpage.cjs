@@ -12,6 +12,15 @@ const TARGET_URL = 'https://sacramento.mytaxsale.com/reports/total_sales';
 const OUTPUT_FILE = 'raw-scrape.json';
 
 // =========================
+// Helper: parse currency string → number
+// =========================
+function parseCurrency(str) {
+  if (!str) return null;
+  const num = parseFloat(str.replace(/[^0-9.-]/g, ''));
+  return isNaN(num) ? null : num;
+}
+
+// =========================
 // FUNCTION: Scrape Paginated Table
 // =========================
 async function scrapePaginatedTable(url) {
@@ -43,16 +52,31 @@ async function scrapePaginatedTable(url) {
         trs
           .map(tr => {
             const tds = Array.from(tr.querySelectorAll('td'));
-            if (tds.length < 3) return null; // skip header or malformed rows
+            if (tds.length < 6) return null; // skip header or malformed rows
             return {
-              apn: tds[0]?.innerText.trim() || '',
-              caseNumber: tds[1]?.innerText.trim() || '',
+              id: tds[0]?.innerText.trim() || '',
+              apn: tds[1]?.innerText.trim() || '',
               saleDate: tds[2]?.innerText.trim() || '',
-              // optional: add more if table has extra columns
+              openingBid: tds[3]?.innerText.trim() || '',
+              winningBid: tds[4]?.innerText.trim() || '',
+              notes: tds[5]?.innerText.trim() || '',
             };
           })
           .filter(Boolean)
       );
+
+      // Add surplus calculation
+      rows.forEach(r => {
+        const open = parseCurrency(r.openingBid);
+        const win = parseCurrency(r.winningBid);
+        if (open !== null && win !== null) {
+          r.surplus = win - open;
+          r.meetsMinimumSurplus = r.surplus > 0 ? 'Yes' : 'No';
+        } else {
+          r.surplus = null;
+          r.meetsMinimumSurplus = '';
+        }
+      });
 
       allRows.push(...rows);
       console.log(`📦 Page ${pageIndex} rows: ${rows.length}`);
