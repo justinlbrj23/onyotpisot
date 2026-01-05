@@ -15,6 +15,7 @@ const URL_RANGE = 'C2:C';
 
 const OUTPUT_FILE = 'raw-scrape.json';
 const MAX_PAGES = 50;
+const MIN_SURPLUS = 25000; // ✅ BUSINESS RULE
 
 // =========================
 // Helper: parse currency
@@ -104,16 +105,19 @@ async function scrapePaginatedTable(browser, url) {
         .filter(Boolean)
     );
 
+    // -------------------------
+    // Surplus calculation (MIN = $25,000)
+    // -------------------------
     rows.forEach(r => {
       const open = parseCurrency(r.openingBid);
       const win = parseCurrency(r.winningBid);
 
       if (open !== null && win !== null) {
         r.surplus = win - open;
-        r.meetsMinimumSurplus = r.surplus > 0 ? 'Yes' : 'No';
+        r.meetsMinimumSurplus = r.surplus >= MIN_SURPLUS ? 'Yes' : 'No';
       } else {
         r.surplus = null;
-        r.meetsMinimumSurplus = '';
+        r.meetsMinimumSurplus = 'No';
       }
     });
 
