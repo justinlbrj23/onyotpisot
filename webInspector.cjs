@@ -11,8 +11,9 @@ const { google } = require('googleapis');
 // =========================
 const SERVICE_ACCOUNT_FILE = './service-account.json';
 const SPREADSHEET_ID = '12qESHoxzkSXwUc5Pa1gAzt8-hIw7QyiExkIh6UeDCMM';
-const SHEET_RANGE = 'Property Appraiser!A:D'; 
-const TARGET_URL = 'https://king.wa.realforeclose.com/index.cfm?zaction=AUCTION&Zmethod=PREVIEW&AUCTIONDATE=09/10/2025';
+const SHEET_RANGE = 'Property Appraiser!A:D';
+const TARGET_URL =
+  'https://king.wa.realforeclose.com/index.cfm?zaction=AUCTION&Zmethod=PREVIEW&AUCTIONDATE=09/10/2025';
 
 // =========================
 // GOOGLE AUTH
@@ -37,22 +38,59 @@ async function inspectPage(url) {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
+        '--disable-blink-features=AutomationControlled',
       ],
     });
 
     const page = await browser.newPage();
     page.setDefaultNavigationTimeout(120000);
 
+    // -------------------------
+    // Anti-bot hardening
+    // -------------------------
+    await page.setUserAgent(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
+        'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+        'Chrome/120.0.0.0 Safari/537.36'
+    );
+
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'en-US,en;q=0.9',
+      Accept:
+        'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    });
+
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => false,
+      });
+    });
+
+    // -------------------------
+    // Navigate + wait for WAF
+    // -------------------------
     await page.goto(url, {
-      waitUntil: 'domcontentloaded',
+      waitUntil: 'networkidle2',
       timeout: 120000,
     });
 
-    await page.waitForSelector('body', { timeout: 60000 });
+    // Cloudflare / WAF delay
+    await new Promise(r => setTimeout(r, 8000));
 
     const html = await page.content();
-    const $ = cheerio.load(html);
 
+    // -------------------------
+    // Detect hard block early
+    // -------------------------
+    if (
+      html.includes('403 Forbidden') ||
+      html.includes('Access Denied') ||
+      html.toLowerCase().includes('forbidden')
+    ) {
+      throw new Error('Blocked by target website (403)');
+    }
+
+    const $ = cheerio.load(html);
     const elements = [];
 
     $('*').each((_, el) => {
@@ -61,22 +99,16 @@ async function inspectPage(url) {
       const attrs = el.attribs || {};
 
       if (text) {
-        elements.push({
-          tag,
-          text,
-          attrs,
-        });
+        elements.push({ tag, text, attrs });
       }
     });
 
     return elements;
   } catch (err) {
-    console.error('❌ Error during page inspection:', err);
+    console.error('❌ Error during page inspection:', err.message);
     return [];
   } finally {
-    if (browser) {
-      await browser.close();
-    }
+    if (browser) await browser.close();
   }
 }
 
@@ -85,7 +117,7 @@ async function inspectPage(url) {
 // =========================
 async function appendToSheet(results) {
   if (!results.length) {
-    console.warn('⚠️ No data to write to Google Sheets.');
+    console.warn('⚠️ No valid data to write to Google Sheets.');
     return;
   }
 
@@ -95,18 +127,15 @@ async function appendToSheet(results) {
     const attrString = Object.entries(r.attrs)
       .map(([k, v]) => `${k}=${v}`)
       .join('; ');
-
     return [timestamp, r.tag, r.text, attrString];
   });
 
   try {
-    // Check if the sheet already has data
     const existing = await sheets.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
       range: SHEET_RANGE,
     });
 
-    // Add header row if sheet is empty
     if (!existing.data.values || existing.data.values.length === 0) {
       values.unshift(['Timestamp', 'Tag', 'Text', 'Attributes']);
     }
@@ -121,12 +150,12 @@ async function appendToSheet(results) {
 
     console.log(`✅ Successfully appended ${values.length} rows.`);
   } catch (err) {
-    console.error('❌ Error writing to Google Sheets:', err);
+    console.error('❌ Error writing to Google Sheets:', err.message);
   }
 }
 
 // =========================
-// MAIN EXECUTION
+// MAIN
 // =========================
 (async () => {
   console.log('🔍 Inspecting webpage...');
