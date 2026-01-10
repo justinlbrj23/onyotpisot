@@ -1,9 +1,10 @@
 // inspectWebpage.cjs
 // Requires:
-// npm install puppeteer googleapis
+// npm install puppeteer googleapis cheerio
 
 const puppeteer = require('puppeteer');
 const fs = require('fs');
+const cheerio = require('cheerio');
 const { google } = require('googleapis');
 
 // =========================
@@ -15,7 +16,7 @@ const URL_RANGE = 'C2:C';
 
 const OUTPUT_FILE = 'raw-scrape.json';
 const MAX_PAGES = 50;
-const MIN_SURPLUS = 25000; // ✅ BUSINESS RULE
+const MIN_SURPLUS = 25000;
 
 // =========================
 // Helper: parse currency
@@ -72,7 +73,7 @@ async function hardenPage(page) {
 }
 
 // =========================
-// Scrape paginated table (WAF SAFE)
+// Scrape paginated table (HTML + Cheerio)
 // =========================
 async function scrapePaginatedTable(browser, url) {
   const page = await browser.newPage();
@@ -83,83 +84,85 @@ async function scrapePaginatedTable(browser, url) {
   console.log(`🌐 Visiting ${url}`);
   await page.goto(url, { waitUntil: 'networkidle2', timeout: 120000 });
 
-  // Allow JS/WAF challenge to finish
+  // WAF / Cloudflare delay
   await new Promise(r => setTimeout(r, 8000));
-
-  const html = await page.content();
-  if (
-    html.includes('403 Forbidden') ||
-    html.includes('Access Denied') ||
-    html.toLowerCase().includes('forbidden')
-  ) {
-    throw new Error('Blocked by target website (403)');
-  }
 
   const collected = [];
   let pageIndex = 1;
+  let lastFingerprint = null;
 
   while (pageIndex <= MAX_PAGES) {
     console.log(`🔄 Page ${pageIndex}`);
-    await page.waitForSelector('table', { timeout: 60000 });
 
-    const tableFingerprint = await page.$$eval(
-      'table tr td:first-child',
-      tds => tds.map(td => td.innerText.trim()).join('|')
-    );
+    const html = await page.content();
 
     // -------------------------
-    // Extract VALID rows only
+    // Detect hard block
     // -------------------------
-    const rows = await page.$$eval('table tr', trs =>
-      trs
-        .map(tr => {
-          const tds = Array.from(tr.querySelectorAll('td'));
-          if (tds.length < 6) return null;
+    if (
+      html.includes('403 Forbidden') ||
+      html.includes('Access Denied') ||
+      html.toLowerCase().includes('forbidden')
+    ) {
+      throw new Error('Blocked by target website (403)');
+    }
 
-          const id = tds[0].innerText.trim();
-          const apn = tds[1].innerText.trim();
-          const saleDate = tds[2].innerText.trim();
-          const openingBid = tds[3].innerText.trim();
-          const winningBid = tds[4].innerText.trim();
-          const notes = tds[5].innerText.trim();
-
-          if (!/^\d+$/.test(id)) return null;
-          if (!saleDate.includes('/')) return null;
-          if (!openingBid.includes('$')) return null;
-
-          return {
-            id,
-            apn,
-            saleDate,
-            openingBid,
-            winningBid,
-            notes,
-          };
-        })
-        .filter(Boolean)
-    );
+    const $ = cheerio.load(html);
 
     // -------------------------
-    // Surplus calculation
+    // Extract rows via parsing
     // -------------------------
-    rows.forEach(r => {
-      const open = parseCurrency(r.openingBid);
-      const win = parseCurrency(r.winningBid);
+    const rows = [];
 
-      if (open !== null && win !== null) {
-        r.surplus = win - open;
-        r.meetsMinimumSurplus = r.surplus >= MIN_SURPLUS ? 'Yes' : 'No';
-      } else {
-        r.surplus = null;
-        r.meetsMinimumSurplus = 'No';
-      }
+    $('table tr').each((_, tr) => {
+      const tds = $(tr).find('td');
+      if (tds.length < 6) return;
+
+      const id = $(tds[0]).text().trim();
+      const apn = $(tds[1]).text().trim();
+      const saleDate = $(tds[2]).text().trim();
+      const openingBid = $(tds[3]).text().trim();
+      const winningBid = $(tds[4]).text().trim();
+      const notes = $(tds[5]).text().trim();
+
+      if (!/^\d+$/.test(id)) return;
+      if (!saleDate.includes('/')) return;
+      if (!openingBid.includes('$')) return;
+
+      const open = parseCurrency(openingBid);
+      const win = parseCurrency(winningBid);
+
+      const surplus =
+        open !== null && win !== null ? win - open : null;
+
+      rows.push({
+        id,
+        apn,
+        saleDate,
+        openingBid,
+        winningBid,
+        notes,
+        surplus,
+        meetsMinimumSurplus:
+          surplus !== null && surplus >= MIN_SURPLUS ? 'Yes' : 'No',
+      });
     });
 
-    collected.push(...rows);
     console.log(`📦 Valid rows: ${rows.length}`);
+    collected.push(...rows);
 
     // -------------------------
-    // Safe pagination
+    // Pagination fingerprint
+    // -------------------------
+    const fingerprint = rows.map(r => r.id).join('|');
+    if (fingerprint === lastFingerprint) {
+      console.log('⏹ No data change detected');
+      break;
+    }
+    lastFingerprint = fingerprint;
+
+    // -------------------------
+    // Safe pagination click
     // -------------------------
     const hasNext = await page.evaluate(() => {
       const next = [...document.querySelectorAll('a')]
@@ -176,17 +179,7 @@ async function scrapePaginatedTable(browser, url) {
       break;
     }
 
-    await page.waitForFunction(
-      prev => {
-        const cells = [...document.querySelectorAll('table tr td:first-child')]
-          .map(td => td.innerText.trim())
-          .join('|');
-        return cells !== prev;
-      },
-      { timeout: 60000 },
-      tableFingerprint
-    );
-
+    await page.waitForTimeout(6000);
     pageIndex++;
   }
 
