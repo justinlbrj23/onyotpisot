@@ -1,43 +1,36 @@
 // inspectWebpage.cjs
 // Requires:
-// npm install puppeteer googleapis cheerio
+// npm install puppeteer cheerio googleapis
 
 const puppeteer = require('puppeteer');
-const fs = require('fs');
 const cheerio = require('cheerio');
+const fs = require('fs');
 const { google } = require('googleapis');
 
 // =========================
 // CONFIG
 // =========================
+const SERVICE_ACCOUNT_FILE = './service-account.json';
 const SPREADSHEET_ID = '1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA';
 const SHEET_NAME = 'web_tda';
 const URL_RANGE = 'C2:C';
 
 const OUTPUT_FILE = 'raw-scrape.json';
-const MAX_PAGES = 50;
-const MIN_SURPLUS = 25000;
 
 // =========================
-// Helper: parse currency
+// GOOGLE AUTH
 // =========================
-function parseCurrency(str) {
-  if (!str) return null;
-  const num = parseFloat(str.replace(/[^0-9.-]/g, ''));
-  return isNaN(num) ? null : num;
-}
+const auth = new google.auth.GoogleAuth({
+  keyFile: SERVICE_ACCOUNT_FILE,
+  scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+});
+
+const sheets = google.sheets({ version: 'v4', auth });
 
 // =========================
 // Load URLs from Google Sheets
 // =========================
 async function loadTargetUrls() {
-  const auth = new google.auth.GoogleAuth({
-    keyFile: 'service-account.json',
-    scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
-  });
-
-  const sheets = google.sheets({ version: 'v4', auth });
-
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
     range: `${SHEET_NAME}!${URL_RANGE}`,
@@ -50,54 +43,50 @@ async function loadTargetUrls() {
 }
 
 // =========================
-// Harden page against bot detection
+// FUNCTION: Inspect Web Page
+// (SAME LOGIC AS REFERENCE SCRIPT)
 // =========================
-async function hardenPage(page) {
-  await page.setUserAgent(
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
-      'AppleWebKit/537.36 (KHTML, like Gecko) ' +
-      'Chrome/120.0.0.0 Safari/537.36'
-  );
-
-  await page.setExtraHTTPHeaders({
-    'Accept-Language': 'en-US,en;q=0.9',
-    Accept:
-      'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-  });
-
-  await page.evaluateOnNewDocument(() => {
-    Object.defineProperty(navigator, 'webdriver', {
-      get: () => false,
-    });
-  });
-}
-
-// =========================
-// Scrape paginated table (HTML + Cheerio)
-// =========================
-async function scrapePaginatedTable(browser, url) {
+async function inspectPage(browser, url) {
   const page = await browser.newPage();
   page.setDefaultNavigationTimeout(120000);
 
-  await hardenPage(page);
+  try {
+    // -------------------------
+    // Anti-bot hardening
+    // -------------------------
+    await page.setUserAgent(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
+        'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+        'Chrome/120.0.0.0 Safari/537.36'
+    );
 
-  console.log(`🌐 Visiting ${url}`);
-  await page.goto(url, { waitUntil: 'networkidle2', timeout: 120000 });
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'en-US,en;q=0.9',
+      Accept:
+        'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    });
 
-  // Cloudflare / WAF settle time
-  await new Promise(r => setTimeout(r, 8000));
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => false,
+      });
+    });
 
-  const collected = [];
-  let pageIndex = 1;
-  let lastFingerprint = null;
+    // -------------------------
+    // Navigate + WAF wait
+    // -------------------------
+    console.log(`🌐 Visiting ${url}`);
+    await page.goto(url, {
+      waitUntil: 'networkidle2',
+      timeout: 120000,
+    });
 
-  while (pageIndex <= MAX_PAGES) {
-    console.log(`🔄 Page ${pageIndex}`);
+    await new Promise(r => setTimeout(r, 8000));
 
     const html = await page.content();
 
     // -------------------------
-    // Detect hard block
+    // Detect hard block early
     // -------------------------
     if (
       html.includes('403 Forbidden') ||
@@ -107,94 +96,35 @@ async function scrapePaginatedTable(browser, url) {
       throw new Error('Blocked by target website (403)');
     }
 
+    // -------------------------
+    // HTML → Cheerio → Elements
+    // -------------------------
     const $ = cheerio.load(html);
+    const elements = [];
 
-    // -------------------------
-    // Identify correct table
-    // -------------------------
-    let rowsFound = 0;
+    $('*').each((_, el) => {
+      const tag = el.tagName;
+      const text = $(el).text().replace(/\s+/g, ' ').trim();
+      const attrs = el.attribs || {};
 
-    $('table').each((_, table) => {
-      $(table)
-        .find('tr')
-        .each((__, tr) => {
-          const tds = $(tr).find('td');
-          if (tds.length < 5) return;
-
-          const id = $(tds[0]).text().trim();
-          const apn = $(tds[1]).text().trim();
-          const saleDate = $(tds[2]).text().trim();
-          const openingBid = $(tds[3]).text().trim();
-          const winningBid = $(tds[4]).text().trim();
-          const notes = $(tds[5]).text().trim() || '';
-
-          if (!/^\d+$/.test(id)) return;
-          if (!saleDate.includes('/')) return;
-          if (!openingBid.includes('$')) return;
-
-          const open = parseCurrency(openingBid);
-          const win = parseCurrency(winningBid);
-          const surplus =
-            open !== null && win !== null ? win - open : null;
-
-          collected.push({
-            id,
-            apn,
-            saleDate,
-            openingBid,
-            winningBid,
-            notes,
-            surplus,
-            meetsMinimumSurplus:
-              surplus !== null && surplus >= MIN_SURPLUS ? 'Yes' : 'No',
-          });
-
-          rowsFound++;
+      if (text) {
+        elements.push({
+          sourceUrl: url,
+          tag,
+          text,
+          attrs,
         });
+      }
     });
 
-    console.log(`📦 Valid rows: ${rowsFound}`);
-
-    // -------------------------
-    // Pagination fingerprint
-    // -------------------------
-    const fingerprint = collected
-      .slice(-rowsFound)
-      .map(r => r.id)
-      .join('|');
-
-    if (!rowsFound || fingerprint === lastFingerprint) {
-      console.log('⏹ No new data detected');
-      break;
-    }
-
-    lastFingerprint = fingerprint;
-
-    // -------------------------
-    // Safe pagination
-    // -------------------------
-    const hasNext = await page.evaluate(() => {
-      const next = [...document.querySelectorAll('a')]
-        .find(a => a.textContent.trim().toLowerCase().startsWith('next'));
-      if (!next) return false;
-      if (next.classList.contains('disabled')) return false;
-      if (next.hasAttribute('disabled')) return false;
-      next.click();
-      return true;
-    });
-
-    if (!hasNext) {
-      console.log('⏹ No Next page available');
-      break;
-    }
-
-    // Older Puppeteer safe wait
-    await new Promise(r => setTimeout(r, 6000));
-    pageIndex++;
+    console.log(`📦 Parsed ${elements.length} elements`);
+    return elements;
+  } catch (err) {
+    console.error(`❌ Error inspecting ${url}:`, err.message);
+    return [];
+  } finally {
+    await page.close();
   }
-
-  await page.close();
-  return collected;
 }
 
 // =========================
@@ -222,27 +152,13 @@ async function scrapePaginatedTable(browser, url) {
   const allResults = [];
 
   for (const url of urls) {
-    try {
-      const rows = await scrapePaginatedTable(browser, url);
-      rows.forEach(r => (r.sourceUrl = url));
-      allResults.push(...rows);
-    } catch (err) {
-      console.error(`❌ Failed scraping ${url}:`, err.message);
-    }
+    const results = await inspectPage(browser, url);
+    allResults.push(...results);
   }
 
   await browser.close();
 
-  // -------------------------
-  // Deduplicate
-  // -------------------------
-  const deduped = Array.from(
-    new Map(
-      allResults.map(r => [`${r.id}-${r.apn}-${r.saleDate}`, r])
-    ).values()
-  );
-
-  fs.writeFileSync(OUTPUT_FILE, JSON.stringify(deduped, null, 2));
-  console.log(`✅ Saved ${deduped.length} rows to ${OUTPUT_FILE}`);
+  fs.writeFileSync(OUTPUT_FILE, JSON.stringify(allResults, null, 2));
+  console.log(`✅ Saved ${allResults.length} elements to ${OUTPUT_FILE}`);
   console.log('🏁 Done');
 })();
