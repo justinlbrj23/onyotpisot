@@ -49,24 +49,59 @@ async function loadTargetUrls() {
 }
 
 // =========================
-// Scrape paginated table (DETACHED-NODE SAFE)
+// Harden page against bot detection
+// =========================
+async function hardenPage(page) {
+  await page.setUserAgent(
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
+      'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+      'Chrome/120.0.0.0 Safari/537.36'
+  );
+
+  await page.setExtraHTTPHeaders({
+    'Accept-Language': 'en-US,en;q=0.9',
+    Accept:
+      'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+  });
+
+  await page.evaluateOnNewDocument(() => {
+    Object.defineProperty(navigator, 'webdriver', {
+      get: () => false,
+    });
+  });
+}
+
+// =========================
+// Scrape paginated table (WAF SAFE)
 // =========================
 async function scrapePaginatedTable(browser, url) {
   const page = await browser.newPage();
   page.setDefaultNavigationTimeout(120000);
 
+  await hardenPage(page);
+
   console.log(`🌐 Visiting ${url}`);
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 120000 });
+  await page.goto(url, { waitUntil: 'networkidle2', timeout: 120000 });
+
+  // Allow JS/WAF challenge to finish
+  await new Promise(r => setTimeout(r, 8000));
+
+  const html = await page.content();
+  if (
+    html.includes('403 Forbidden') ||
+    html.includes('Access Denied') ||
+    html.toLowerCase().includes('forbidden')
+  ) {
+    throw new Error('Blocked by target website (403)');
+  }
 
   const collected = [];
   let pageIndex = 1;
 
   while (pageIndex <= MAX_PAGES) {
     console.log(`🔄 Page ${pageIndex}`);
+    await page.waitForSelector('table', { timeout: 60000 });
 
-    await page.waitForSelector('body', { timeout: 60000 });
-
-    // Fingerprint table to detect real change
     const tableFingerprint = await page.$$eval(
       'table tr td:first-child',
       tds => tds.map(td => td.innerText.trim()).join('|')
@@ -88,7 +123,6 @@ async function scrapePaginatedTable(browser, url) {
           const winningBid = tds[4].innerText.trim();
           const notes = tds[5].innerText.trim();
 
-          // HARD VALIDATION
           if (!/^\d+$/.test(id)) return null;
           if (!saleDate.includes('/')) return null;
           if (!openingBid.includes('$')) return null;
@@ -106,7 +140,7 @@ async function scrapePaginatedTable(browser, url) {
     );
 
     // -------------------------
-    // Surplus calculation (MIN = $25,000)
+    // Surplus calculation
     // -------------------------
     rows.forEach(r => {
       const open = parseCurrency(r.openingBid);
@@ -125,7 +159,7 @@ async function scrapePaginatedTable(browser, url) {
     console.log(`📦 Valid rows: ${rows.length}`);
 
     // -------------------------
-    // SAFE pagination (no ElementHandle)
+    // Safe pagination
     // -------------------------
     const hasNext = await page.evaluate(() => {
       const next = [...document.querySelectorAll('a')]
@@ -178,6 +212,7 @@ async function scrapePaginatedTable(browser, url) {
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
+      '--disable-blink-features=AutomationControlled',
     ],
   });
 
@@ -189,13 +224,15 @@ async function scrapePaginatedTable(browser, url) {
       rows.forEach(r => (r.sourceUrl = url));
       allResults.push(...rows);
     } catch (err) {
-      console.error(`❌ Failed scraping ${url}`, err.message);
+      console.error(`❌ Failed scraping ${url}:`, err.message);
     }
   }
 
   await browser.close();
 
+  // -------------------------
   // Deduplicate
+  // -------------------------
   const deduped = Array.from(
     new Map(
       allResults.map(r => [`${r.id}-${r.apn}-${r.saleDate}`, r])
