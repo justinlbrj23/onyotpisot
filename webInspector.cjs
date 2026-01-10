@@ -6,56 +6,22 @@ const cheerio = require('cheerio');
 const { google } = require('googleapis');
 const readline = require('readline');
 
-// === GOOGLE OAUTH2 SETUP ===
-const CLIENT_ID = process.env.CLIENT_ID || "YOUR_CLIENT_ID";
-const CLIENT_SECRET = process.env.CLIENT_SECRET || "YOUR_CLIENT_SECRET";
-const REDIRECT_URI = "http://localhost";
-
-const oauth2Client = new google.auth.OAuth2(
-  CLIENT_ID,
-  CLIENT_SECRET,
-  REDIRECT_URI
-);
-
-// Use refresh token from secrets
-if (process.env.REFRESH_TOKEN) {
-  oauth2Client.setCredentials({
-    refresh_token: process.env.REFRESH_TOKEN
-  });
-}
-
-// === FUNCTION: Get Refresh Token (local only) ===
-async function getRefreshToken() {
-  const SCOPES = [
-    'https://www.googleapis.com/auth/drive',
-    'https://www.googleapis.com/auth/spreadsheets'
-  ];
-  const authUrl = oauth2Client.generateAuthUrl({
-    access_type: 'offline',
-    scope: SCOPES,
-  });
-  console.log('Authorize this app by visiting this URL:\n', authUrl);
-
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
+  const auth = new google.auth.GoogleAuth({
+    keyFile: 'service-account.json',
+    scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
   });
 
-  return new Promise((resolve, reject) => {
-    rl.question('\nEnter the code from that page here: ', async (code) => {
-      try {
-        const { tokens } = await oauth2Client.getToken(code);
-        console.log('\nAccess Token:', tokens.access_token);
-        console.log('Refresh Token:', tokens.refresh_token);
-        rl.close();
-        resolve(tokens.refresh_token);
-      } catch (err) {
-        console.error('Error retrieving tokens:', err);
-        rl.close();
-        reject(err);
-      }
-    });
+  const sheets = google.sheets({ version: 'v4', auth });
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${SHEET_NAME}!${URL_RANGE}`,
   });
+
+  return (res.data.values || [])
+    .flat()
+    .map(v => v.trim())
+    .filter(v => v.startsWith('http'));
 }
 
 // === FUNCTION: Inspect Page ===
