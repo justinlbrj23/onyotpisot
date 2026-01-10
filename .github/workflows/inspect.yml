@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  corpTracer:
+  page-inspect:
     runs-on: ubuntu-latest
 
     steps:
@@ -58,7 +58,7 @@ jobs:
       # Run scraper
       # -------------------------
       - name: Run webpage inspector
-        run: node webInspector.cjs
+        run: node webInspector.js
 
       # -------------------------
       # Cleanup credentials
