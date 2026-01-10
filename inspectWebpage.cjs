@@ -84,7 +84,7 @@ async function scrapePaginatedTable(browser, url) {
   console.log(`🌐 Visiting ${url}`);
   await page.goto(url, { waitUntil: 'networkidle2', timeout: 120000 });
 
-  // WAF / Cloudflare delay
+  // Cloudflare / WAF settle time
   await new Promise(r => setTimeout(r, 8000));
 
   const collected = [];
@@ -110,59 +110,68 @@ async function scrapePaginatedTable(browser, url) {
     const $ = cheerio.load(html);
 
     // -------------------------
-    // Extract rows via parsing
+    // Identify correct table
     // -------------------------
-    const rows = [];
+    let rowsFound = 0;
 
-    $('table tr').each((_, tr) => {
-      const tds = $(tr).find('td');
-      if (tds.length < 6) return;
+    $('table').each((_, table) => {
+      $(table)
+        .find('tr')
+        .each((__, tr) => {
+          const tds = $(tr).find('td');
+          if (tds.length < 5) return;
 
-      const id = $(tds[0]).text().trim();
-      const apn = $(tds[1]).text().trim();
-      const saleDate = $(tds[2]).text().trim();
-      const openingBid = $(tds[3]).text().trim();
-      const winningBid = $(tds[4]).text().trim();
-      const notes = $(tds[5]).text().trim();
+          const id = $(tds[0]).text().trim();
+          const apn = $(tds[1]).text().trim();
+          const saleDate = $(tds[2]).text().trim();
+          const openingBid = $(tds[3]).text().trim();
+          const winningBid = $(tds[4]).text().trim();
+          const notes = $(tds[5]).text().trim() || '';
 
-      if (!/^\d+$/.test(id)) return;
-      if (!saleDate.includes('/')) return;
-      if (!openingBid.includes('$')) return;
+          if (!/^\d+$/.test(id)) return;
+          if (!saleDate.includes('/')) return;
+          if (!openingBid.includes('$')) return;
 
-      const open = parseCurrency(openingBid);
-      const win = parseCurrency(winningBid);
+          const open = parseCurrency(openingBid);
+          const win = parseCurrency(winningBid);
+          const surplus =
+            open !== null && win !== null ? win - open : null;
 
-      const surplus =
-        open !== null && win !== null ? win - open : null;
+          collected.push({
+            id,
+            apn,
+            saleDate,
+            openingBid,
+            winningBid,
+            notes,
+            surplus,
+            meetsMinimumSurplus:
+              surplus !== null && surplus >= MIN_SURPLUS ? 'Yes' : 'No',
+          });
 
-      rows.push({
-        id,
-        apn,
-        saleDate,
-        openingBid,
-        winningBid,
-        notes,
-        surplus,
-        meetsMinimumSurplus:
-          surplus !== null && surplus >= MIN_SURPLUS ? 'Yes' : 'No',
-      });
+          rowsFound++;
+        });
     });
 
-    console.log(`📦 Valid rows: ${rows.length}`);
-    collected.push(...rows);
+    console.log(`📦 Valid rows: ${rowsFound}`);
 
     // -------------------------
     // Pagination fingerprint
     // -------------------------
-    const fingerprint = rows.map(r => r.id).join('|');
-    if (fingerprint === lastFingerprint) {
-      console.log('⏹ No data change detected');
+    const fingerprint = collected
+      .slice(-rowsFound)
+      .map(r => r.id)
+      .join('|');
+
+    if (!rowsFound || fingerprint === lastFingerprint) {
+      console.log('⏹ No new data detected');
       break;
     }
+
     lastFingerprint = fingerprint;
 
     // -------------------------
-    // Safe pagination click
+    // Safe pagination
     // -------------------------
     const hasNext = await page.evaluate(() => {
       const next = [...document.querySelectorAll('a')]
@@ -179,7 +188,8 @@ async function scrapePaginatedTable(browser, url) {
       break;
     }
 
-    await page.waitForTimeout(6000);
+    // Older Puppeteer safe wait
+    await new Promise(r => setTimeout(r, 6000));
     pageIndex++;
   }
 
