@@ -58,7 +58,7 @@ jobs:
       # Run scraper
       # -------------------------
       - name: Run webpage inspector
-        run: node webInspector.js
+        run: node webInspector.cjs
 
       # -------------------------
       # Cleanup credentials
