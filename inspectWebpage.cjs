@@ -64,7 +64,7 @@ async function scrapePaginatedTable(browser, url) {
   while (pageIndex <= MAX_PAGES) {
     console.log(`🔄 Page ${pageIndex}`);
 
-    await page.waitForSelector('body th tr td', { timeout: 60000 });
+    await page.waitForSelector('body', { timeout: 60000 });
 
     // Fingerprint table to detect real change
     const tableFingerprint = await page.$$eval(
