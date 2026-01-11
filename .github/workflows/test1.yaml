@@ -1,0 +1,150 @@
+name: Docket Beta Tester - 1 (Artifact Mode)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  TDA_webMgt:
+    runs-on: ubuntu-latest
+
+    steps:
+      # --------------------------------------------------
+      # Checkout repository
+      # --------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # --------------------------------------------------
+      # Setup Node.js
+      # --------------------------------------------------
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # --------------------------------------------------
+      # Install dependencies
+      # --------------------------------------------------
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      # --------------------------------------------------
+      # Write RAW Service Account JSON (NO BASE64)
+      # --------------------------------------------------
+      - name: Write Service Account JSON
+        run: |
+          echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
+
+      # --------------------------------------------------
+      # Validate Service Account JSON (fail fast)
+      # --------------------------------------------------
+      - name: Validate service account JSON
+        run: |
+          node -e "
+            const fs = require('fs');
+            const j = JSON.parse(fs.readFileSync('service-account.json','utf8'));
+            if (!j.private_key || !j.client_email) {
+              throw new Error('Invalid service account JSON');
+            }
+            console.log('Service account OK:', j.client_email);
+          "
+
+      # --------------------------------------------------
+      # Step 0: Run Webpage Pre-Inspection (writes to Google Sheets)
+      # --------------------------------------------------
+      - name: Run inspectWebpage.cjs
+        id: inspect
+        run: |
+          node inspectWebpage.cjs > inspect.log 2>&1
+          echo "=== InspectWebpage log ==="
+          cat inspect.log
+          # Fail if no "Successfully appended" marker found
+          if ! grep -q "Successfully appended" inspect.log; then
+            echo "❌ No valid elements appended to Google Sheets. Aborting pipeline."
+            exit 1
+          fi
+
+      # --------------------------------------------------
+      # Step 1: Run TSSF Header Organizer
+      # --------------------------------------------------
+      - name: Run organizer_headers_tssf.cjs
+        run: node organizer_headers_tssf.cjs
+
+      # --------------------------------------------------
+      # Step 2: Run Webpage Inspector (writes JSON internally)
+      # --------------------------------------------------
+      - name: Run webpageInspector.cjs
+        run: node webpageInspector.cjs
+
+      # --------------------------------------------------
+      # Step 2b: Transform to legacy schema
+      # --------------------------------------------------
+      - name: Transform to legacy schema
+        run: node bridge.cjs
+
+      # --------------------------------------------------
+      # Sanity check: validate raw-scrape.json
+      # --------------------------------------------------
+      - name: Validate raw-scrape.json
+        run: |
+          node -e "
+            const fs = require('fs');
+            const data = fs.readFileSync('raw-scrape.json','utf8');
+            let parsed;
+            try {
+              parsed = JSON.parse(data);
+            } catch (err) {
+              console.error('❌ Invalid JSON in raw-scrape.json:', err.message);
+              process.exit(1);
+            }
+            if (!Array.isArray(parsed)) {
+              console.error('❌ raw-scrape.json must be an array of rows');
+              process.exit(1);
+            }
+            if (parsed.length === 0) {
+              console.error('❌ raw-scrape.json is empty');
+              process.exit(1);
+            }
+            const sample = parsed[0];
+            const required = ['id','apn','saleDate','openingBid','winningBid','notes'];
+            const missing = required.filter(k => !(k in sample));
+            if (missing.length) {
+              console.error('❌ Missing keys in sample row:', missing.join(', '));
+              process.exit(1);
+            }
+            console.log('✅ raw-scrape.json is valid and schema-compliant');
+            console.log('🧪 Sample row:', JSON.stringify(sample, null, 2));
+          "
+
+      # --------------------------------------------------
+      # Upload raw scrape artifact
+      # --------------------------------------------------
+      - name: Upload raw scrape artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-scrape
+          path: raw-scrape.json
+
+      # --------------------------------------------------
+      # Step 3: Run Mapping Scraper (consume JSON artifact)
+      # --------------------------------------------------
+      - name: Download raw scrape artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: raw-scrape
+          path: .
+
+      - name: Run mappingScraper.cjs
+        run: node mappingScraper.cjs raw-scrape.json
+
+      # --------------------------------------------------
+      # Cleanup credentials
+      # --------------------------------------------------
+      - name: Cleanup secrets
+        if: always()
+        run: rm -f service-account.json
