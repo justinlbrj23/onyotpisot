@@ -4,14 +4,15 @@ const puppeteer = require('puppeteer');
 
 (async () => {
   // ----------------------------------------------------
-  // CI‑SAFE PUPPETEER LAUNCH (required for GitHub Actions)
+  // CI‑SAFE PUPPETEER LAUNCH (GitHub Actions ready)
   // ----------------------------------------------------
   const browser = await puppeteer.launch({
     headless: 'new',
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage' // optional but improves CI stability
+      '--disable-dev-shm-usage',
+      '--ignore-certificate-errors'   // 👈 bypass SSL mismatch
     ]
   });
 
@@ -20,7 +21,7 @@ const puppeteer = require('puppeteer');
   const START_URL =
     'https://www.realforeclose.com/index.cfm?zaction=USER&zmethod=AUCTIONLIST&countycode=KING';
 
-  await page.goto(START_URL);
+  await page.goto(START_URL, { waitUntil: 'domcontentloaded' });
 
   const allCards = [];
 
@@ -36,9 +37,7 @@ const puppeteer = require('puppeteer');
     // 2. PARSE MODERN SCHEMA
     // -----------------------------
     const cards = await page.evaluate(() => {
-      const clean = (txt) =>
-        txt?.replace(/\s+/g, ' ').trim() || '';
-
+      const clean = (txt) => txt?.replace(/\s+/g, ' ').trim() || '';
       const money = (txt) => {
         const n = parseFloat(txt?.replace(/[^0-9.]/g, ''));
         return isNaN(n) ? null : n;
@@ -46,7 +45,6 @@ const puppeteer = require('puppeteer');
 
       return Array.from(document.querySelectorAll('.auctionCard')).map((card) => {
         const get = (sel) => clean(card.querySelector(sel)?.textContent || '');
-
         const status = get('.auctionStatus');
         const saleDate = get('.saleDate');
         const saleAmount = money(get('.saleAmount'));
@@ -62,11 +60,7 @@ const puppeteer = require('puppeteer');
           assessedValue: money(get('.assessedValue')),
           saleResult:
             status === 'Auction Sold'
-              ? {
-                  date: saleDate,
-                  amount: saleAmount,
-                  buyerType: buyerType,
-                }
+              ? { date: saleDate, amount: saleAmount, buyerType }
               : null,
         };
       });
@@ -89,33 +83,26 @@ const puppeteer = require('puppeteer');
   // -----------------------------
   // 3. WRITE MODERN SCHEMA
   // -----------------------------
-  fs.writeFileSync(
-    'parsed-auctions.json',
-    JSON.stringify(allCards, null, 2)
-  );
+  fs.writeFileSync('parsed-auctions.json', JSON.stringify(allCards, null, 2));
   console.log(`📦 Saved modern schema: ${allCards.length} items`);
 
   // -----------------------------
   // 4. TRANSFORM → LEGACY SCHEMA
   // -----------------------------
-  const legacy = allCards.map((card) => {
-    return {
-      id: card.caseNumber,
-      apn: card.parcelId,
-      saleDate: card.saleResult?.date || '',
-      openingBid: card.openingBid || '',
-      winningBid: card.saleResult?.amount || '',
-      notes: [
-        card.auctionStatus,
-        card.saleResult?.buyerType,
-        card.assessedValue
-          ? `Assessed: $${card.assessedValue.toLocaleString()}`
-          : null,
-      ]
-        .filter(Boolean)
-        .join(' | '),
-    };
-  });
+  const legacy = allCards.map((card) => ({
+    id: card.caseNumber,
+    apn: card.parcelId,
+    saleDate: card.saleResult?.date || '',
+    openingBid: card.openingBid || '',
+    winningBid: card.saleResult?.amount || '',
+    notes: [
+      card.auctionStatus,
+      card.saleResult?.buyerType,
+      card.assessedValue ? `Assessed: $${card.assessedValue.toLocaleString()}` : null,
+    ]
+      .filter(Boolean)
+      .join(' | '),
+  }));
 
   fs.writeFileSync('raw-scrape.json', JSON.stringify(legacy, null, 2));
   console.log(`📦 Saved legacy schema: ${legacy.length} items`);
