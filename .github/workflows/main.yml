@@ -61,16 +61,19 @@ jobs:
         run: node organizer_headers_tssf.cjs
 
       # --------------------------------------------------
-      # Step 2: Run Webpage Inspector (writes JSON internally)
+      # Step 2: Run Webpage Inspector (writes parsed-auctions.json)
       # --------------------------------------------------
       - name: Run inspectWebpage.cjs
         run: node inspectWebpage.cjs
 
+      # --------------------------------------------------
+      # Step 3: Transform parsed-auctions.json → raw-scrape.json
+      # --------------------------------------------------
       - name: Transform to legacy schema
         run: node bridge.cjs
 
       # --------------------------------------------------
-      # Sanity check: validate raw-scrape.json
+      # Step 4: Validate raw-scrape.json (legacy schema)
       # --------------------------------------------------
       - name: Validate raw-scrape.json
         run: |
@@ -113,7 +116,7 @@ jobs:
           path: raw-scrape.json
 
       # --------------------------------------------------
-      # Step 3: Run Mapping Scraper (consume JSON artifact)
+      # Step 5: Run Mapping Scraper (consume JSON artifact)
       # --------------------------------------------------
       - name: Download raw scrape artifact
         uses: actions/download-artifact@v4
