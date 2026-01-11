@@ -1,87 +1,120 @@
-// inspectWebpage.cjs
+// webInspector.cjs (page intelligence + auction parser for SOLD cards only)
 // Requires:
 // npm install puppeteer cheerio googleapis
 
 const puppeteer = require('puppeteer');
 const cheerio = require('cheerio');
+const fs = require('fs');
 const { google } = require('googleapis');
 
 // =========================
 // CONFIG
 // =========================
 const SERVICE_ACCOUNT_FILE = './service-account.json';
-const SPREADSHEET_ID = '12qESHoxzkSXwUc5Pa1gAzt8-hIw7QyiExkIh6UeDCMM';
-const SHEET_RANGE = 'Property Appraiser!A:D';
-const TARGET_URL =
-  'https://king.wa.realforeclose.com/index.cfm?zaction=AUCTION&Zmethod=PREVIEW&AUCTIONDATE=09/10/2025';
+const SPREADSHEET_ID = '1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA';
+const SHEET_NAME = 'web_tda';
+const URL_RANGE = 'C2:C';
+
+const OUTPUT_ELEMENTS_FILE = 'raw-elements.json';
+const OUTPUT_ROWS_FILE = 'parsed-auctions.json';
+const OUTPUT_ERRORS_FILE = 'errors.json';
+
+const MIN_SURPLUS = 25000;
 
 // =========================
 // GOOGLE AUTH
 // =========================
 const auth = new google.auth.GoogleAuth({
   keyFile: SERVICE_ACCOUNT_FILE,
-  scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+  scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
 });
-
 const sheets = google.sheets({ version: 'v4', auth });
 
 // =========================
-// FUNCTION: Inspect Web Page
+// Load URLs
 // =========================
-async function inspectPage(url) {
-  let browser;
+async function loadTargetUrls() {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${SHEET_NAME}!${URL_RANGE}`,
+  });
+
+  return (res.data.values || [])
+    .flat()
+    .map(v => v.trim())
+    .filter(v => v.startsWith('http'));
+}
+
+// =========================
+– Currency parser
+// =========================
+function parseCurrency(str) {
+  if (!str) return null;
+  const n = parseFloat(str.replace(/[^0-9.-]/g, ''));
+  return isNaN(n) ? null : n;
+}
+
+// =========================
+// Helpers to extract fields
+// =========================
+function extractBetween(text, startLabel, stopLabels = []) {
+  const idx = text.toLowerCase().indexOf(startLabel.toLowerCase());
+  if (idx === -1) return '';
+
+  let substr = text.slice(idx + startLabel.length).trim();
+
+  let stopIndex = substr.length;
+  for (const stop of stopLabels) {
+    const i = substr.toLowerCase().indexOf(stop.toLowerCase());
+    if (i !== -1 && i < stopIndex) stopIndex = i;
+  }
+
+  return substr.slice(0, stopIndex).trim();
+}
+
+function extractDate(text) {
+  // e.g. "Date: 09/10/2025 09:01 AM PT"
+  const m = text.match(/Date:\s*([0-9/]{10})/i);
+  return m ? m[1] : '';
+}
+
+function extractAmountAfter(text, label) {
+  const regex = new RegExp(label + '\\s*\\$[\\d,]+\\.\\d{2}', 'i');
+  const m = text.match(regex);
+  if (!m) return '';
+  const moneyMatch = m[0].match(/\$[\d,]+\.\d{2}/);
+  return moneyMatch ? moneyMatch[0] : '';
+}
+
+// =========================
+// Inspect + Parse Page (SOLD only)
+// =========================
+async function inspectAndParse(browser, url) {
+  const page = await browser.newPage();
+  page.setDefaultNavigationTimeout(120000);
 
   try {
-    browser = await puppeteer.launch({
-      headless: 'new',
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled',
-      ],
-    });
-
-    const page = await browser.newPage();
-    page.setDefaultNavigationTimeout(120000);
-
-    // -------------------------
     // Anti-bot hardening
-    // -------------------------
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
         'AppleWebKit/537.36 (KHTML, like Gecko) ' +
         'Chrome/120.0.0.0 Safari/537.36'
     );
-
     await page.setExtraHTTPHeaders({
       'Accept-Language': 'en-US,en;q=0.9',
       Accept:
         'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
     });
-
     await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', {
-        get: () => false,
-      });
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
-    // -------------------------
-    // Navigate + wait for WAF
-    // -------------------------
-    await page.goto(url, {
-      waitUntil: 'networkidle2',
-      timeout: 120000,
-    });
-
-    // Cloudflare / WAF delay
+    console.log(`🌐 Visiting ${url}`);
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 120000 });
     await new Promise(r => setTimeout(r, 8000));
 
     const html = await page.content();
 
-    // -------------------------
-    // Detect hard block early
-    // -------------------------
     if (
       html.includes('403 Forbidden') ||
       html.includes('Access Denied') ||
@@ -91,66 +124,109 @@ async function inspectPage(url) {
     }
 
     const $ = cheerio.load(html);
-    const elements = [];
+
+    // (1) FILTER: auction-relevant elements ONLY (for diagnostics)
+    const relevantElements = [];
+    const auctionTextRegex =
+      /(\$\d{1,3}(,\d{3})+)|(\bAPN\b)|(\bParcel\b)|(\bAuction\b)|(\bCase\b)/i;
 
     $('*').each((_, el) => {
       const tag = el.tagName;
       const text = $(el).text().replace(/\s+/g, ' ').trim();
       const attrs = el.attribs || {};
-
-      if (text) {
-        elements.push({ tag, text, attrs });
+      if (text && auctionTextRegex.test(text)) {
+        relevantElements.push({ sourceUrl: url, tag, text, attrs });
       }
     });
 
-    return elements;
+    // (2) CARD-BASED AUCTION PARSER (SOLD ONLY)
+    const parsedRows = [];
+    const seen = new Set();
+
+    $('div').each((_, container) => {
+      const blockText = $(container).text().replace(/\s+/g, ' ').trim();
+      if (!blockText.includes('Auction Sold')) return; // SOLD cards only
+
+      const auctionStatus = 'Sold';
+
+      const auctionType = extractBetween(blockText, 'Auction Type:', [
+        'Case #',
+        'Certificate',
+        'Opening Bid',
+      ]);
+
+      const rawCase = extractBetween(blockText, 'Case #:', [
+        'Certificate',
+        'Opening Bid',
+      ]);
+      const caseNumber = rawCase.split(/\s+/)[0].trim();
+
+      const openingBidStr = extractAmountAfter(blockText, 'Opening Bid:');
+      const assessedValueStr = extractBetween(blockText, 'Assessed Value:', []);
+      const assessedMoneyMatch = assessedValueStr.match(/\$[\d,]+\.\d{2}/);
+      const assessedValue = assessedMoneyMatch
+        ? assessedMoneyMatch[0]
+        : '';
+
+      const salePriceStr = extractAmountAfter(blockText, 'Amount:');
+
+      // Parcel ID: "Parcel ID: 1125079053 | 1125079053"
+      const parcelRaw = extractBetween(blockText, 'Parcel ID:', [
+        'Property Address',
+        'Assessed Value',
+      ]);
+      const parcelId = parcelRaw.split('|')[0].trim();
+
+      // Property Address: stop at Assessed Value
+      const propertyAddress = extractBetween(blockText, 'Property Address:', [
+        'Assessed Value',
+      ]);
+
+      const auctionDate = extractDate(blockText);
+
+      if (!parcelId || !caseNumber || !openingBidStr || !salePriceStr || !assessedValue) {
+        return;
+      }
+
+      const open = parseCurrency(openingBidStr);
+      const assess = parseCurrency(assessedValue);
+      const salePrice = parseCurrency(salePriceStr);
+
+      let surplus = null;
+      if (assess !== null && salePrice !== null) {
+        surplus = assess - salePrice;
+      }
+
+      const meetsMinimumSurplus =
+        surplus !== null && surplus >= MIN_SURPLUS ? 'Yes' : 'No';
+
+      const dedupeKey = `${url}|${caseNumber}|${parcelId}`;
+      if (seen.has(dedupeKey)) return;
+      seen.add(dedupeKey);
+
+      parsedRows.push({
+        sourceUrl: url,
+        auctionStatus,
+        auctionType: auctionType || 'Tax Sale',
+        caseNumber,
+        parcelId,
+        propertyAddress,
+        openingBid: openingBidStr,
+        salePrice: salePriceStr,
+        assessedValue,
+        auctionDate,
+        surplus,
+        meetsMinimumSurplus,
+      });
+    });
+
+    console.log(`📦 Elements: ${relevantElements.length} | SOLD auctions: ${parsedRows.length}`);
+    return { relevantElements, parsedRows };
   } catch (err) {
-    console.error('❌ Error during page inspection:', err.message);
-    return [];
+    console.error(`❌ Error on ${url}:`, err.message);
+    return { relevantElements: [], parsedRows: [], error: { url, message: err.message } };
   } finally {
-    if (browser) await browser.close();
-  }
-}
-
-// =========================
-// FUNCTION: Append to Google Sheets
-// =========================
-async function appendToSheet(results) {
-  if (!results.length) {
-    console.warn('⚠️ No valid data to write to Google Sheets.');
-    return;
-  }
-
-  const timestamp = new Date().toISOString();
-
-  const values = results.map(r => {
-    const attrString = Object.entries(r.attrs)
-      .map(([k, v]) => `${k}=${v}`)
-      .join('; ');
-    return [timestamp, r.tag, r.text, attrString];
-  });
-
-  try {
-    const existing = await sheets.spreadsheets.values.get({
-      spreadsheetId: SPREADSHEET_ID,
-      range: SHEET_RANGE,
-    });
-
-    if (!existing.data.values || existing.data.values.length === 0) {
-      values.unshift(['Timestamp', 'Tag', 'Text', 'Attributes']);
-    }
-
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: SPREADSHEET_ID,
-      range: SHEET_RANGE,
-      valueInputOption: 'RAW',
-      insertDataOption: 'INSERT_ROWS',
-      requestBody: { values },
-    });
-
-    console.log(`✅ Successfully appended ${values.length} rows.`);
-  } catch (err) {
-    console.error('❌ Error writing to Google Sheets:', err.message);
+    await page.close();
   }
 }
 
@@ -158,14 +234,49 @@ async function appendToSheet(results) {
 // MAIN
 // =========================
 (async () => {
-  console.log('🔍 Inspecting webpage...');
-  const results = await inspectPage(TARGET_URL);
+  console.log('📥 Loading URLs...');
+  const urls = await loadTargetUrls();
 
-  console.log(`📦 Total elements parsed: ${results.length}`);
-  console.log('🧪 Sample output:', results.slice(0, 5));
+  const browser = await puppeteer.launch({
+    headless: 'new',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-blink-features=AutomationControlled',
+      '--ignore-certificate-errors',
+    ],
+  });
 
-  console.log('📤 Writing results to Google Sheets...');
-  await appendToSheet(results);
+  const allElements = [];
+  const allRows = [];
+  const errors = [];
 
-  console.log('🏁 Done.');
+  for (const url of urls) {
+    const { relevantElements, parsedRows, error } = await inspectAndParse(browser, url);
+    allElements.push(...relevantElements);
+    allRows.push(...parsedRows);
+    if (error) errors.push(error);
+  }
+
+  await browser.close();
+
+  // Global dedupe just in case
+  const uniqueMap = new Map();
+  for (const row of allRows) {
+    const key = `${row.sourceUrl}|${row.caseNumber}|${row.parcelId}`;
+    if (!uniqueMap.has(key)) uniqueMap.set(key, row);
+  }
+  const finalRows = [...uniqueMap.values()];
+
+  fs.writeFileSync(OUTPUT_ELEMENTS_FILE, JSON.stringify(allElements, null, 2));
+  fs.writeFileSync(OUTPUT_ROWS_FILE, JSON.stringify(finalRows, null, 2));
+  if (errors.length) {
+    fs.writeFileSync(OUTPUT_ERRORS_FILE, JSON.stringify(errors, null, 2));
+    console.log(`⚠️ Saved ${errors.length} errors → ${OUTPUT_ERRORS_FILE}`);
+  }
+
+  console.log(`✅ Saved ${allElements.length} elements → ${OUTPUT_ELEMENTS_FILE}`);
+  console.log(`✅ Saved ${finalRows.length} SOLD auctions → ${OUTPUT_ROWS_FILE}`);
+  console.log('🏁 Done');
 })();
