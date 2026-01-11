@@ -1,4 +1,4 @@
-name: Surplus Scraping Pipeline (Artifact Mode)
+name: Docket Scraping Pipeline (Artifact Mode)
 
 on:
   workflow_dispatch:
