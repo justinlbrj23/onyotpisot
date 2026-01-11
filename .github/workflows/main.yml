@@ -64,7 +64,7 @@ jobs:
       # Step 2: Run Webpage Inspector (writes JSON internally)
       # --------------------------------------------------
       - name: Run inspectWebpage.cjs
-        run: node inspectWebpage.cjs
+        run: node scrape-unified.cjs
 
       - name: Transform to legacy schema
         run: node bridge.cjs
