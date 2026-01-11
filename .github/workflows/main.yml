@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  TDA_webMgt:
+  tda_pipeline:
     runs-on: ubuntu-latest
 
     steps:
@@ -34,14 +34,14 @@ jobs:
           fi
 
       # --------------------------------------------------
-      # Write RAW Service Account JSON (NO BASE64)
+      # Write RAW Service Account JSON
       # --------------------------------------------------
       - name: Write Service Account JSON
         run: |
           echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
 
       # --------------------------------------------------
-      # Validate Service Account JSON (fail fast)
+      # Validate Service Account JSON
       # --------------------------------------------------
       - name: Validate service account JSON
         run: |
@@ -55,74 +55,45 @@ jobs:
           "
 
       # --------------------------------------------------
-      # Step 1: Run TSSF Header Organizer
+      # STEP 1 — Create TSSF Headers
       # --------------------------------------------------
       - name: Run organizer_headers_tssf.cjs
         run: node organizer_headers_tssf.cjs
 
       # --------------------------------------------------
-      # Step 2: Run Webpage Inspector (writes JSON internally)
+      # STEP 2 — Run webInspector.cjs (Page Intelligence)
+      # --------------------------------------------------
+      - name: Run webInspector.cjs
+        run: node webInspector.cjs
+
+      # Save artifacts from webInspector
+      - name: Upload inspector artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: inspector-artifacts
+          path: |
+            raw-elements.json
+            parsed-auctions.json
+            errors.json
+
+      # --------------------------------------------------
+      # STEP 3 — Run inspectWebpage.cjs (Writes Recon Data)
       # --------------------------------------------------
       - name: Run inspectWebpage.cjs
         run: node inspectWebpage.cjs
 
-      - name: Transform to legacy schema
-        run: node bridge.cjs
+      # --------------------------------------------------
+      # STEP 4 — Run mappingScraper.cjs (Final Mapping)
+      # --------------------------------------------------
+      - name: Run mappingScraper.cjs
+        run: node mappingScraper.cjs parsed-auctions.json
 
-      # --------------------------------------------------
-      # Sanity check: validate raw-scrape.json
-      # --------------------------------------------------
-      - name: Validate raw-scrape.json
-        run: |
-          node -e "
-            const fs = require('fs');
-            const data = fs.readFileSync('raw-scrape.json','utf8');
-            let parsed;
-            try {
-              parsed = JSON.parse(data);
-            } catch (err) {
-              console.error('❌ Invalid JSON in raw-scrape.json:', err.message);
-              process.exit(1);
-            }
-            if (!Array.isArray(parsed)) {
-              console.error('❌ raw-scrape.json must be an array of rows');
-              process.exit(1);
-            }
-            if (parsed.length === 0) {
-              console.error('❌ raw-scrape.json is empty');
-              process.exit(1);
-            }
-            const sample = parsed[0];
-            const required = ['id','apn','saleDate','openingBid','winningBid','notes'];
-            const missing = required.filter(k => !(k in sample));
-            if (missing.length) {
-              console.error('❌ Missing keys in sample row:', missing.join(', '));
-              process.exit(1);
-            }
-            console.log('✅ raw-scrape.json is valid and schema-compliant');
-            console.log('🧪 Sample row:', JSON.stringify(sample, null, 2));
-          "
-
-      # --------------------------------------------------
-      # Upload raw scrape artifact
-      # --------------------------------------------------
-      - name: Upload raw scrape artifact
+      # Save mapped output
+      - name: Upload mapped output
         uses: actions/upload-artifact@v4
         with:
-          name: raw-scrape
-          path: raw-scrape.json
-
-      # --------------------------------------------------
-      # Step 3: Run Mapping Scraper (consume JSON artifact)
-      # --------------------------------------------------
-      - name: Download raw scrape artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: raw-scrape
-          path: .
-
-      - name: Run mappingScraper.cjs
-        run: node mappingScraper.cjs raw-scrape.json
+          name: mapped-output
+          path: mapped-output.json
 
       # --------------------------------------------------
       # Cleanup credentials
