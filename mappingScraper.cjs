@@ -12,7 +12,7 @@ const SERVICE_ACCOUNT_FILE = "./service-account.json";
 const SPREADSHEET_ID = "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
 const SHEET_NAME_URLS = "web_tda"; // where URLs, counties, states are
 const SHEET_NAME_RAW = "raw_main"; // where we append mapped rows
-const INPUT_FILE = process.argv[2] || "raw-scrape.json"; // JSON artifact from inspectWebpage.cjs
+const INPUT_FILE = process.argv[2] || "raw-scrape.json"; // JSON artifact from scrape-unified.cjs
 
 // =========================
 // GOOGLE AUTH
@@ -34,11 +34,11 @@ const HEADERS = [
   "Lien / Judgment Type","Creditor Name","Lien Amount","Lien Recording Date","Lien Expired? (Yes/No)","Lien Satisfied? (Yes/No)",
   "Total Open Debt","Final Estimated Surplus to Owner","Deal Viable? (Yes/No)",
   "Ownership Deed Collected? (Yes/No)","Foreclosure Deed Collected? (Yes/No)","Proof of Sale Collected? (Yes/No)","Debt Search Screenshot Collected? (Yes/No)","Tax Assessor Page Collected? (Yes/No)","File Complete? (Yes/No)",
-  "File Submitted? (Yes/No)","Submission Date","Accepted / Rejected","Kickback Reason","Researcher Name"
+  "File Submitted? (Yes/No)","Submission Date","Accepted / Rejected","Kickback Reason","Researcher Name","Notes"
 ];
 
 // =========================
-// FUNCTION: Fetch URL → County/State mapping from sheet
+// FUNCTION: County/State mapping from sheet
 // =========================
 async function getUrlMapping() {
   const res = await sheets.spreadsheets.values.get({
@@ -53,7 +53,7 @@ async function getUrlMapping() {
     if (url) mapping[url.trim()] = { county: county || "", state: state || "" };
   });
 
-  return mapping; // { "https://sacramento.mytaxsale.com/...": {county, state}, ... }
+  return mapping; // { "https://...": {county, state}, ... }
 }
 
 // =========================
@@ -63,15 +63,15 @@ function mapRow(raw, urlMapping) {
   const mapped = {};
   HEADERS.forEach(h => (mapped[h] = "")); // initialize all headers
 
-  // Basic mappings from table fields
-  mapped["Parcel / APN Number"] = raw.apn;
-  mapped["Auction Date"] = raw.saleDate;
-  mapped["Opening / Minimum Bid"] = raw.openingBid;
-  mapped["Sale Price"] = raw.winningBid;
-  mapped["Case Number"] = raw.caseNumber;
+  // Basic mappings from unified raw-scrape.json
+  mapped["Parcel / APN Number"] = raw.apn || "";
+  mapped["Auction Date"] = raw.saleDate || "";
+  mapped["Opening / Minimum Bid"] = raw.openingBid || "";
+  mapped["Sale Price"] = raw.winningBid || "";
+  mapped["Case Number"] = raw.id || ""; // unified schema uses "id"
   mapped["Notes"] = raw.notes || "";
 
-  // Surplus fields
+  // Surplus fields (if present in extended schema)
   if (raw.surplus !== undefined && raw.surplus !== null) {
     mapped["Estimated Surplus"] = raw.surplus.toString();
   }
@@ -82,10 +82,15 @@ function mapRow(raw, urlMapping) {
   // -------------------------
   // Dynamic State/County from sheet
   // -------------------------
-  const url = raw.sourceUrl || "";
+  const url = raw.sourceUrl || ""; // optional, may not exist
   const geo = urlMapping[url] || { county: "", state: "" };
   mapped["State"] = geo.state;
   mapped["County"] = geo.county;
+
+  // Property Address (if available in notes or extended schema)
+  if (raw.propertyAddress) {
+    mapped["Property Address"] = raw.propertyAddress;
+  }
 
   return mapped;
 }
