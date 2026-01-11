@@ -1,4 +1,4 @@
-name: Docket Scraping Pipeline (Artifact Mode)
+name: Docket Tester - 1: (Artifact Mode)
 
 on:
   workflow_dispatch:
