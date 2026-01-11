@@ -64,10 +64,10 @@ jobs:
       # Step 2: Run Webpage Inspector (writes JSON internally)
       # --------------------------------------------------
       - name: Run inspectWebpage.cjs
-        run: node scrape-unified.cjs
+        run: node inspectWebpage.cjs
 
       - name: Transform to legacy schema
-        run: node bridge.cjs
+        run: node bridge.js
 
       # --------------------------------------------------
       # Sanity check: validate raw-scrape.json
