@@ -100,31 +100,6 @@ function mapRow(raw, urlMapping) {
 }
 
 // =========================
-// FUNCTION: Validate mapped row
-// =========================
-function validateRow(row, index) {
-  const issues = [];
-
-  // Critical fields
-  if (!row["Parcel / APN Number"]) issues.push("Missing APN");
-  if (!row["Auction Date"]) issues.push("Missing Auction Date");
-  if (!row["Case Number"]) issues.push("Missing Case Number");
-
-  // Surplus consistency
-  if (row["Estimated Surplus"] && !row["Meets Minimum Surplus? (Yes/No)"]) {
-    issues.push("Surplus present but MeetsMin flag missing");
-  }
-
-  // Address sanity
-  if (!row["Property Address"]) issues.push("Missing Property Address");
-
-  if (issues.length > 0) {
-    console.warn(`⚠️ Row ${index + 1} validation issues: ${issues.join("; ")}`);
-  }
-  return issues.length === 0;
-}
-
-// =========================
 // FUNCTION: Append rows to sheet
 // =========================
 async function appendRows(rows) {
@@ -154,12 +129,7 @@ async function appendRows(rows) {
   const urlMapping = await getUrlMapping();
   console.log(`🌐 Fetched ${Object.keys(urlMapping).length} URL → County/State mappings`);
 
-  const mappedRows = rawData.map((raw, i) => {
-    const mapped = mapRow(raw, urlMapping);
-    validateRow(mapped, i);
-    return mapped;
-  });
-
+  const mappedRows = rawData.map(raw => mapRow(raw, urlMapping));
   console.log("🧪 Sample mapped row preview:", mappedRows[0]);
 
   await appendRows(mappedRows);
