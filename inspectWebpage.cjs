@@ -15,7 +15,10 @@ const SPREADSHEET_ID = '1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA';
 const SHEET_NAME = 'web_tda';
 const URL_RANGE = 'C2:C';
 
-const OUTPUT_FILE = 'raw-scrape.json';
+const OUTPUT_ELEMENTS_FILE = 'raw-elements.json';
+const OUTPUT_ROWS_FILE = 'parsed-auctions.json';
+
+const MIN_SURPLUS = 25000;
 
 // =========================
 // GOOGLE AUTH
@@ -24,11 +27,10 @@ const auth = new google.auth.GoogleAuth({
   keyFile: SERVICE_ACCOUNT_FILE,
   scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
 });
-
 const sheets = google.sheets({ version: 'v4', auth });
 
 // =========================
-// Load URLs from Google Sheets
+// Load URLs
 // =========================
 async function loadTargetUrls() {
   const res = await sheets.spreadsheets.values.get({
@@ -43,10 +45,18 @@ async function loadTargetUrls() {
 }
 
 // =========================
-// FUNCTION: Inspect Web Page
-// (SAME LOGIC AS REFERENCE SCRIPT)
+// Currency parser
 // =========================
-async function inspectPage(browser, url) {
+function parseCurrency(str) {
+  if (!str) return null;
+  const n = parseFloat(str.replace(/[^0-9.-]/g, ''));
+  return isNaN(n) ? null : n;
+}
+
+// =========================
+// Inspect + Parse Page
+// =========================
+async function inspectAndParse(browser, url) {
   const page = await browser.newPage();
   page.setDefaultNavigationTimeout(120000);
 
@@ -72,22 +82,12 @@ async function inspectPage(browser, url) {
       });
     });
 
-    // -------------------------
-    // Navigate + WAF wait
-    // -------------------------
     console.log(`🌐 Visiting ${url}`);
-    await page.goto(url, {
-      waitUntil: 'networkidle2',
-      timeout: 120000,
-    });
-
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 120000 });
     await new Promise(r => setTimeout(r, 8000));
 
     const html = await page.content();
 
-    // -------------------------
-    // Detect hard block early
-    // -------------------------
     if (
       html.includes('403 Forbidden') ||
       html.includes('Access Denied') ||
@@ -96,19 +96,22 @@ async function inspectPage(browser, url) {
       throw new Error('Blocked by target website (403)');
     }
 
-    // -------------------------
-    // HTML → Cheerio → Elements
-    // -------------------------
     const $ = cheerio.load(html);
-    const elements = [];
+
+    // ==================================================
+    // (1) FILTER: auction-relevant elements ONLY
+    // ==================================================
+    const relevantElements = [];
+    const auctionTextRegex =
+      /(\$\d{1,3}(,\d{3})+)|(\bAPN\b)|(\bParcel\b)|(\d{1,2}\/\d{1,2}\/\d{4})/i;
 
     $('*').each((_, el) => {
       const tag = el.tagName;
       const text = $(el).text().replace(/\s+/g, ' ').trim();
       const attrs = el.attribs || {};
 
-      if (text) {
-        elements.push({
+      if (text && auctionTextRegex.test(text)) {
+        relevantElements.push({
           sourceUrl: url,
           tag,
           text,
@@ -117,11 +120,53 @@ async function inspectPage(browser, url) {
       }
     });
 
-    console.log(`📦 Parsed ${elements.length} elements`);
-    return elements;
+    // ==================================================
+    // (5) TABLE PARSER — HTML ONLY (NO DOM EXEC)
+    // ==================================================
+    const parsedRows = [];
+
+    $('table tr').each((_, tr) => {
+      const tds = $(tr).find('td');
+      if (tds.length < 5) return;
+
+      const id = $(tds[0]).text().trim();
+      const apn = $(tds[1]).text().trim();
+      const saleDate = $(tds[2]).text().trim();
+      const openingBid = $(tds[3]).text().trim();
+      const winningBid = $(tds[4]).text().trim();
+      const notes = $(tds[5]).text().trim() || '';
+
+      if (!/^\d+$/.test(id)) return;
+      if (!saleDate.includes('/')) return;
+      if (!openingBid.includes('$')) return;
+
+      const open = parseCurrency(openingBid);
+      const win = parseCurrency(winningBid);
+      const surplus =
+        open !== null && win !== null ? win - open : null;
+
+      parsedRows.push({
+        sourceUrl: url,
+        id,
+        apn,
+        saleDate,
+        openingBid,
+        winningBid,
+        notes,
+        surplus,
+        meetsMinimumSurplus:
+          surplus !== null && surplus >= MIN_SURPLUS ? 'Yes' : 'No',
+      });
+    });
+
+    console.log(
+      `📦 Elements: ${relevantElements.length} | Rows: ${parsedRows.length}`
+    );
+
+    return { relevantElements, parsedRows };
   } catch (err) {
-    console.error(`❌ Error inspecting ${url}:`, err.message);
-    return [];
+    console.error(`❌ Error on ${url}:`, err.message);
+    return { relevantElements: [], parsedRows: [] };
   } finally {
     await page.close();
   }
@@ -131,13 +176,8 @@ async function inspectPage(browser, url) {
 // MAIN
 // =========================
 (async () => {
-  console.log('📥 Loading URLs from Google Sheets...');
+  console.log('📥 Loading URLs...');
   const urls = await loadTargetUrls();
-
-  if (!urls.length) {
-    console.error('❌ No URLs found in sheet');
-    process.exit(1);
-  }
 
   const browser = await puppeteer.launch({
     headless: 'new',
@@ -149,16 +189,33 @@ async function inspectPage(browser, url) {
     ],
   });
 
-  const allResults = [];
+  const allElements = [];
+  const allRows = [];
 
   for (const url of urls) {
-    const results = await inspectPage(browser, url);
-    allResults.push(...results);
+    const { relevantElements, parsedRows } =
+      await inspectAndParse(browser, url);
+
+    allElements.push(...relevantElements);
+    allRows.push(...parsedRows);
   }
 
   await browser.close();
 
-  fs.writeFileSync(OUTPUT_FILE, JSON.stringify(allResults, null, 2));
-  console.log(`✅ Saved ${allResults.length} elements to ${OUTPUT_FILE}`);
+  fs.writeFileSync(
+    OUTPUT_ELEMENTS_FILE,
+    JSON.stringify(allElements, null, 2)
+  );
+  fs.writeFileSync(
+    OUTPUT_ROWS_FILE,
+    JSON.stringify(allRows, null, 2)
+  );
+
+  console.log(
+    `✅ Saved ${allElements.length} elements → ${OUTPUT_ELEMENTS_FILE}`
+  );
+  console.log(
+    `✅ Saved ${allRows.length} auction rows → ${OUTPUT_ROWS_FILE}`
+  );
   console.log('🏁 Done');
 })();
