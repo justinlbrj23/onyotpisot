@@ -67,7 +67,7 @@ jobs:
         run: node inspectWebpage.cjs
 
       - name: Transform to legacy schema
-        run: node bridge.js
+        run: node bridge.cjs
 
       # --------------------------------------------------
       # Sanity check: validate raw-scrape.json
