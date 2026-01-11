@@ -3,7 +3,18 @@ const fs = require('fs');
 const puppeteer = require('puppeteer');
 
 (async () => {
-  const browser = await puppeteer.launch({ headless: 'new' });
+  // ----------------------------------------------------
+  // CI‑SAFE PUPPETEER LAUNCH (required for GitHub Actions)
+  // ----------------------------------------------------
+  const browser = await puppeteer.launch({
+    headless: 'new',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage' // optional but improves CI stability
+    ]
+  });
+
   const page = await browser.newPage();
 
   const START_URL =
