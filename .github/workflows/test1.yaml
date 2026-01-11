@@ -1,4 +1,4 @@
-name: Docket Tester - 1: (Artifact Mode)
+name: TDA Scraping Pipeline (Artifact Mode)
 
 on:
   workflow_dispatch:
@@ -77,7 +77,7 @@ jobs:
             errors.json
 
       # --------------------------------------------------
-      # STEP 3 — Run inspectWebpage.cjs (Writes Recon Data)
+      # STEP 3 — Run inspectWebpage.cjs (Recon Writer)
       # --------------------------------------------------
       - name: Run inspectWebpage.cjs
         run: node inspectWebpage.cjs
