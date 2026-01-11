@@ -103,7 +103,7 @@ async function inspectAndParse(browser, url) {
     // ==================================================
     const relevantElements = [];
     const auctionTextRegex =
-      /(\$\d{1,3}(,\d{3})+)|(\bAPN\b)|(\bParcel\b)|(\d{1,2}\/\d{1,2}\/\d{4})/i;
+      /(\$\d{1,3}(,\d{3})+)|(\bAPN\b)|(\bParcel\b)|(\bAuction\b)|(\bCase\b)/i;
 
     $('*').each((_, el) => {
       const tag = el.tagName;
@@ -121,38 +121,62 @@ async function inspectAndParse(browser, url) {
     });
 
     // ==================================================
-    // (5) TABLE PARSER — HTML ONLY (NO DOM EXEC)
+    // (5) CARD-BASED AUCTION PARSER (NO TABLES)
     // ==================================================
     const parsedRows = [];
 
-    $('table tr').each((_, tr) => {
-      const tds = $(tr).find('td');
-      if (tds.length < 5) return;
+    $('div').each((_, container) => {
+      const blockText = $(container)
+        .text()
+        .replace(/\s+/g, ' ')
+        .trim();
 
-      const id = $(tds[0]).text().trim();
-      const apn = $(tds[1]).text().trim();
-      const saleDate = $(tds[2]).text().trim();
-      const openingBid = $(tds[3]).text().trim();
-      const winningBid = $(tds[4]).text().trim();
-      const notes = $(tds[5]).text().trim() || '';
+      // Heuristic: auction cards always contain Auction Type
+      if (!blockText.includes('Auction Type')) return;
 
-      if (!/^\d+$/.test(id)) return;
-      if (!saleDate.includes('/')) return;
-      if (!openingBid.includes('$')) return;
+      const extract = label => {
+        const regex = new RegExp(`${label}\\s*:?\\s*([^A-Z$]+)`, 'i');
+        const m = blockText.match(regex);
+        return m ? m[1].trim() : '';
+      };
+
+      const auctionStatus =
+        blockText.includes('Redeemed')
+          ? 'Redeemed'
+          : blockText.includes('Auction Sold')
+          ? 'Sold'
+          : 'Active';
+
+      const openingBidMatch = blockText.match(/\$[\d,]+\.\d{2}/);
+      const openingBid = openingBidMatch ? openingBidMatch[0] : '';
+
+      const assessedValueMatch =
+        blockText.match(/Assessed Value:\s*\$[\d,]+\.\d{2}/i);
+      const assessedValue = assessedValueMatch
+        ? assessedValueMatch[0]
+            .replace(/Assessed Value:/i, '')
+            .trim()
+        : '';
+
+      const parcelLink = $(container).find('a').first();
+      const parcelId = parcelLink.text().trim();
+
+      if (!parcelId || !openingBid) return;
 
       const open = parseCurrency(openingBid);
-      const win = parseCurrency(winningBid);
+      const assess = parseCurrency(assessedValue);
       const surplus =
-        open !== null && win !== null ? win - open : null;
+        open !== null && assess !== null ? assess - open : null;
 
       parsedRows.push({
         sourceUrl: url,
-        id,
-        apn,
-        saleDate,
+        auctionStatus,
+        auctionType: extract('Auction Type'),
+        caseNumber: extract('Case #'),
+        parcelId,
+        propertyAddress: extract('Property Address'),
         openingBid,
-        winningBid,
-        notes,
+        assessedValue,
         surplus,
         meetsMinimumSurplus:
           surplus !== null && surplus >= MIN_SURPLUS ? 'Yes' : 'No',
@@ -160,7 +184,7 @@ async function inspectAndParse(browser, url) {
     });
 
     console.log(
-      `📦 Elements: ${relevantElements.length} | Rows: ${parsedRows.length}`
+      `📦 Elements: ${relevantElements.length} | Auctions: ${parsedRows.length}`
     );
 
     return { relevantElements, parsedRows };
@@ -215,7 +239,7 @@ async function inspectAndParse(browser, url) {
     `✅ Saved ${allElements.length} elements → ${OUTPUT_ELEMENTS_FILE}`
   );
   console.log(
-    `✅ Saved ${allRows.length} auction rows → ${OUTPUT_ROWS_FILE}`
+    `✅ Saved ${allRows.length} auctions → ${OUTPUT_ROWS_FILE}`
   );
   console.log('🏁 Done');
 })();
