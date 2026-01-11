@@ -1,6 +1,5 @@
 // mappingScraper.cjs
-// Requires:
-// npm install googleapis
+// Requires: npm install googleapis
 
 const fs = require("fs");
 const { google } = require("googleapis");
@@ -12,7 +11,7 @@ const SERVICE_ACCOUNT_FILE = "./service-account.json";
 const SPREADSHEET_ID = "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
 const SHEET_NAME_URLS = "web_tda"; // where URLs, counties, states are
 const SHEET_NAME_RAW = "raw_main"; // where we append mapped rows
-const INPUT_FILE = process.argv[2] || "raw-scrape.json"; // JSON artifact from scrape-unified.cjs
+const INPUT_FILE = process.argv[2] || "raw-scrape.json"; // JSON artifact
 
 // =========================
 // GOOGLE AUTH
@@ -53,7 +52,16 @@ async function getUrlMapping() {
     if (url) mapping[url.trim()] = { county: county || "", state: state || "" };
   });
 
-  return mapping; // { "https://...": {county, state}, ... }
+  return mapping;
+}
+
+// =========================
+// FUNCTION: Normalize Yes/No
+// =========================
+function yn(val) {
+  if (val === true || val === "Yes") return "Yes";
+  if (val === false || val === "No") return "No";
+  return "";
 }
 
 // =========================
@@ -63,36 +71,57 @@ function mapRow(raw, urlMapping) {
   const mapped = {};
   HEADERS.forEach(h => (mapped[h] = "")); // initialize all headers
 
-  // Basic mappings from unified raw-scrape.json
+  // Basic mappings
   mapped["Parcel / APN Number"] = raw.apn || "";
-  mapped["Auction Date"] = raw.saleDate || "";
+  mapped["Auction Date"] = raw.saleDate || raw.auctionDate || "";
   mapped["Opening / Minimum Bid"] = raw.openingBid || "";
   mapped["Sale Price"] = raw.winningBid || "";
-  mapped["Case Number"] = raw.id || ""; // unified schema uses "id"
+  mapped["Case Number"] = raw.caseNumber || raw.id || "";
   mapped["Notes"] = raw.notes || "";
 
-  // Surplus fields (if present in extended schema)
+  // Surplus fields
   if (raw.surplus !== undefined && raw.surplus !== null) {
-    mapped["Estimated Surplus"] = raw.surplus.toString();
+    mapped["Estimated Surplus"] = String(raw.surplus);
   }
-  if (raw.meetsMinimumSurplus) {
-    mapped["Meets Minimum Surplus? (Yes/No)"] = raw.meetsMinimumSurplus;
-  }
+  mapped["Meets Minimum Surplus? (Yes/No)"] = yn(raw.meetsMinimumSurplus);
 
-  // -------------------------
-  // Dynamic State/County from sheet
-  // -------------------------
-  const url = raw.sourceUrl || ""; // optional, may not exist
+  // State/County
+  const url = raw.sourceUrl || "";
   const geo = urlMapping[url] || { county: "", state: "" };
   mapped["State"] = geo.state;
   mapped["County"] = geo.county;
 
-  // Property Address (if available in notes or extended schema)
+  // Property Address
   if (raw.propertyAddress) {
     mapped["Property Address"] = raw.propertyAddress;
   }
 
   return mapped;
+}
+
+// =========================
+// FUNCTION: Validate mapped row
+// =========================
+function validateRow(row, index) {
+  const issues = [];
+
+  // Critical fields
+  if (!row["Parcel / APN Number"]) issues.push("Missing APN");
+  if (!row["Auction Date"]) issues.push("Missing Auction Date");
+  if (!row["Case Number"]) issues.push("Missing Case Number");
+
+  // Surplus consistency
+  if (row["Estimated Surplus"] && !row["Meets Minimum Surplus? (Yes/No)"]) {
+    issues.push("Surplus present but MeetsMin flag missing");
+  }
+
+  // Address sanity
+  if (!row["Property Address"]) issues.push("Missing Property Address");
+
+  if (issues.length > 0) {
+    console.warn(`⚠️ Row ${index + 1} validation issues: ${issues.join("; ")}`);
+  }
+  return issues.length === 0;
 }
 
 // =========================
@@ -123,10 +152,15 @@ async function appendRows(rows) {
   console.log(`📦 Loaded ${rawData.length} raw rows from ${INPUT_FILE}`);
 
   const urlMapping = await getUrlMapping();
-  console.log(`🌐 Fetched ${Object.keys(urlMapping).length} URL → County/State mappings from sheet`);
+  console.log(`🌐 Fetched ${Object.keys(urlMapping).length} URL → County/State mappings`);
 
-  const mappedRows = rawData.map(raw => mapRow(raw, urlMapping));
-  console.log("🧪 Sample mapped row:", mappedRows[0]);
+  const mappedRows = rawData.map((raw, i) => {
+    const mapped = mapRow(raw, urlMapping);
+    validateRow(mapped, i);
+    return mapped;
+  });
+
+  console.log("🧪 Sample mapped row preview:", mappedRows[0]);
 
   await appendRows(mappedRows);
   console.log("🏁 Done.");
