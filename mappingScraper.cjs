@@ -1,5 +1,5 @@
 // mappingScraper.cjs
-// Google Sheets mapper + deduper (FIXED)
+// Google Sheets mapper + authoritative deduper (aligned with webInspector v2)
 
 const fs = require("fs");
 const { google } = require("googleapis");
@@ -23,7 +23,7 @@ const auth = new google.auth.GoogleAuth({
 const sheets = google.sheets({ version: "v4", auth });
 
 // =========================
-// HEADERS
+// HEADERS (AUTHORITATIVE)
 // =========================
 const HEADERS = [
   "State",
@@ -114,7 +114,10 @@ async function getUrlMapping() {
   const mapping = {};
   (res.data.values || []).forEach(([county, state, url]) => {
     if (url) {
-      mapping[normalizeUrl(url.trim())] = { county, state };
+      mapping[normalizeUrl(url.trim())] = {
+        county: county || "",
+        state: state || "",
+      };
     }
   });
 
@@ -152,26 +155,33 @@ function mapRow(raw, urlMapping) {
 
   const geo = urlMapping[normalizeUrl(raw.sourceUrl)] || {};
 
-  row["State"] = geo.state || "";
-  row["County"] = geo.county || "";
+  row["State"] = geo.state;
+  row["County"] = geo.county;
+
   row["Property Address"] = raw.propertyAddress || "";
   row["Parcel / APN Number"] = raw.parcelId || "";
   row["Case Number"] = raw.caseNumber || "";
+
+  // Auction date may not exist yet → keep safe
   row["Auction Date"] = raw.auctionDate || "";
 
   row["Sale Finalized (Yes/No)"] = "Yes";
+
+  // webInspector v2 outputs strings for these
   row["Sale Price"] = raw.salePrice || "";
   row["Opening / Minimum Bid"] = raw.openingBid || "";
 
   if (raw.surplus != null) {
-    row["Estimated Surplus"] = String(raw.surplus);
-    row["Final Estimated Surplus to Owner"] = String(raw.surplus);
+    const s = String(raw.surplus);
+    row["Estimated Surplus"] = s;
+    row["Final Estimated Surplus to Owner"] = s;
   }
 
   row["Meets Minimum Surplus? (Yes/No)"] = yn(raw.meetsMinimumSurplus);
   row["Deal Viable? (Yes/No)"] =
     row["Meets Minimum Surplus? (Yes/No)"] === "Yes" ? "Yes" : "No";
 
+  // Default research workflow flags
   row["Ownership Deed Collected? (Yes/No)"] = "No";
   row["Foreclosure Deed Collected? (Yes/No)"] = "No";
   row["Proof of Sale Collected? (Yes/No)"] = "No";
@@ -193,6 +203,7 @@ async function appendRows(rows) {
   }
 
   const values = rows.map(r => HEADERS.map(h => r[h] || ""));
+
   await sheets.spreadsheets.values.append({
     spreadsheetId: SPREADSHEET_ID,
     range: SHEET_NAME_RAW,
@@ -221,13 +232,13 @@ async function appendRows(rows) {
 
   console.log(`🔐 Loaded ${existingKeys.size} existing row keys`);
 
-  const mapped = rawData.map(r => mapRow(r, urlMapping));
-
   const newRows = [];
   let skipped = 0;
 
-  for (const row of mapped) {
+  for (const raw of rawData) {
+    const row = mapRow(raw, urlMapping);
     const key = buildUniqueKey(row);
+
     if (!key || existingKeys.has(key)) {
       skipped++;
     } else {
