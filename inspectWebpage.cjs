@@ -55,7 +55,7 @@ function parseCurrency(str) {
 }
 
 // =========================
-// Inspect + Parse Page
+// Inspect + Parse Page (SOLD + SURPLUS ONLY)
 // =========================
 async function inspectAndParse(browser, url) {
   const page = await browser.newPage();
@@ -93,7 +93,9 @@ async function inspectAndParse(browser, url) {
 
     const $ = cheerio.load(html);
 
-    // (1) FILTER: auction-relevant elements ONLY
+    // ----------------------------------
+    // Diagnostic element capture
+    // ----------------------------------
     const relevantElements = [];
     const auctionTextRegex =
       /(\$\d{1,3}(,\d{3})+)|(\bAPN\b)|(\bParcel\b)|(\bAuction\b)|(\bCase\b)/i;
@@ -107,11 +109,17 @@ async function inspectAndParse(browser, url) {
       }
     });
 
-    // (5) CARD-BASED AUCTION PARSER
+    // ----------------------------------
+    // SOLD + SURPLUS AUCTION PARSER
+    // ----------------------------------
     const parsedRows = [];
+    const seen = new Set();
+
     $('div').each((_, container) => {
       const blockText = $(container).text().replace(/\s+/g, ' ').trim();
-      if (!blockText.includes('Auction Type')) return;
+
+      // 🔒 HARD FILTER: SOLD ONLY
+      if (!blockText.includes('Auction Sold')) return;
 
       const extract = label => {
         const regex = new RegExp(`${label}\\s*:?\\s*([^\\n$]+)`, 'i');
@@ -119,45 +127,57 @@ async function inspectAndParse(browser, url) {
         return m ? m[1].trim() : '';
       };
 
-      const auctionStatus =
-        blockText.includes('Redeemed')
-          ? 'Redeemed'
-          : blockText.includes('Auction Sold')
-          ? 'Sold'
-          : 'Active';
+      const openingBidMatch = blockText.match(/Opening Bid:\s*\$[\d,]+\.\d{2}/i);
+      const salePriceMatch = blockText.match(/Amount:\s*\$[\d,]+\.\d{2}/i);
+      const assessedValueMatch =
+        blockText.match(/Assessed Value:\s*\$[\d,]+\.\d{2}/i);
 
-      const openingBidMatch = blockText.match(/\$[\d,]+\.\d{2}/);
-      const openingBid = openingBidMatch ? openingBidMatch[0] : '';
+      if (!salePriceMatch || !assessedValueMatch) return;
 
-      const assessedValueMatch = blockText.match(/Assessed Value:\s*\$[\d,]+\.\d{2}/i);
-      const assessedValue = assessedValueMatch
-        ? assessedValueMatch[0].replace(/Assessed Value:/i, '').trim()
+      const openingBid = openingBidMatch
+        ? openingBidMatch[0].replace(/Opening Bid:/i, '').trim()
         : '';
+
+      const salePrice = salePriceMatch[0].replace(/Amount:/i, '').trim();
+      const assessedValue =
+        assessedValueMatch[0].replace(/Assessed Value:/i, '').trim();
+
+      const sale = parseCurrency(salePrice);
+      const assess = parseCurrency(assessedValue);
+
+      if (sale === null || assess === null) return;
+
+      const surplus = assess - sale;
+
+      // 🔒 HARD FILTER: MINIMUM SURPLUS
+      if (surplus < MIN_SURPLUS) return;
 
       const parcelLink = $(container).find('a').first();
       const parcelId = parcelLink.text().trim();
+      const caseNumber = extract('Case #');
 
-      if (!parcelId || !openingBid) return;
+      if (!parcelId || !caseNumber) return;
 
-      const open = parseCurrency(openingBid);
-      const assess = parseCurrency(assessedValue);
-      const surplus = open !== null && assess !== null ? assess - open : null;
+      const dedupeKey = `${url}|${caseNumber}|${parcelId}`;
+      if (seen.has(dedupeKey)) return;
+      seen.add(dedupeKey);
 
       parsedRows.push({
         sourceUrl: url,
-        auctionStatus,
-        auctionType: extract('Auction Type'),
-        caseNumber: extract('Case #'),
+        auctionStatus: 'Sold',
+        auctionType: extract('Auction Type') || 'Tax Sale',
+        caseNumber,
         parcelId,
         propertyAddress: extract('Property Address'),
         openingBid,
+        salePrice,
         assessedValue,
         surplus,
-        meetsMinimumSurplus: surplus !== null && surplus >= MIN_SURPLUS ? 'Yes' : 'No',
+        meetsMinimumSurplus: 'Yes',
       });
     });
 
-    console.log(`📦 Elements: ${relevantElements.length} | Auctions: ${parsedRows.length}`);
+    console.log(`📦 Elements: ${relevantElements.length} | SOLD+SURPLUS: ${parsedRows.length}`);
     return { relevantElements, parsedRows };
   } catch (err) {
     console.error(`❌ Error on ${url}:`, err.message);
@@ -181,7 +201,7 @@ async function inspectAndParse(browser, url) {
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-blink-features=AutomationControlled',
-      '--ignore-certificate-errors' // 👈 added for SSL mismatch
+      '--ignore-certificate-errors',
     ],
   });
 
@@ -202,10 +222,8 @@ async function inspectAndParse(browser, url) {
   fs.writeFileSync(OUTPUT_ROWS_FILE, JSON.stringify(allRows, null, 2));
   if (errors.length) {
     fs.writeFileSync(OUTPUT_ERRORS_FILE, JSON.stringify(errors, null, 2));
-    console.log(`⚠️ Saved ${errors.length} errors → ${OUTPUT_ERRORS_FILE}`);
   }
 
-  console.log(`✅ Saved ${allElements.length} elements → ${OUTPUT_ELEMENTS_FILE}`);
-  console.log(`✅ Saved ${allRows.length} auctions → ${OUTPUT_ROWS_FILE}`);
+  console.log(`✅ Saved ${allRows.length} SOLD + SURPLUS auctions → ${OUTPUT_ROWS_FILE}`);
   console.log('🏁 Done');
 })();
