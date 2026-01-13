@@ -46,7 +46,7 @@ async function loadTargetUrls() {
 }
 
 // =========================
-// Currency parser
+// Helpers
 // =========================
 function parseCurrency(str) {
   if (!str) return null;
@@ -54,19 +54,28 @@ function parseCurrency(str) {
   return isNaN(n) ? null : n;
 }
 
+function withPage(url, pageNum) {
+  const u = new URL(url);
+  u.searchParams.set('PAGE', pageNum);
+  return u.toString();
+}
+
+function extractTotalPages(html) {
+  const m = html.match(/page\s+\d+\s+of\s+(\d+)/i);
+  return m ? parseInt(m[1], 10) : 1;
+}
+
 // =========================
-// Inspect + Parse Page (SOLD + SURPLUS ONLY)
+// Inspect + Parse ONE PAGE
 // =========================
-async function inspectAndParse(browser, url) {
+async function inspectSinglePage(browser, url) {
   const page = await browser.newPage();
   page.setDefaultNavigationTimeout(120000);
 
   try {
-    // Anti-bot hardening
     await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
-        'AppleWebKit/537.36 (KHTML, like Gecko) ' +
-        'Chrome/120.0.0.0 Safari/537.36'
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+        '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     );
     await page.setExtraHTTPHeaders({
       'Accept-Language': 'en-US,en;q=0.9',
@@ -93,74 +102,54 @@ async function inspectAndParse(browser, url) {
 
     const $ = cheerio.load(html);
 
-    // ----------------------------------
-    // Diagnostic element capture
-    // ----------------------------------
+    // ----------------------------
+    // Capture relevant elements
+    // ----------------------------
     const relevantElements = [];
     const auctionTextRegex =
-      /(\$\d{1,3}(,\d{3})+)|(\bAPN\b)|(\bParcel\b)|(\bAuction\b)|(\bCase\b)/i;
+      /(\$\d{1,3}(,\d{3})+)|(\bParcel\b)|(\bAuction\b)|(\bCase\b)/i;
 
     $('*').each((_, el) => {
-      const tag = el.tagName;
       const text = $(el).text().replace(/\s+/g, ' ').trim();
-      const attrs = el.attribs || {};
       if (text && auctionTextRegex.test(text)) {
-        relevantElements.push({ sourceUrl: url, tag, text, attrs });
+        relevantElements.push({
+          sourceUrl: url,
+          tag: el.tagName,
+          text,
+          attrs: el.attribs || {},
+        });
       }
     });
 
-    // ----------------------------------
-    // SOLD + SURPLUS AUCTION PARSER
-    // ----------------------------------
+    // ----------------------------
+    // SOLD + SURPLUS PARSER
+    // ----------------------------
     const parsedRows = [];
-    const seen = new Set();
 
     $('div').each((_, container) => {
       const blockText = $(container).text().replace(/\s+/g, ' ').trim();
-
-      // 🔒 HARD FILTER: SOLD ONLY
       if (!blockText.includes('Auction Sold')) return;
 
       const extract = label => {
-        const regex = new RegExp(`${label}\\s*:?\\s*([^\\n$]+)`, 'i');
-        const m = blockText.match(regex);
+        const r = new RegExp(`${label}\\s*:?\\s*([^\\n$]+)`, 'i');
+        const m = blockText.match(r);
         return m ? m[1].trim() : '';
       };
 
-      const openingBidMatch = blockText.match(/Opening Bid:\s*\$[\d,]+\.\d{2}/i);
-      const salePriceMatch = blockText.match(/Amount:\s*\$[\d,]+\.\d{2}/i);
-      const assessedValueMatch =
-        blockText.match(/Assessed Value:\s*\$[\d,]+\.\d{2}/i);
+      const saleMatch = blockText.match(/Amount:\s*\$[\d,]+\.\d{2}/i);
+      const assessMatch = blockText.match(/Assessed Value:\s*\$[\d,]+\.\d{2}/i);
+      if (!saleMatch || !assessMatch) return;
 
-      if (!salePriceMatch || !assessedValueMatch) return;
-
-      const openingBid = openingBidMatch
-        ? openingBidMatch[0].replace(/Opening Bid:/i, '').trim()
-        : '';
-
-      const salePrice = salePriceMatch[0].replace(/Amount:/i, '').trim();
-      const assessedValue =
-        assessedValueMatch[0].replace(/Assessed Value:/i, '').trim();
-
-      const sale = parseCurrency(salePrice);
-      const assess = parseCurrency(assessedValue);
-
+      const sale = parseCurrency(saleMatch[0]);
+      const assess = parseCurrency(assessMatch[0]);
       if (sale === null || assess === null) return;
 
       const surplus = assess - sale;
-
-      // 🔒 HARD FILTER: MINIMUM SURPLUS
       if (surplus < MIN_SURPLUS) return;
 
-      const parcelLink = $(container).find('a').first();
-      const parcelId = parcelLink.text().trim();
+      const parcelId = $(container).find('a').first().text().trim();
       const caseNumber = extract('Case #');
-
       if (!parcelId || !caseNumber) return;
-
-      const dedupeKey = `${url}|${caseNumber}|${parcelId}`;
-      if (seen.has(dedupeKey)) return;
-      seen.add(dedupeKey);
 
       parsedRows.push({
         sourceUrl: url,
@@ -169,26 +158,26 @@ async function inspectAndParse(browser, url) {
         caseNumber,
         parcelId,
         propertyAddress: extract('Property Address'),
-        openingBid,
-        salePrice,
-        assessedValue,
+        salePrice: sale,
+        assessedValue: assess,
         surplus,
         meetsMinimumSurplus: 'Yes',
       });
     });
 
-    console.log(`📦 Elements: ${relevantElements.length} | SOLD+SURPLUS: ${parsedRows.length}`);
-    return { relevantElements, parsedRows };
+    const totalPages = extractTotalPages(html);
+    console.log(`📦 SOLD+SURPLUS: ${parsedRows.length} | Pages: ${totalPages}`);
+
+    return { relevantElements, parsedRows, totalPages };
   } catch (err) {
-    console.error(`❌ Error on ${url}:`, err.message);
-    return { relevantElements: [], parsedRows: [], error: { url, message: err.message } };
+    return { relevantElements: [], parsedRows: [], totalPages: 1, error: err.message };
   } finally {
     await page.close();
   }
 }
 
 // =========================
-// MAIN
+// MAIN (WITH PAGINATION)
 // =========================
 (async () => {
   console.log('📥 Loading URLs...');
@@ -208,22 +197,43 @@ async function inspectAndParse(browser, url) {
   const allElements = [];
   const allRows = [];
   const errors = [];
+  const dedupe = new Set();
 
-  for (const url of urls) {
-    const { relevantElements, parsedRows, error } = await inspectAndParse(browser, url);
-    allElements.push(...relevantElements);
-    allRows.push(...parsedRows);
-    if (error) errors.push(error);
+  for (const baseUrl of urls) {
+    console.log('➡️ Page 1');
+    const first = await inspectSinglePage(browser, withPage(baseUrl, 1));
+    allElements.push(...first.relevantElements);
+
+    for (const r of first.parsedRows) {
+      const k = `${r.caseNumber}|${r.parcelId}`;
+      if (!dedupe.has(k)) {
+        dedupe.add(k);
+        allRows.push(r);
+      }
+    }
+
+    for (let p = 2; p <= first.totalPages; p++) {
+      console.log(`➡️ Page ${p}`);
+      const res = await inspectSinglePage(browser, withPage(baseUrl, p));
+      allElements.push(...res.relevantElements);
+
+      for (const r of res.parsedRows) {
+        const k = `${r.caseNumber}|${r.parcelId}`;
+        if (!dedupe.has(k)) {
+          dedupe.add(k);
+          allRows.push(r);
+        }
+      }
+      if (res.error) errors.push({ url: baseUrl, page: p, error: res.error });
+    }
   }
 
   await browser.close();
 
   fs.writeFileSync(OUTPUT_ELEMENTS_FILE, JSON.stringify(allElements, null, 2));
   fs.writeFileSync(OUTPUT_ROWS_FILE, JSON.stringify(allRows, null, 2));
-  if (errors.length) {
-    fs.writeFileSync(OUTPUT_ERRORS_FILE, JSON.stringify(errors, null, 2));
-  }
+  if (errors.length) fs.writeFileSync(OUTPUT_ERRORS_FILE, JSON.stringify(errors, null, 2));
 
-  console.log(`✅ Saved ${allRows.length} SOLD + SURPLUS auctions → ${OUTPUT_ROWS_FILE}`);
+  console.log(`✅ Saved ${allRows.length} SOLD + SURPLUS auctions`);
   console.log('🏁 Done');
 })();
