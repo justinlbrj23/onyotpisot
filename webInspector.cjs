@@ -1,5 +1,6 @@
 // webInspector.cjs
 // Page intelligence + pagination discovery (NO data extraction)
+// Puppeteer-version safe (no waitForTimeout)
 
 const puppeteer = require("puppeteer");
 const fs = require("fs");
@@ -44,23 +45,26 @@ async function loadUrls() {
 // =========================
 async function inspect(browser, url) {
   const page = await browser.newPage();
+
   await page.setUserAgent(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120"
   );
 
   console.log(`🌐 Inspecting ${url}`);
   await page.goto(url, { waitUntil: "networkidle2", timeout: 120000 });
-  await page.waitForTimeout(5000);
+
+  // ⬇️ version-safe delay
+  await new Promise(r => setTimeout(r, 5000));
 
   const result = await page.evaluate(() => {
-    const soldCount = document.querySelectorAll(".AuctionSold").length;
+    const soldBadges = document.querySelectorAll(".AuctionSold");
     const nextBtn =
       document.querySelector('a[title*="Next"]') ||
-      document.querySelector('a:has(img[alt="Next"])');
+      document.querySelector('a img[alt="Next"]')?.closest("a");
 
     return {
-      soldFound: soldCount > 0,
-      soldCount,
+      soldFound: soldBadges.length > 0,
+      soldCount: soldBadges.length,
       hasNextButton: !!nextBtn,
       paginationType: nextBtn ? "js-click" : "none",
     };
@@ -88,6 +92,7 @@ async function inspect(browser, url) {
   }
 
   await browser.close();
+
   fs.writeFileSync(OUTPUT_FILE, JSON.stringify(report, null, 2));
   console.log(`✅ Saved inspector output → ${OUTPUT_FILE}`);
 })();
