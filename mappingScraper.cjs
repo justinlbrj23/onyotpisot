@@ -1,5 +1,5 @@
 // mappingScraper.cjs
-// Google Sheets mapper + authoritative deduper (aligned with webInspector v2)
+// Requires: npm install googleapis
 
 const fs = require("fs");
 const { google } = require("googleapis");
@@ -9,9 +9,9 @@ const { google } = require("googleapis");
 // =========================
 const SERVICE_ACCOUNT_FILE = "./service-account.json";
 const SPREADSHEET_ID = "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
-const SHEET_NAME_URLS = "web_tda";
-const SHEET_NAME_RAW = "raw_main";
-const INPUT_FILE = process.argv[2] || "parsed-auctions.json";
+const SHEET_NAME_URLS = "web_tda"; // where URLs, counties, states are
+const SHEET_NAME_RAW = "raw_main"; // where we append mapped rows
+const INPUT_FILE = process.argv[2] || "parsed-auctions.json"; // JSON artifact from webInspector
 
 // =========================
 // GOOGLE AUTH
@@ -23,9 +23,10 @@ const auth = new google.auth.GoogleAuth({
 const sheets = google.sheets({ version: "v4", auth });
 
 // =========================
-// HEADERS (AUTHORITATIVE)
+// HEADERS (TSSF-COMPLIANT, aligned with organizer_headers_tssf)
 // =========================
 const HEADERS = [
+  // FILE IDENTIFICATION
   "State",
   "County",
   "Property Address",
@@ -33,39 +34,53 @@ const HEADERS = [
   "ZIP Code",
   "Parcel / APN Number",
   "Case Number",
+
+  // SALE DETAILS
   "Auction Date",
   "Sale Finalized (Yes/No)",
   "Sale Price",
   "Opening / Minimum Bid",
   "Estimated Surplus",
   "Meets Minimum Surplus? (Yes/No)",
+
+  // OWNERSHIP
   "Last Owner Name (as on Deed)",
   "Additional Owner(s)",
   "Ownership Type",
   "Deed Type",
   "Owner Deed Recording Date",
   "Owner Deed Instrument #",
+
+  // MORTGAGES
   "Mortgage Lender Name",
   "Mortgage Amount",
   "Mortgage Recording Date",
   "Mortgage Satisfied? (Yes/No)",
   "Mortgage Release Recording #",
   "Mortgage Still Owed Amount",
+
+  // LIENS / JUDGMENTS
   "Lien / Judgment Type",
   "Creditor Name",
   "Lien Amount",
   "Lien Recording Date",
   "Lien Expired? (Yes/No)",
   "Lien Satisfied? (Yes/No)",
+
+  // FINAL CALCULATION
   "Total Open Debt",
   "Final Estimated Surplus to Owner",
   "Deal Viable? (Yes/No)",
+
+  // DOCUMENTATION
   "Ownership Deed Collected? (Yes/No)",
   "Foreclosure Deed Collected? (Yes/No)",
   "Proof of Sale Collected? (Yes/No)",
   "Debt Search Screenshot Collected? (Yes/No)",
   "Tax Assessor Page Collected? (Yes/No)",
   "File Complete? (Yes/No)",
+
+  // SUBMISSION STATUS
   "File Submitted? (Yes/No)",
   "Submission Date",
   "Accepted / Rejected",
@@ -74,136 +89,94 @@ const HEADERS = [
 ];
 
 // =========================
-// HELPERS
-// =========================
-function normalizeUrl(url = "") {
-  try {
-    const u = new URL(url);
-    u.searchParams.delete("PAGE");
-    return u.toString();
-  } catch {
-    return url;
-  }
-}
-
-function yn(val) {
-  if (val === true || val === "Yes") return "Yes";
-  if (val === false || val === "No") return "No";
-  return "";
-}
-
-// 🔑 AUTHORITATIVE DEDUPE KEY
-function buildUniqueKey(row) {
-  return [
-    row["Parcel / APN Number"],
-    row["Case Number"],
-  ]
-    .map(v => (v || "").toString().trim().toLowerCase())
-    .join("|");
-}
-
-// =========================
-// LOAD URL → COUNTY/STATE
+// FUNCTION: County/State mapping from sheet
 // =========================
 async function getUrlMapping() {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_NAME_URLS}!A2:C`,
+    range: `${SHEET_NAME_URLS}!A2:C`, // County | State | URL
   });
 
+  const rows = res.data.values || [];
   const mapping = {};
-  (res.data.values || []).forEach(([county, state, url]) => {
-    if (url) {
-      mapping[normalizeUrl(url.trim())] = {
-        county: county || "",
-        state: state || "",
-      };
-    }
+
+  rows.forEach(([county, state, url]) => {
+    if (url) mapping[url.trim()] = { county: county || "", state: state || "" };
   });
 
   return mapping;
 }
 
 // =========================
-// LOAD EXISTING ROW KEYS
+// FUNCTION: Normalize Yes/No
 // =========================
-async function getExistingKeys() {
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_NAME_RAW}!A2:Z`,
-  });
-
-  const rows = res.data.values || [];
-  const keys = new Set();
-
-  rows.forEach(row => {
-    const obj = {};
-    HEADERS.forEach((h, i) => (obj[h] = row[i] || ""));
-    const key = buildUniqueKey(obj);
-    if (key !== "|") keys.add(key);
-  });
-
-  return keys;
+function yn(val) {
+  if (val === true || val === "Yes") return "Yes";
+  if (val === false || val === "No") return "No";
+  if (typeof val === "string" && val.toLowerCase() === "yes") return "Yes";
+  if (typeof val === "string" && val.toLowerCase() === "no") return "No";
+  return "";
 }
 
 // =========================
-// MAP RAW → SHEET ROW
+// FUNCTION: Map parsed auction row → TSSF headers
 // =========================
 function mapRow(raw, urlMapping) {
-  const row = {};
-  HEADERS.forEach(h => (row[h] = ""));
+  const mapped = {};
+  HEADERS.forEach(h => (mapped[h] = "")); // initialize all headers
 
-  const geo = urlMapping[normalizeUrl(raw.sourceUrl)] || {};
+  const url = raw.sourceUrl || "";
+  const geo = urlMapping[url] || { county: "", state: "" };
 
-  row["State"] = geo.state;
-  row["County"] = geo.county;
+  // Geo
+  mapped["State"] = geo.state;
+  mapped["County"] = geo.county;
 
-  row["Property Address"] = raw.propertyAddress || "";
-  row["Parcel / APN Number"] = raw.parcelId || "";
-  row["Case Number"] = raw.caseNumber || "";
+  // Basic auction fields
+  mapped["Property Address"] = raw.propertyAddress || "";
+  mapped["Parcel / APN Number"] = raw.parcelId || "";
+  mapped["Case Number"] = raw.caseNumber || "";
+  mapped["Auction Date"] = raw.auctionDate || "";
 
-  // Auction date may not exist yet → keep safe
-  row["Auction Date"] = raw.auctionDate || "";
+  // Sale details (Sold only in this pipeline)
+  mapped["Sale Finalized (Yes/No)"] = "Yes";
+  mapped["Sale Price"] = raw.salePrice || "";
+  mapped["Opening / Minimum Bid"] = raw.openingBid || "";
 
-  row["Sale Finalized (Yes/No)"] = "Yes";
-
-  // webInspector v2 outputs strings for these
-  row["Sale Price"] = raw.salePrice || "";
-  row["Opening / Minimum Bid"] = raw.openingBid || "";
-
-  if (raw.surplus != null) {
-    const s = String(raw.surplus);
-    row["Estimated Surplus"] = s;
-    row["Final Estimated Surplus to Owner"] = s;
+  if (raw.surplus !== undefined && raw.surplus !== null) {
+    mapped["Estimated Surplus"] = String(raw.surplus);
+    mapped["Final Estimated Surplus to Owner"] = String(raw.surplus);
   }
 
-  row["Meets Minimum Surplus? (Yes/No)"] = yn(raw.meetsMinimumSurplus);
-  row["Deal Viable? (Yes/No)"] =
-    row["Meets Minimum Surplus? (Yes/No)"] === "Yes" ? "Yes" : "No";
+  mapped["Meets Minimum Surplus? (Yes/No)"] = yn(raw.meetsMinimumSurplus);
 
-  // Default research workflow flags
-  row["Ownership Deed Collected? (Yes/No)"] = "No";
-  row["Foreclosure Deed Collected? (Yes/No)"] = "No";
-  row["Proof of Sale Collected? (Yes/No)"] = "No";
-  row["Debt Search Screenshot Collected? (Yes/No)"] = "No";
-  row["Tax Assessor Page Collected? (Yes/No)"] = "No";
-  row["File Complete? (Yes/No)"] = "No";
-  row["File Submitted? (Yes/No)"] = "No";
+  // Deal viability: Yes only if meets minimum surplus
+  mapped["Deal Viable? (Yes/No)"] =
+    yn(raw.meetsMinimumSurplus) === "Yes" ? "Yes" : "No";
 
-  return row;
+  // Everything else stays blank or "No" by default
+  mapped["Ownership Deed Collected? (Yes/No)"] = "No";
+  mapped["Foreclosure Deed Collected? (Yes/No)"] = "No";
+  mapped["Proof of Sale Collected? (Yes/No)"] = "No";
+  mapped["Debt Search Screenshot Collected? (Yes/No)"] = "No";
+  mapped["Tax Assessor Page Collected? (Yes/No)"] = "No";
+  mapped["File Complete? (Yes/No)"] = "No";
+
+  mapped["File Submitted? (Yes/No)"] = "No";
+
+  return mapped;
 }
 
 // =========================
-// APPEND NON-DUPLICATES
+// FUNCTION: Append rows to sheet
 // =========================
 async function appendRows(rows) {
   if (!rows.length) {
-    console.log("⚠️ No new rows to append.");
+    console.log("⚠️ No mapped rows to append.");
     return;
   }
 
-  const values = rows.map(r => HEADERS.map(h => r[h] || ""));
-
+  const values = rows.map(row => HEADERS.map(h => row[h] || ""));
   await sheets.spreadsheets.values.append({
     spreadsheetId: SPREADSHEET_ID,
     range: SHEET_NAME_RAW,
@@ -211,43 +184,27 @@ async function appendRows(rows) {
     insertDataOption: "INSERT_ROWS",
     requestBody: { values },
   });
-
-  console.log(`✅ Appended ${rows.length} new rows.`);
+  console.log(`✅ Appended ${values.length} mapped rows.`);
 }
 
 // =========================
-// MAIN
+// MAIN EXECUTION
 // =========================
 (async () => {
   if (!fs.existsSync(INPUT_FILE)) {
-    console.error(`❌ Missing input file: ${INPUT_FILE}`);
+    console.error(`❌ Input file not found: ${INPUT_FILE}`);
     process.exit(1);
   }
 
   const rawData = JSON.parse(fs.readFileSync(INPUT_FILE, "utf8"));
-  console.log(`📦 Loaded ${rawData.length} parsed rows`);
+  console.log(`📦 Loaded ${rawData.length} parsed rows from ${INPUT_FILE}`);
 
   const urlMapping = await getUrlMapping();
-  const existingKeys = await getExistingKeys();
+  console.log(`🌐 Fetched ${Object.keys(urlMapping).length} URL → County/State mappings`);
 
-  console.log(`🔐 Loaded ${existingKeys.size} existing row keys`);
+  const mappedRows = rawData.map(raw => mapRow(raw, urlMapping));
+  console.log("🧪 Sample mapped row preview:", mappedRows[0]);
 
-  const newRows = [];
-  let skipped = 0;
-
-  for (const raw of rawData) {
-    const row = mapRow(raw, urlMapping);
-    const key = buildUniqueKey(row);
-
-    if (!key || existingKeys.has(key)) {
-      skipped++;
-    } else {
-      existingKeys.add(key);
-      newRows.push(row);
-    }
-  }
-
-  console.log(`⏭️ Skipped ${skipped} duplicate rows`);
-  await appendRows(newRows);
+  await appendRows(mappedRows);
   console.log("🏁 Done.");
 })();
