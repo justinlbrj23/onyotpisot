@@ -1,5 +1,5 @@
 // webInspector.cjs
-// RealForeclose SOLD-card parser (DOM-anchored, pagination-safe)
+// RealForeclose SOLD auction parser (DOM-anchored, pagination-safe)
 
 const puppeteer = require('puppeteer');
 const cheerio = require('cheerio');
@@ -29,7 +29,7 @@ const auth = new google.auth.GoogleAuth({
 const sheets = google.sheets({ version: 'v4', auth });
 
 // =========================
-// Load URLs
+// LOAD URLS
 // =========================
 async function loadTargetUrls() {
   const res = await sheets.spreadsheets.values.get({
@@ -44,7 +44,7 @@ async function loadTargetUrls() {
 }
 
 // =========================
-// Helpers
+// HELPERS
 // =========================
 function money(val) {
   if (!val) return null;
@@ -52,23 +52,32 @@ function money(val) {
   return isNaN(n) ? null : n;
 }
 
-function getValue($card, label) {
-  const labelNode = $card.find(`:contains("${label}")`).first();
-  if (!labelNode.length) return '';
-  return labelNode.next().text().trim();
+function getField($table, label) {
+  const row = $table
+    .find('th.AD_LBL')
+    .filter((_, th) => $(th).text().trim() === label)
+    .closest('tr');
+
+  return row.find('td.AD_DTA').text().trim();
 }
 
 function detectTotalPages($) {
   let max = 1;
   $('a[href*="PAGE="]').each((_, a) => {
-    const m = $(a).attr('href').match(/PAGE=(\d+)/);
+    const m = $(a).attr('href')?.match(/PAGE=(\d+)/i);
     if (m) max = Math.max(max, parseInt(m[1], 10));
   });
   return max;
 }
 
+function withPage(url, page) {
+  const u = new URL(url);
+  u.searchParams.set('PAGE', page);
+  return u.toString();
+}
+
 // =========================
-// Inspect + Parse
+// INSPECT ONE PAGE
 // =========================
 async function inspectPage(browser, url) {
   const page = await browser.newPage();
@@ -76,46 +85,73 @@ async function inspectPage(browser, url) {
 
   try {
     await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-        '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
+        'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+        'Chrome/120.0.0.0 Safari/537.36'
     );
 
     console.log(`🌐 Visiting ${url}`);
-    await page.goto(url, { waitUntil: 'networkidle2' });
-    await new Promise(r => setTimeout(r, 5000));
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 120000 });
+    await new Promise(r => setTimeout(r, 6000));
 
     const html = await page.content();
     const $ = cheerio.load(html);
 
     const rows = [];
 
-    // ✅ TRUE SOLD CARD ANCHOR
-    $('.AuctionSold').each((_, soldBadge) => {
-      const card = $(soldBadge).closest('.auctionItem, div');
+    // =========================
+    // REAL AUCTION PARSER
+    // =========================
+    $('table.ad_tab').each((_, table) => {
+      const $table = $(table);
 
-      const sale = money(getValue(card, 'Amount'));
-      const assessed = money(getValue(card, 'Assessed Value'));
-      if (!sale || !assessed) return;
+      const statusText = $table
+        .closest('div')
+        .find('.ASTAT_MSB')
+        .text()
+        .replace(/\s+/g, ' ')
+        .trim();
 
-      const surplus = assessed - sale;
+      const isSold =
+        /Redeemed|Closed|Cancelled/i.test(statusText);
+
+      if (!isSold) return;
+
+      const caseNumber = getField($table, 'Case #:');
+      const parcelId = getField($table, 'Parcel ID:')
+        .split('|')[0]
+        .trim();
+      const propertyAddress = getField($table, 'Property Address:');
+      const openingBidStr = getField($table, 'Opening Bid:');
+      const assessedValueStr = getField($table, 'Assessed Value:');
+
+      const openingBid = money(openingBidStr);
+      const assessedValue = money(assessedValueStr);
+
+      if (
+        !caseNumber ||
+        !parcelId ||
+        openingBid === null ||
+        assessedValue === null
+      )
+        return;
+
+      const surplus = assessedValue - openingBid;
       if (surplus < MIN_SURPLUS) return;
 
-      const row = {
+      rows.push({
         sourceUrl: url,
         auctionStatus: 'Sold',
-        auctionType: getValue(card, 'Auction Type') || 'Tax Sale',
-        caseNumber: getValue(card, 'Case #'),
-        parcelId: getValue(card, 'Parcel ID').split('|')[0].trim(),
-        propertyAddress: getValue(card, 'Property Address'),
-        salePrice: sale,
-        assessedValue: assessed,
+        auctionType: 'Tax Sale',
+        caseNumber,
+        parcelId,
+        propertyAddress,
+        openingBid: openingBidStr,
+        salePrice: openingBidStr, // Redeemed == paid opening bid
+        assessedValue: assessedValueStr,
         surplus,
         meetsMinimumSurplus: 'Yes',
-      };
-
-      if (row.caseNumber && row.parcelId) {
-        rows.push(row);
-      }
+      });
     });
 
     const totalPages = detectTotalPages($);
@@ -123,6 +159,7 @@ async function inspectPage(browser, url) {
 
     return { rows, totalPages };
   } catch (err) {
+    console.error(`❌ Error on ${url}: ${err.message}`);
     return { rows: [], totalPages: 1, error: err.message };
   } finally {
     await page.close();
@@ -136,7 +173,7 @@ async function inspectPage(browser, url) {
   const urls = await loadTargetUrls();
   const browser = await puppeteer.launch({
     headless: 'new',
-    args: ['--no-sandbox'],
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
   });
 
   const all = [];
@@ -144,8 +181,7 @@ async function inspectPage(browser, url) {
   const errors = [];
 
   for (const baseUrl of urls) {
-    const first = await inspectPage(browser, baseUrl);
-    const pages = first.totalPages || 1;
+    const first = await inspectPage(browser, withPage(baseUrl, 1));
 
     for (const r of first.rows) {
       const k = `${r.caseNumber}|${r.parcelId}`;
@@ -155,8 +191,9 @@ async function inspectPage(browser, url) {
       }
     }
 
-    for (let p = 2; p <= pages; p++) {
-      const res = await inspectPage(browser, `${baseUrl}&PAGE=${p}`);
+    for (let p = 2; p <= first.totalPages; p++) {
+      const res = await inspectPage(browser, withPage(baseUrl, p));
+
       for (const r of res.rows) {
         const k = `${r.caseNumber}|${r.parcelId}`;
         if (!seen.has(k)) {
@@ -164,7 +201,8 @@ async function inspectPage(browser, url) {
           all.push(r);
         }
       }
-      if (res.error) errors.push(res.error);
+
+      if (res.error) errors.push({ url: baseUrl, page: p, error: res.error });
     }
   }
 
