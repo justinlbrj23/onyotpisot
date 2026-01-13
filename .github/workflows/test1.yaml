@@ -57,8 +57,8 @@ jobs:
       # --------------------------------------------------
       # STEP 1 — Create TSSF Headers
       # --------------------------------------------------
-      - name: Run organizer_headers_tssf.cjs
-        run: node organizer_headers_tssf.cjs
+      - name: Run sheetHeaders.cjs
+        run: node sheetHeaders.cjs
 
       # --------------------------------------------------
       # STEP 2 — Run webInspector.cjs (Page Intelligence)
