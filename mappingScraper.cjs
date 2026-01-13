@@ -1,5 +1,5 @@
 // mappingScraper.cjs
-// Requires: npm install googleapis
+// Google Sheets mapper + deduper (FIXED)
 
 const fs = require("fs");
 const { google } = require("googleapis");
@@ -76,19 +76,27 @@ const HEADERS = [
 // =========================
 // HELPERS
 // =========================
+function normalizeUrl(url = "") {
+  try {
+    const u = new URL(url);
+    u.searchParams.delete("PAGE");
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
 function yn(val) {
   if (val === true || val === "Yes") return "Yes";
   if (val === false || val === "No") return "No";
   return "";
 }
 
+// 🔑 AUTHORITATIVE DEDUPE KEY
 function buildUniqueKey(row) {
   return [
-    row["State"],
-    row["County"],
     row["Parcel / APN Number"],
     row["Case Number"],
-    row["Auction Date"],
   ]
     .map(v => (v || "").toString().trim().toLowerCase())
     .join("|");
@@ -105,7 +113,9 @@ async function getUrlMapping() {
 
   const mapping = {};
   (res.data.values || []).forEach(([county, state, url]) => {
-    if (url) mapping[url.trim()] = { county, state };
+    if (url) {
+      mapping[normalizeUrl(url.trim())] = { county, state };
+    }
   });
 
   return mapping;
@@ -126,7 +136,8 @@ async function getExistingKeys() {
   rows.forEach(row => {
     const obj = {};
     HEADERS.forEach((h, i) => (obj[h] = row[i] || ""));
-    keys.add(buildUniqueKey(obj));
+    const key = buildUniqueKey(obj);
+    if (key !== "|") keys.add(key);
   });
 
   return keys;
@@ -139,7 +150,7 @@ function mapRow(raw, urlMapping) {
   const row = {};
   HEADERS.forEach(h => (row[h] = ""));
 
-  const geo = urlMapping[raw.sourceUrl || ""] || {};
+  const geo = urlMapping[normalizeUrl(raw.sourceUrl)] || {};
 
   row["State"] = geo.state || "";
   row["County"] = geo.county || "";
@@ -159,7 +170,7 @@ function mapRow(raw, urlMapping) {
 
   row["Meets Minimum Surplus? (Yes/No)"] = yn(raw.meetsMinimumSurplus);
   row["Deal Viable? (Yes/No)"] =
-    yn(raw.meetsMinimumSurplus) === "Yes" ? "Yes" : "No";
+    row["Meets Minimum Surplus? (Yes/No)"] === "Yes" ? "Yes" : "No";
 
   row["Ownership Deed Collected? (Yes/No)"] = "No";
   row["Foreclosure Deed Collected? (Yes/No)"] = "No";
@@ -217,7 +228,7 @@ async function appendRows(rows) {
 
   for (const row of mapped) {
     const key = buildUniqueKey(row);
-    if (existingKeys.has(key)) {
+    if (!key || existingKeys.has(key)) {
       skipped++;
     } else {
       existingKeys.add(key);
