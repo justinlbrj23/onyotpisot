@@ -15,7 +15,6 @@ const SPREADSHEET_ID = '1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA';
 const SHEET_NAME = 'web_tda';
 const URL_RANGE = 'C2:C';
 
-const OUTPUT_ELEMENTS_FILE = 'raw-elements.json';
 const OUTPUT_ROWS_FILE = 'parsed-auctions.json';
 const OUTPUT_ERRORS_FILE = 'errors.json';
 
@@ -31,7 +30,7 @@ const auth = new google.auth.GoogleAuth({
 const sheets = google.sheets({ version: 'v4', auth });
 
 // =========================
-// Load URLs
+// LOAD URLS
 // =========================
 async function loadTargetUrls() {
   const res = await sheets.spreadsheets.values.get({
@@ -46,7 +45,7 @@ async function loadTargetUrls() {
 }
 
 // =========================
-// Helpers
+// HELPERS
 // =========================
 function parseCurrency(str) {
   if (!str) return null;
@@ -60,18 +59,26 @@ function withPage(url, pageNum) {
   return u.toString();
 }
 
-// ✅ REAL pagination detection
 function extractTotalPages($) {
-  let maxPage = 1;
+  let max = 1;
   $('a[href*="PAGE="]').each((_, a) => {
-    const m = $(a).attr('href').match(/PAGE=(\d+)/i);
-    if (m) maxPage = Math.max(maxPage, parseInt(m[1], 10));
+    const m = $(a).attr('href')?.match(/PAGE=(\d+)/i);
+    if (m) max = Math.max(max, parseInt(m[1], 10));
   });
-  return maxPage;
+  return max;
+}
+
+function getField($table, label) {
+  const row = $table
+    .find('th')
+    .filter((_, th) => $(th).text().trim() === label)
+    .closest('tr');
+
+  return row.find('td').text().trim();
 }
 
 // =========================
-// Inspect + Parse ONE PAGE
+// INSPECT ONE PAGE
 // =========================
 async function inspectSinglePage(browser, url) {
   const page = await browser.newPage();
@@ -82,6 +89,7 @@ async function inspectSinglePage(browser, url) {
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
         '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     );
+
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
@@ -93,34 +101,45 @@ async function inspectSinglePage(browser, url) {
     const html = await page.content();
     const $ = cheerio.load(html);
 
-    // ----------------------------
-    // SOLD AUCTIONS (STRUCTURAL)
-    // ----------------------------
     const parsedRows = [];
 
-    $('.AuctionSold').each((_, soldBlock) => {
-      const container = $(soldBlock).closest('div');
+    // =========================
+    // REAL AUCTION PARSER
+    // =========================
+    $('table.ad_tab').each((_, table) => {
+      const $table = $(table);
 
-      const sale = parseCurrency(
-        container.find(':contains("Amount")').next().text()
-      );
-      const assessed = parseCurrency(
-        container.find(':contains("Assessed Value")').next().text()
-      );
-
-      if (!sale || !assessed) return;
-
-      const surplus = assessed - sale;
-      if (surplus < MIN_SURPLUS) return;
-
-      const parcelId = container.find('a[href*="Parcel"]').text().trim();
-      const caseNumber = container
-        .find(':contains("Case #")')
-        .next()
+      const statusText = $table
+        .closest('div')
+        .find('.AUCTION_STATS')
         .text()
+        .replace(/\s+/g, ' ')
         .trim();
 
-      if (!parcelId || !caseNumber) return;
+      const isSold =
+        /Auction Status\s*(Redeemed|Closed|Cancelled)/i.test(statusText);
+
+      if (!isSold) return;
+
+      const caseNumber = getField($table, 'Case #:');
+      const parcelId = getField($table, 'Parcel ID:');
+      const propertyAddress = getField($table, 'Property Address:');
+      const openingBidStr = getField($table, 'Opening Bid:');
+      const assessedValueStr = getField($table, 'Assessed Value:');
+
+      const openingBid = parseCurrency(openingBidStr);
+      const assessedValue = parseCurrency(assessedValueStr);
+
+      if (
+        !caseNumber ||
+        !parcelId ||
+        openingBid === null ||
+        assessedValue === null
+      )
+        return;
+
+      const surplus = assessedValue - openingBid;
+      if (surplus < MIN_SURPLUS) return;
 
       parsedRows.push({
         sourceUrl: url,
@@ -128,13 +147,10 @@ async function inspectSinglePage(browser, url) {
         auctionType: 'Tax Sale',
         caseNumber,
         parcelId,
-        propertyAddress: container
-          .find(':contains("Property Address")')
-          .next()
-          .text()
-          .trim(),
-        salePrice: sale,
-        assessedValue: assessed,
+        propertyAddress,
+        openingBid: openingBidStr,
+        salePrice: openingBidStr, // Redeemed = paid opening bid
+        assessedValue: assessedValueStr,
         surplus,
         meetsMinimumSurplus: 'Yes',
       });
@@ -145,6 +161,7 @@ async function inspectSinglePage(browser, url) {
 
     return { parsedRows, totalPages };
   } catch (err) {
+    console.error(`❌ Error: ${err.message}`);
     return { parsedRows: [], totalPages: 1, error: err.message };
   } finally {
     await page.close();
@@ -180,6 +197,7 @@ async function inspectSinglePage(browser, url) {
 
     for (let p = 2; p <= first.totalPages; p++) {
       const res = await inspectSinglePage(browser, withPage(baseUrl, p));
+
       for (const r of res.parsedRows) {
         const k = `${r.caseNumber}|${r.parcelId}`;
         if (!seen.has(k)) {
@@ -187,6 +205,7 @@ async function inspectSinglePage(browser, url) {
           allRows.push(r);
         }
       }
+
       if (res.error) errors.push({ url: baseUrl, page: p, error: res.error });
     }
   }
