@@ -46,7 +46,7 @@ async function loadTargetUrls() {
 }
 
 // =========================
-– Currency parser
+// Currency parser
 // =========================
 function parseCurrency(str) {
   if (!str) return null;
