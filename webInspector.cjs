@@ -1,32 +1,32 @@
 // webInspector.cjs
-// RealForeclose SOLD auction parser (DOM-anchored, pagination-safe)
+// RealForeclose SOLD auction parser (JS-rendered, click-pagination SAFE)
 
-const puppeteer = require('puppeteer');
-const cheerio = require('cheerio');
-const fs = require('fs');
-const { google } = require('googleapis');
+const puppeteer = require("puppeteer");
+const fs = require("fs");
+const { google } = require("googleapis");
 
 // =========================
 // CONFIG
 // =========================
-const SERVICE_ACCOUNT_FILE = './service-account.json';
-const SPREADSHEET_ID = '1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA';
-const SHEET_NAME = 'web_tda';
-const URL_RANGE = 'C2:C';
+const SERVICE_ACCOUNT_FILE = "./service-account.json";
+const SPREADSHEET_ID = "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
+const SHEET_NAME = "web_tda";
+const URL_RANGE = "C2:C";
 
-const OUTPUT_ROWS_FILE = 'parsed-auctions.json';
-const OUTPUT_ERRORS_FILE = 'errors.json';
+const OUTPUT_ROWS_FILE = "parsed-auctions.json";
+const OUTPUT_ERRORS_FILE = "errors.json";
 
 const MIN_SURPLUS = 25000;
+const MAX_PAGES_SAFETY = 25;
 
 // =========================
 // GOOGLE AUTH
 // =========================
 const auth = new google.auth.GoogleAuth({
   keyFile: SERVICE_ACCOUNT_FILE,
-  scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+  scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
 });
-const sheets = google.sheets({ version: 'v4', auth });
+const sheets = google.sheets({ version: "v4", auth });
 
 // =========================
 // LOAD URLS
@@ -40,7 +40,7 @@ async function loadTargetUrls() {
   return (res.data.values || [])
     .flat()
     .map(v => v.trim())
-    .filter(v => v.startsWith('http'));
+    .filter(v => v.startsWith("http"));
 }
 
 // =========================
@@ -48,122 +48,98 @@ async function loadTargetUrls() {
 // =========================
 function money(val) {
   if (!val) return null;
-  const n = parseFloat(val.replace(/[^0-9.-]/g, ''));
+  const n = parseFloat(val.replace(/[^0-9.-]/g, ""));
   return isNaN(n) ? null : n;
 }
 
-function getField($table, label) {
-  const row = $table
-    .find('th.AD_LBL')
-    .filter((_, th) => $(th).text().trim() === label)
-    .closest('tr');
-
-  return row.find('td.AD_DTA').text().trim();
-}
-
-function detectTotalPages($) {
-  let max = 1;
-  $('a[href*="PAGE="]').each((_, a) => {
-    const m = $(a).attr('href')?.match(/PAGE=(\d+)/i);
-    if (m) max = Math.max(max, parseInt(m[1], 10));
-  });
-  return max;
-}
-
-function withPage(url, page) {
-  const u = new URL(url);
-  u.searchParams.set('PAGE', page);
-  return u.toString();
-}
-
 // =========================
-// INSPECT ONE PAGE
+// MAIN PARSER (LIVE DOM)
 // =========================
-async function inspectPage(browser, url) {
+async function scrapeAuction(browser, startUrl) {
   const page = await browser.newPage();
-  page.setDefaultNavigationTimeout(120000);
+  const rows = [];
+  let pageNum = 1;
 
   try {
     await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
-        'AppleWebKit/537.36 (KHTML, like Gecko) ' +
-        'Chrome/120.0.0.0 Safari/537.36'
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+      "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     );
 
-    console.log(`🌐 Visiting ${url}`);
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 120000 });
-    await new Promise(r => setTimeout(r, 6000));
+    console.log(`🌐 Visiting ${startUrl}`);
+    await page.goto(startUrl, { waitUntil: "networkidle2" });
 
-    const html = await page.content();
-    const $ = cheerio.load(html);
+    while (pageNum <= MAX_PAGES_SAFETY) {
+      console.log(`➡️ Scanning page ${pageNum}`);
 
-    const rows = [];
+      // wait for auction cards
+      await page.waitForSelector(".auctionItem", { timeout: 15000 });
 
-    // =========================
-    // REAL AUCTION PARSER
-    // =========================
-    $('table.ad_tab').each((_, table) => {
-      const $table = $(table);
+      const pageRows = await page.evaluate(
+        ({ MIN_SURPLUS, startUrl }) => {
+          const out = [];
 
-      const statusText = $table
-        .closest('div')
-        .find('.ASTAT_MSB')
-        .text()
-        .replace(/\s+/g, ' ')
-        .trim();
+          document.querySelectorAll(".auctionItem").forEach(card => {
+            // SOLD badge check (LIVE DOM)
+            if (!card.innerText.includes("SOLD")) return;
 
-      const isSold =
-        /Redeemed|Closed|Cancelled/i.test(statusText);
+            function grab(label) {
+              const el = [...card.querySelectorAll("td, div")]
+                .find(n => n.textContent.includes(label));
+              return el?.nextElementSibling?.textContent?.trim() || "";
+            }
 
-      if (!isSold) return;
+            const sale = grab("Amount");
+            const assessed = grab("Assessed Value");
 
-      const caseNumber = getField($table, 'Case #:');
-      const parcelId = getField($table, 'Parcel ID:')
-        .split('|')[0]
-        .trim();
-      const propertyAddress = getField($table, 'Property Address:');
-      const openingBidStr = getField($table, 'Opening Bid:');
-      const assessedValueStr = getField($table, 'Assessed Value:');
+            const saleNum = parseFloat(sale.replace(/[^0-9.-]/g, ""));
+            const assessedNum = parseFloat(assessed.replace(/[^0-9.-]/g, ""));
 
-      const openingBid = money(openingBidStr);
-      const assessedValue = money(assessedValueStr);
+            if (!saleNum || !assessedNum) return;
 
-      if (
-        !caseNumber ||
-        !parcelId ||
-        openingBid === null ||
-        assessedValue === null
-      )
-        return;
+            const surplus = assessedNum - saleNum;
+            if (surplus < MIN_SURPLUS) return;
 
-      const surplus = assessedValue - openingBid;
-      if (surplus < MIN_SURPLUS) return;
+            out.push({
+              sourceUrl: startUrl,
+              auctionStatus: "Sold",
+              auctionType: grab("Auction Type") || "Tax Sale",
+              caseNumber: grab("Case #"),
+              parcelId: grab("Parcel ID").split("|")[0].trim(),
+              propertyAddress: grab("Property Address"),
+              salePrice: saleNum,
+              assessedValue: assessedNum,
+              surplus,
+              meetsMinimumSurplus: "Yes",
+            });
+          });
 
-      rows.push({
-        sourceUrl: url,
-        auctionStatus: 'Sold',
-        auctionType: 'Tax Sale',
-        caseNumber,
-        parcelId,
-        propertyAddress,
-        openingBid: openingBidStr,
-        salePrice: openingBidStr, // Redeemed == paid opening bid
-        assessedValue: assessedValueStr,
-        surplus,
-        meetsMinimumSurplus: 'Yes',
-      });
-    });
+          return out;
+        },
+        { MIN_SURPLUS, startUrl }
+      );
 
-    const totalPages = detectTotalPages($);
-    console.log(`📦 SOLD+SURPLUS: ${rows.length} | Pages: ${totalPages}`);
+      rows.push(...pageRows);
 
-    return { rows, totalPages };
+      // Try clicking NEXT
+      const nextBtn = await page.$("a[onclick*='next']");
+      if (!nextBtn) break;
+
+      await Promise.all([
+        nextBtn.click(),
+        page.waitForNavigation({ waitUntil: "networkidle2" }),
+      ]);
+
+      pageNum++;
+    }
+
   } catch (err) {
-    console.error(`❌ Error on ${url}: ${err.message}`);
-    return { rows: [], totalPages: 1, error: err.message };
+    return { rows, error: err.message };
   } finally {
     await page.close();
   }
+
+  return { rows };
 }
 
 // =========================
@@ -172,46 +148,35 @@ async function inspectPage(browser, url) {
 (async () => {
   const urls = await loadTargetUrls();
   const browser = await puppeteer.launch({
-    headless: 'new',
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+    headless: "new",
+    args: ["--no-sandbox"],
   });
 
   const all = [];
   const seen = new Set();
   const errors = [];
 
-  for (const baseUrl of urls) {
-    const first = await inspectPage(browser, withPage(baseUrl, 1));
+  for (const url of urls) {
+    const res = await scrapeAuction(browser, url);
 
-    for (const r of first.rows) {
-      const k = `${r.caseNumber}|${r.parcelId}`;
-      if (!seen.has(k)) {
-        seen.add(k);
+    for (const r of res.rows) {
+      const key = `${r.caseNumber}|${r.parcelId}`;
+      if (!seen.has(key)) {
+        seen.add(key);
         all.push(r);
       }
     }
 
-    for (let p = 2; p <= first.totalPages; p++) {
-      const res = await inspectPage(browser, withPage(baseUrl, p));
-
-      for (const r of res.rows) {
-        const k = `${r.caseNumber}|${r.parcelId}`;
-        if (!seen.has(k)) {
-          seen.add(k);
-          all.push(r);
-        }
-      }
-
-      if (res.error) errors.push({ url: baseUrl, page: p, error: res.error });
-    }
+    if (res.error) errors.push(res.error);
   }
 
   await browser.close();
 
   fs.writeFileSync(OUTPUT_ROWS_FILE, JSON.stringify(all, null, 2));
-  if (errors.length)
+  if (errors.length) {
     fs.writeFileSync(OUTPUT_ERRORS_FILE, JSON.stringify(errors, null, 2));
+  }
 
   console.log(`✅ Saved ${all.length} SOLD + SURPLUS auctions`);
-  console.log('🏁 Done');
+  console.log("🏁 Done");
 })();
