@@ -18,6 +18,7 @@ const URL_RANGE = 'C2:C';
 const OUTPUT_ELEMENTS_FILE = 'raw-elements.json';
 const OUTPUT_ROWS_FILE = 'parsed-auctions.json';
 const OUTPUT_ERRORS_FILE = 'errors.json';
+const OUTPUT_SUMMARY_FILE = 'summary.json';
 
 const MIN_SURPLUS = 25000;
 
@@ -73,8 +74,8 @@ function extractBetween(text, startLabel, stopLabels = []) {
 }
 
 function extractDate(text) {
-  // e.g. "Date: 09/10/2025 09:01 AM PT"
-  const m = text.match(/Date:\s*([0-9/]{10})/i);
+  // Flexible date capture
+  const m = text.match(/Date:\s*([0-9/]{10}|[0-9-]{10})/i);
   return m ? m[1] : '';
 }
 
@@ -84,6 +85,19 @@ function extractAmountAfter(text, label) {
   if (!m) return '';
   const moneyMatch = m[0].match(/\$[\d,]+\.\d{2}/);
   return moneyMatch ? moneyMatch[0] : '';
+}
+
+// =========================
+// Schema validation
+// =========================
+function validateRow(row) {
+  return (
+    row.caseNumber &&
+    row.parcelId &&
+    row.openingBid &&
+    row.salePrice &&
+    row.assessedValue
+  );
 }
 
 // =========================
@@ -170,41 +184,19 @@ async function inspectAndParse(browser, url) {
 
       const salePriceStr = extractAmountAfter(blockText, 'Amount:');
 
-      // Parcel ID: "Parcel ID: 1125079053 | 1125079053"
       const parcelRaw = extractBetween(blockText, 'Parcel ID:', [
         'Property Address',
         'Assessed Value',
       ]);
       const parcelId = parcelRaw.split('|')[0].trim();
 
-      // Property Address: stop at Assessed Value
       const propertyAddress = extractBetween(blockText, 'Property Address:', [
         'Assessed Value',
       ]);
 
       const auctionDate = extractDate(blockText);
 
-      if (!parcelId || !caseNumber || !openingBidStr || !salePriceStr || !assessedValue) {
-        return;
-      }
-
-      const open = parseCurrency(openingBidStr);
-      const assess = parseCurrency(assessedValue);
-      const salePrice = parseCurrency(salePriceStr);
-
-      let surplus = null;
-      if (assess !== null && salePrice !== null) {
-        surplus = assess - salePrice;
-      }
-
-      const meetsMinimumSurplus =
-        surplus !== null && surplus >= MIN_SURPLUS ? 'Yes' : 'No';
-
-      const dedupeKey = `${url}|${caseNumber}|${parcelId}`;
-      if (seen.has(dedupeKey)) return;
-      seen.add(dedupeKey);
-
-      parsedRows.push({
+      const row = {
         sourceUrl: url,
         auctionStatus,
         auctionType: auctionType || 'Tax Sale',
@@ -215,9 +207,35 @@ async function inspectAndParse(browser, url) {
         salePrice: salePriceStr,
         assessedValue,
         auctionDate,
-        surplus,
-        meetsMinimumSurplus,
-      });
+      };
+
+      if (!validateRow(row)) return;
+
+      const open = parseCurrency(openingBidStr);
+      const assess = parseCurrency(assessedValue);
+      const salePrice = parseCurrency(salePriceStr);
+
+      let surplusAssessVsSale = null;
+      let surplusSaleVsOpen = null;
+      if (assess !== null && salePrice !== null) {
+        surplusAssessVsSale = assess - salePrice;
+      }
+      if (salePrice !== null && open !== null) {
+        surplusSaleVsOpen = salePrice - open;
+      }
+
+      row.surplusAssessVsSale = surplusAssessVsSale;
+      row.surplusSaleVsOpen = surplusSaleVsOpen;
+      row.meetsMinimumSurplus =
+        surplusAssessVsSale !== null && surplusAssessVsSale >= MIN_SURPLUS
+          ? 'Yes'
+          : 'No';
+
+      const dedupeKey = `${url}|${caseNumber}|${parcelId}`;
+      if (seen.has(dedupeKey)) return;
+      seen.add(dedupeKey);
+
+      parsedRows.push(row);
     });
 
     console.log(`📦 Elements: ${relevantElements.length} | SOLD auctions: ${parsedRows.length}`);
@@ -269,8 +287,21 @@ async function inspectAndParse(browser, url) {
   }
   const finalRows = [...uniqueMap.values()];
 
+  // Diagnostic summary
+  const summary = {
+    totalUrls: urls.length,
+    totalElements: allElements.length,
+    totalRowsRaw: allRows.length,
+    totalRowsFinal: finalRows.length,
+    errorsCount: errors.length,
+    surplusAboveThreshold: finalRows.filter(r => r.meetsMinimumSurplus === 'Yes').length,
+    surplusBelowThreshold: finalRows.filter(r => r.meetsMinimumSurplus === 'No').length,
+  };
+
+  // Write artifacts
   fs.writeFileSync(OUTPUT_ELEMENTS_FILE, JSON.stringify(allElements, null, 2));
   fs.writeFileSync(OUTPUT_ROWS_FILE, JSON.stringify(finalRows, null, 2));
+  fs.writeFileSync(OUTPUT_SUMMARY_FILE, JSON.stringify(summary, null, 2));
   if (errors.length) {
     fs.writeFileSync(OUTPUT_ERRORS_FILE, JSON.stringify(errors, null, 2));
     console.log(`⚠️ Saved ${errors.length} errors → ${OUTPUT_ERRORS_FILE}`);
@@ -278,5 +309,6 @@ async function inspectAndParse(browser, url) {
 
   console.log(`✅ Saved ${allElements.length} elements → ${OUTPUT_ELEMENTS_FILE}`);
   console.log(`✅ Saved ${finalRows.length} SOLD auctions → ${OUTPUT_ROWS_FILE}`);
+  console.log(`📊 Saved summary → ${OUTPUT_SUMMARY_FILE}`);
   console.log('🏁 Done');
 })();
