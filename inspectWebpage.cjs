@@ -55,7 +55,7 @@ function parseCurrency(str) {
 }
 
 // =========================
-// Inspect + Parse Page
+// Inspect + Parse Page (SOLD only)
 // =========================
 async function inspectAndParse(browser, url) {
   const page = await browser.newPage();
@@ -107,24 +107,13 @@ async function inspectAndParse(browser, url) {
       }
     });
 
-    // (5) CARD-BASED AUCTION PARSER
+    // (2) SOLD-only auction parser
     const parsedRows = [];
     $('div').each((_, container) => {
       const blockText = $(container).text().replace(/\s+/g, ' ').trim();
-      if (!blockText.includes('Auction Type')) return;
+      if (!blockText.includes('Auction Sold')) return; // SOLD only
 
-      const extract = label => {
-        const regex = new RegExp(`${label}\\s*:?\\s*([^\\n$]+)`, 'i');
-        const m = blockText.match(regex);
-        return m ? m[1].trim() : '';
-      };
-
-      const auctionStatus =
-        blockText.includes('Redeemed')
-          ? 'Redeemed'
-          : blockText.includes('Auction Sold')
-          ? 'Sold'
-          : 'Active';
+      const auctionStatus = 'Sold';
 
       const openingBidMatch = blockText.match(/\$[\d,]+\.\d{2}/);
       const openingBid = openingBidMatch ? openingBidMatch[0] : '';
@@ -137,7 +126,7 @@ async function inspectAndParse(browser, url) {
       const parcelLink = $(container).find('a').first();
       const parcelId = parcelLink.text().trim();
 
-      if (!parcelId || !openingBid) return;
+      if (!parcelId || !openingBid || !assessedValue) return;
 
       const open = parseCurrency(openingBid);
       const assess = parseCurrency(assessedValue);
@@ -146,10 +135,7 @@ async function inspectAndParse(browser, url) {
       parsedRows.push({
         sourceUrl: url,
         auctionStatus,
-        auctionType: extract('Auction Type'),
-        caseNumber: extract('Case #'),
         parcelId,
-        propertyAddress: extract('Property Address'),
         openingBid,
         assessedValue,
         surplus,
@@ -157,7 +143,7 @@ async function inspectAndParse(browser, url) {
       });
     });
 
-    console.log(`📦 Elements: ${relevantElements.length} | Auctions: ${parsedRows.length}`);
+    console.log(`📦 Elements: ${relevantElements.length} | SOLD auctions: ${parsedRows.length}`);
     return { relevantElements, parsedRows };
   } catch (err) {
     console.error(`❌ Error on ${url}:`, err.message);
@@ -181,7 +167,7 @@ async function inspectAndParse(browser, url) {
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-blink-features=AutomationControlled',
-      '--ignore-certificate-errors' // 👈 added for SSL mismatch
+      '--ignore-certificate-errors'
     ],
   });
 
@@ -206,6 +192,6 @@ async function inspectAndParse(browser, url) {
   }
 
   console.log(`✅ Saved ${allElements.length} elements → ${OUTPUT_ELEMENTS_FILE}`);
-  console.log(`✅ Saved ${allRows.length} auctions → ${OUTPUT_ROWS_FILE}`);
+  console.log(`✅ Saved ${allRows.length} SOLD auctions → ${OUTPUT_ROWS_FILE}`);
   console.log('🏁 Done');
 })();
