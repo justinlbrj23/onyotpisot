@@ -74,7 +74,6 @@ function extractBetween(text, startLabel, stopLabels = []) {
 }
 
 function extractDate(text) {
-  // Flexible date capture
   const m = text.match(/Date:\s*([0-9/]{10}|[0-9-]{10})/i);
   return m ? m[1] : '';
 }
@@ -85,6 +84,30 @@ function extractAmountAfter(text, label) {
   if (!m) return '';
   const moneyMatch = m[0].match(/\$[\d,]+\.\d{2}/);
   return moneyMatch ? moneyMatch[0] : '';
+}
+
+// =========================
+// Multi-label sale price extractor
+// =========================
+function extractSalePrice(text) {
+  const labels = [
+    'Amount:',
+    'Sale Price:',
+    'Sold Price:',
+    'Sold Amount:',
+    'Sold Amount/Sold Price:',
+    'Winning Bid:',
+    'Winning Bid Amount:',
+    'Sold For:',
+    'Final Bid:',
+    'Final Sale Price:'
+  ];
+
+  for (const label of labels) {
+    const v = extractAmountAfter(text, label);
+    if (v) return v;
+  }
+  return '';
 }
 
 // =========================
@@ -159,7 +182,7 @@ async function inspectAndParse(browser, url) {
 
     $('div').each((_, container) => {
       const blockText = $(container).text().replace(/\s+/g, ' ').trim();
-      if (!blockText.includes('Auction Sold')) return; // SOLD cards only
+      if (!blockText.includes('Auction Sold')) return;
 
       const auctionStatus = 'Sold';
 
@@ -176,13 +199,12 @@ async function inspectAndParse(browser, url) {
       const caseNumber = rawCase.split(/\s+/)[0].trim();
 
       const openingBidStr = extractAmountAfter(blockText, 'Opening Bid:');
+
       const assessedValueStr = extractBetween(blockText, 'Assessed Value:', []);
       const assessedMoneyMatch = assessedValueStr.match(/\$[\d,]+\.\d{2}/);
-      const assessedValue = assessedMoneyMatch
-        ? assessedMoneyMatch[0]
-        : '';
+      const assessedValue = assessedMoneyMatch ? assessedMoneyMatch[0] : '';
 
-      const salePriceStr = extractAmountAfter(blockText, 'Amount:');
+      const salePriceStr = extractSalePrice(blockText);
 
       const parcelRaw = extractBetween(blockText, 'Parcel ID:', [
         'Property Address',
@@ -215,19 +237,15 @@ async function inspectAndParse(browser, url) {
       const assess = parseCurrency(assessedValue);
       const salePrice = parseCurrency(salePriceStr);
 
-      let surplusAssessVsSale = null;
-      let surplusSaleVsOpen = null;
-      if (assess !== null && salePrice !== null) {
-        surplusAssessVsSale = assess - salePrice;
-      }
-      if (salePrice !== null && open !== null) {
-        surplusSaleVsOpen = salePrice - open;
-      }
+      row.surplusAssessVsSale =
+        assess !== null && salePrice !== null ? assess - salePrice : null;
 
-      row.surplusAssessVsSale = surplusAssessVsSale;
-      row.surplusSaleVsOpen = surplusSaleVsOpen;
+      row.surplusSaleVsOpen =
+        salePrice !== null && open !== null ? salePrice - open : null;
+
       row.meetsMinimumSurplus =
-        surplusAssessVsSale !== null && surplusAssessVsSale >= MIN_SURPLUS
+        row.surplusAssessVsSale !== null &&
+        row.surplusAssessVsSale >= MIN_SURPLUS
           ? 'Yes'
           : 'No';
 
@@ -279,7 +297,7 @@ async function inspectAndParse(browser, url) {
 
   await browser.close();
 
-  // Global dedupe just in case
+  // Global dedupe
   const uniqueMap = new Map();
   for (const row of allRows) {
     const key = `${row.sourceUrl}|${row.caseNumber}|${row.parcelId}`;
@@ -287,7 +305,7 @@ async function inspectAndParse(browser, url) {
   }
   const finalRows = [...uniqueMap.values()];
 
-  // Diagnostic summary
+  // Summary artifact
   const summary = {
     totalUrls: urls.length,
     totalElements: allElements.length,
@@ -302,6 +320,7 @@ async function inspectAndParse(browser, url) {
   fs.writeFileSync(OUTPUT_ELEMENTS_FILE, JSON.stringify(allElements, null, 2));
   fs.writeFileSync(OUTPUT_ROWS_FILE, JSON.stringify(finalRows, null, 2));
   fs.writeFileSync(OUTPUT_SUMMARY_FILE, JSON.stringify(summary, null, 2));
+
   if (errors.length) {
     fs.writeFileSync(OUTPUT_ERRORS_FILE, JSON.stringify(errors, null, 2));
     console.log(`⚠️ Saved ${errors.length} errors → ${OUTPUT_ERRORS_FILE}`);
