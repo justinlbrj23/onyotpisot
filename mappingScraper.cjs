@@ -1,6 +1,3 @@
-// mappingScraper.cjs
-// Requires: npm install googleapis
-
 const fs = require("fs");
 const { google } = require("googleapis");
 
@@ -9,9 +6,10 @@ const { google } = require("googleapis");
 // =========================
 const SERVICE_ACCOUNT_FILE = "./service-account.json";
 const SPREADSHEET_ID = "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
-const SHEET_NAME_URLS = "web_tda"; 
-const SHEET_NAME_RAW = "raw_main"; 
-const INPUT_FILE = process.argv[2] || "parsed-auctions.json"; 
+const SHEET_NAME_URLS = "web_tda";
+const SHEET_NAME_RAW = "raw_main";
+const INPUT_FILE = process.argv[2] || "parsed-auctions.json";
+const RESEARCHER_NAME = process.env.RESEARCHER || process.argv[3] || "";
 
 // =========================
 // GOOGLE AUTH
@@ -42,7 +40,7 @@ const HEADERS = [
 async function getUrlMapping() {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_NAME_URLS}!A2:C`, // County | State | URL
+    range: `${SHEET_NAME_URLS}!A2:C`,
   });
 
   const rows = res.data.values || [];
@@ -61,51 +59,59 @@ async function getUrlMapping() {
 function yn(val) {
   if (val === true || val === "Yes") return "Yes";
   if (val === false || val === "No") return "No";
-  if (typeof val === "string" && val.toLowerCase() === "yes") return "Yes";
-  if (typeof val === "string" && val.toLowerCase() === "no") return "No";
+  if (typeof val === "string") {
+    const v = val.trim().toLowerCase();
+    if (v === "yes") return "Yes";
+    if (v === "no") return "No";
+  }
   return "";
+}
+
+// =========================
+// Parse ZIP and City from Address
+// =========================
+function extractCityZip(address) {
+  const m = address.match(/,\s*(.*?)\s*-\s*(\d{5})$/);
+  return m ? { city: m[1].trim(), zip: m[2] } : { city: "", zip: "" };
 }
 
 // =========================
 // Map parsed auction row → TSSF headers
 // =========================
 function mapRow(raw, urlMapping) {
-  // 🚫 Guard: skip non-Sold rows
   if (raw.auctionStatus !== "Sold") return null;
 
   const mapped = {};
-  HEADERS.forEach(h => (mapped[h] = "")); // initialize all headers
+  HEADERS.forEach(h => (mapped[h] = ""));
 
   const url = raw.sourceUrl || "";
   const geo = urlMapping[url] || { county: "", state: "" };
 
-  // Geo
   mapped["State"] = geo.state;
   mapped["County"] = geo.county;
 
-  // Basic auction fields
   mapped["Property Address"] = raw.propertyAddress || "";
   mapped["Parcel / APN Number"] = raw.parcelId || "";
   mapped["Case Number"] = raw.caseNumber || "";
-  mapped["Auction Date"] = raw.auctionDate || "";
 
-  // Sale details
+  mapped["Auction Date"] = (raw.auctionDate || "").replace(/\s+/g, " ").trim();
   mapped["Sale Finalized (Yes/No)"] = "Yes";
   mapped["Sale Price"] = raw.salePrice || "";
   mapped["Opening / Minimum Bid"] = raw.openingBid || "";
 
-  if (raw.surplus !== undefined && raw.surplus !== null) {
-    mapped["Estimated Surplus"] = String(raw.surplus);
-    mapped["Final Estimated Surplus to Owner"] = String(raw.surplus);
+  const surplus = raw.surplusAssessVsSale ?? raw.surplus;
+  if (surplus !== undefined && surplus !== null) {
+    mapped["Estimated Surplus"] = String(surplus);
+    mapped["Final Estimated Surplus to Owner"] = String(surplus);
   }
 
   mapped["Meets Minimum Surplus? (Yes/No)"] = yn(raw.meetsMinimumSurplus);
+  mapped["Deal Viable? (Yes/No)"] = yn(raw.meetsMinimumSurplus) === "Yes" ? "Yes" : "No";
 
-  // Deal viability
-  mapped["Deal Viable? (Yes/No)"] =
-    yn(raw.meetsMinimumSurplus) === "Yes" ? "Yes" : "No";
+  const { city, zip } = extractCityZip(mapped["Property Address"]);
+  mapped["City"] = city;
+  mapped["ZIP Code"] = zip;
 
-  // Defaults
   mapped["Ownership Deed Collected? (Yes/No)"] = "No";
   mapped["Foreclosure Deed Collected? (Yes/No)"] = "No";
   mapped["Proof of Sale Collected? (Yes/No)"] = "No";
@@ -113,6 +119,8 @@ function mapRow(raw, urlMapping) {
   mapped["Tax Assessor Page Collected? (Yes/No)"] = "No";
   mapped["File Complete? (Yes/No)"] = "No";
   mapped["File Submitted? (Yes/No)"] = "No";
+
+  mapped["Researcher Name"] = RESEARCHER_NAME;
 
   return mapped;
 }
@@ -125,6 +133,14 @@ async function appendRows(rows) {
     console.log("⚠️ No mapped rows to append.");
     return;
   }
+
+  const today = new Date().toISOString().split("T")[0];
+
+  rows.forEach(row => {
+    if (row["File Submitted? (Yes/No)"] === "Yes" && !row["Submission Date"]) {
+      row["Submission Date"] = today;
+    }
+  });
 
   const values = rows.map(row => HEADERS.map(h => row[h] || ""));
   await sheets.spreadsheets.values.append({
@@ -154,7 +170,7 @@ async function appendRows(rows) {
 
   const mappedRows = rawData
     .map(raw => mapRow(raw, urlMapping))
-    .filter(r => r !== null); // 🚫 filter out non-Sold
+    .filter(r => r !== null);
 
   if (mappedRows.length) {
     console.log("🧪 Sample mapped row preview:", mappedRows[0]);
