@@ -1,20 +1,23 @@
 // inspectWebpage.cjs
-// SOLD + SURPLUS extractor (JS-pagination aware)
+// Requires:
+// npm install puppeteer cheerio googleapis
 
-const puppeteer = require("puppeteer");
-const fs = require("fs");
-const { google } = require("googleapis");
+const puppeteer = require('puppeteer');
+const cheerio = require('cheerio');
+const fs = require('fs');
+const { google } = require('googleapis');
 
 // =========================
 // CONFIG
 // =========================
-const SERVICE_ACCOUNT_FILE = "./service-account.json";
-const SPREADSHEET_ID = "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
-const SHEET_NAME = "web_tda";
-const URL_RANGE = "C2:C";
+const SERVICE_ACCOUNT_FILE = './service-account.json';
+const SPREADSHEET_ID = '1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA';
+const SHEET_NAME = 'web_tda';
+const URL_RANGE = 'C2:C';
 
-const OUTPUT_ROWS_FILE = "parsed-auctions.json";
-const OUTPUT_ERRORS_FILE = "errors.json";
+const OUTPUT_ELEMENTS_FILE = 'raw-elements.json';
+const OUTPUT_ROWS_FILE = 'parsed-auctions.json';
+const OUTPUT_ERRORS_FILE = 'errors.json';
 
 const MIN_SURPLUS = 25000;
 
@@ -23,14 +26,14 @@ const MIN_SURPLUS = 25000;
 // =========================
 const auth = new google.auth.GoogleAuth({
   keyFile: SERVICE_ACCOUNT_FILE,
-  scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
+  scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
 });
-const sheets = google.sheets({ version: "v4", auth });
+const sheets = google.sheets({ version: 'v4', auth });
 
 // =========================
-// LOAD URLS
+// Load URLs
 // =========================
-async function loadUrls() {
+async function loadTargetUrls() {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
     range: `${SHEET_NAME}!${URL_RANGE}`,
@@ -39,136 +42,170 @@ async function loadUrls() {
   return (res.data.values || [])
     .flat()
     .map(v => v.trim())
-    .filter(v => v.startsWith("http"));
+    .filter(v => v.startsWith('http'));
 }
 
 // =========================
-// HELPERS
+// Currency parser
 // =========================
-function money(v) {
-  if (!v) return null;
-  const n = parseFloat(v.replace(/[^0-9.-]/g, ""));
+function parseCurrency(str) {
+  if (!str) return null;
+  const n = parseFloat(str.replace(/[^0-9.-]/g, ''));
   return isNaN(n) ? null : n;
 }
 
 // =========================
-// SCRAPE ONE URL (ALL PAGES)
+// Inspect + Parse Page
 // =========================
-async function scrapeUrl(browser, baseUrl) {
+async function inspectAndParse(browser, url) {
   const page = await browser.newPage();
-  await page.setUserAgent(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120"
-  );
+  page.setDefaultNavigationTimeout(120000);
 
-  console.log(`🌐 Scraping ${baseUrl}`);
-  await page.goto(baseUrl, { waitUntil: "networkidle2", timeout: 120000 });
-  await page.waitForTimeout(5000);
-
-  const results = [];
-  let pageNum = 1;
-
-  while (true) {
-    console.log(`➡️ Page ${pageNum}`);
-
-    const pageRows = await page.evaluate(
-      ({ MIN_SURPLUS }) => {
-        const rows = [];
-
-        document.querySelectorAll(".AuctionSold").forEach(badge => {
-          const card = badge.closest(".auctionItem") || badge.parentElement;
-          if (!card) return;
-
-          const get = label => {
-            const el = [...card.querySelectorAll("*")].find(e =>
-              e.textContent.includes(label)
-            );
-            return el?.nextElementSibling?.textContent?.trim() || "";
-          };
-
-          const sale = parseFloat(
-            get("Amount").replace(/[^0-9.-]/g, "")
-          );
-          const assessed = parseFloat(
-            get("Assessed Value").replace(/[^0-9.-]/g, "")
-          );
-
-          if (!sale || !assessed) return;
-          const surplus = assessed - sale;
-          if (surplus < MIN_SURPLUS) return;
-
-          rows.push({
-            sourceUrl: location.href,
-            auctionStatus: "Sold",
-            auctionType: get("Auction Type") || "Tax Sale",
-            caseNumber: get("Case #"),
-            parcelId: get("Parcel").split("|")[0].trim(),
-            propertyAddress: get("Property Address"),
-            salePrice: sale,
-            assessedValue: assessed,
-            surplus,
-            meetsMinimumSurplus: "Yes",
-          });
-        });
-
-        return rows;
-      },
-      { MIN_SURPLUS }
+  try {
+    // Anti-bot hardening
+    await page.setUserAgent(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
+        'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+        'Chrome/120.0.0.0 Safari/537.36'
     );
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'en-US,en;q=0.9',
+      Accept:
+        'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    });
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+    });
 
-    results.push(...pageRows);
+    console.log(`🌐 Visiting ${url}`);
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 120000 });
+    await new Promise(r => setTimeout(r, 8000));
 
-    const nextExists = await page.$(
-      'a[title*="Next"], a:has(img[alt="Next"])'
-    );
-    if (!nextExists) break;
+    const html = await page.content();
 
-    await Promise.all([
-      page.click('a[title*="Next"], a:has(img[alt="Next"])'),
-      page.waitForNavigation({ waitUntil: "networkidle2" }),
-    ]);
+    if (
+      html.includes('403 Forbidden') ||
+      html.includes('Access Denied') ||
+      html.toLowerCase().includes('forbidden')
+    ) {
+      throw new Error('Blocked by target website (403)');
+    }
 
-    await page.waitForTimeout(4000);
-    pageNum++;
+    const $ = cheerio.load(html);
+
+    // (1) FILTER: auction-relevant elements ONLY
+    const relevantElements = [];
+    const auctionTextRegex =
+      /(\$\d{1,3}(,\d{3})+)|(\bAPN\b)|(\bParcel\b)|(\bAuction\b)|(\bCase\b)/i;
+
+    $('*').each((_, el) => {
+      const tag = el.tagName;
+      const text = $(el).text().replace(/\s+/g, ' ').trim();
+      const attrs = el.attribs || {};
+      if (text && auctionTextRegex.test(text)) {
+        relevantElements.push({ sourceUrl: url, tag, text, attrs });
+      }
+    });
+
+    // (5) CARD-BASED AUCTION PARSER
+    const parsedRows = [];
+    $('div').each((_, container) => {
+      const blockText = $(container).text().replace(/\s+/g, ' ').trim();
+      if (!blockText.includes('Auction Type')) return;
+
+      const extract = label => {
+        const regex = new RegExp(`${label}\\s*:?\\s*([^\\n$]+)`, 'i');
+        const m = blockText.match(regex);
+        return m ? m[1].trim() : '';
+      };
+
+      const auctionStatus =
+        blockText.includes('Redeemed')
+          ? 'Redeemed'
+          : blockText.includes('Auction Sold')
+          ? 'Sold'
+          : 'Active';
+
+      const openingBidMatch = blockText.match(/\$[\d,]+\.\d{2}/);
+      const openingBid = openingBidMatch ? openingBidMatch[0] : '';
+
+      const assessedValueMatch = blockText.match(/Assessed Value:\s*\$[\d,]+\.\d{2}/i);
+      const assessedValue = assessedValueMatch
+        ? assessedValueMatch[0].replace(/Assessed Value:/i, '').trim()
+        : '';
+
+      const parcelLink = $(container).find('a').first();
+      const parcelId = parcelLink.text().trim();
+
+      if (!parcelId || !openingBid) return;
+
+      const open = parseCurrency(openingBid);
+      const assess = parseCurrency(assessedValue);
+      const surplus = open !== null && assess !== null ? assess - open : null;
+
+      parsedRows.push({
+        sourceUrl: url,
+        auctionStatus,
+        auctionType: extract('Auction Type'),
+        caseNumber: extract('Case #'),
+        parcelId,
+        propertyAddress: extract('Property Address'),
+        openingBid,
+        assessedValue,
+        surplus,
+        meetsMinimumSurplus: surplus !== null && surplus >= MIN_SURPLUS ? 'Yes' : 'No',
+      });
+    });
+
+    console.log(`📦 Elements: ${relevantElements.length} | Auctions: ${parsedRows.length}`);
+    return { relevantElements, parsedRows };
+  } catch (err) {
+    console.error(`❌ Error on ${url}:`, err.message);
+    return { relevantElements: [], parsedRows: [], error: { url, message: err.message } };
+  } finally {
+    await page.close();
   }
-
-  await page.close();
-  return results;
 }
 
 // =========================
 // MAIN
 // =========================
 (async () => {
-  const urls = await loadUrls();
+  console.log('📥 Loading URLs...');
+  const urls = await loadTargetUrls();
+
   const browser = await puppeteer.launch({
-    headless: "new",
-    args: ["--no-sandbox"],
+    headless: 'new',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-blink-features=AutomationControlled',
+      '--ignore-certificate-errors' // 👈 added for SSL mismatch
+    ],
   });
 
-  const all = [];
-  const seen = new Set();
+  const allElements = [];
+  const allRows = [];
   const errors = [];
 
   for (const url of urls) {
-    try {
-      const rows = await scrapeUrl(browser, url);
-      for (const r of rows) {
-        const k = `${r.caseNumber}|${r.parcelId}`;
-        if (!seen.has(k)) {
-          seen.add(k);
-          all.push(r);
-        }
-      }
-    } catch (e) {
-      errors.push({ url, error: e.message });
-    }
+    const { relevantElements, parsedRows, error } = await inspectAndParse(browser, url);
+    allElements.push(...relevantElements);
+    allRows.push(...parsedRows);
+    if (error) errors.push(error);
   }
 
   await browser.close();
 
-  fs.writeFileSync(OUTPUT_ROWS_FILE, JSON.stringify(all, null, 2));
-  if (errors.length)
+  fs.writeFileSync(OUTPUT_ELEMENTS_FILE, JSON.stringify(allElements, null, 2));
+  fs.writeFileSync(OUTPUT_ROWS_FILE, JSON.stringify(allRows, null, 2));
+  if (errors.length) {
     fs.writeFileSync(OUTPUT_ERRORS_FILE, JSON.stringify(errors, null, 2));
+    console.log(`⚠️ Saved ${errors.length} errors → ${OUTPUT_ERRORS_FILE}`);
+  }
 
-  console.log(`✅ Saved ${all.length} SOLD + SURPLUS auctions`);
+  console.log(`✅ Saved ${allElements.length} elements → ${OUTPUT_ELEMENTS_FILE}`);
+  console.log(`✅ Saved ${allRows.length} auctions → ${OUTPUT_ROWS_FILE}`);
+  console.log('🏁 Done');
 })();
