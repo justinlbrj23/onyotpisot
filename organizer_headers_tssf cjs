@@ -4,7 +4,7 @@
 const { google } = require("googleapis");
 
 // -------------------------
-// CONFIG
+// CONFIg
 // -------------------------
 const SPREADSHEET_ID = "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
 const SHEET_NAME = "raw_main";
