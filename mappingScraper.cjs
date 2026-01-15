@@ -1,4 +1,4 @@
-// mappingScraper.cjs
+// mappingScraper.cjs (Stage 3: map parsed auctions → Google Sheets)
 // Requires: npm install googleapis
 
 const fs = require("fs");
@@ -9,8 +9,8 @@ const { google } = require("googleapis");
 // =========================
 const SERVICE_ACCOUNT_FILE = "./service-account.json";
 const SPREADSHEET_ID = "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
-const SHEET_NAME_URLS = "web_tda"; 
-const SHEET_NAME_RAW = "raw_main"; 
+const SHEET_NAME_URLS = "web_tda";   // County | State | URL mapping
+const SHEET_NAME_RAW = "raw_main";   // Target sheet for mapped rows
 const INPUT_FILE = process.argv[2] || "parsed-auctions.json"; 
 
 // =========================
@@ -61,8 +61,11 @@ async function getUrlMapping() {
 function yn(val) {
   if (val === true || val === "Yes") return "Yes";
   if (val === false || val === "No") return "No";
-  if (typeof val === "string" && val.toLowerCase() === "yes") return "Yes";
-  if (typeof val === "string" && val.toLowerCase() === "no") return "No";
+  if (typeof val === "string") {
+    const v = val.trim().toLowerCase();
+    if (v === "yes") return "Yes";
+    if (v === "no") return "No";
+  }
   return "";
 }
 
@@ -71,7 +74,7 @@ function yn(val) {
 // =========================
 function mapRow(raw, urlMapping) {
   // 🚫 Guard: skip non-Sold rows
-  if (raw.auctionStatus !== "Sold") return null;
+  if (raw.auctionStatus && raw.auctionStatus !== "Sold") return null;
 
   const mapped = {};
   HEADERS.forEach(h => (mapped[h] = "")); // initialize all headers
@@ -94,9 +97,13 @@ function mapRow(raw, urlMapping) {
   mapped["Sale Price"] = raw.salePrice || "";
   mapped["Opening / Minimum Bid"] = raw.openingBid || "";
 
+  // Surplus
   if (raw.surplus !== undefined && raw.surplus !== null) {
     mapped["Estimated Surplus"] = String(raw.surplus);
     mapped["Final Estimated Surplus to Owner"] = String(raw.surplus);
+  } else if (raw.surplusAssessVsSale !== undefined) {
+    mapped["Estimated Surplus"] = String(raw.surplusAssessVsSale);
+    mapped["Final Estimated Surplus to Owner"] = String(raw.surplusAssessVsSale);
   }
 
   mapped["Meets Minimum Surplus? (Yes/No)"] = yn(raw.meetsMinimumSurplus);
@@ -105,7 +112,7 @@ function mapRow(raw, urlMapping) {
   mapped["Deal Viable? (Yes/No)"] =
     yn(raw.meetsMinimumSurplus) === "Yes" ? "Yes" : "No";
 
-  // Defaults
+  // Defaults for downstream workflow
   mapped["Ownership Deed Collected? (Yes/No)"] = "No";
   mapped["Foreclosure Deed Collected? (Yes/No)"] = "No";
   mapped["Proof of Sale Collected? (Yes/No)"] = "No";
