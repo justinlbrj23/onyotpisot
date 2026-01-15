@@ -79,8 +79,8 @@ function mapRow(raw, urlMapping) {
   const mapped = {};
   HEADERS.forEach(h => (mapped[h] = "")); // initialize all headers
 
-  const url = raw.sourceUrl || "";
-  const geo = urlMapping[url] || { county: "", state: "" };
+  const baseUrl = (raw.sourceUrl || "").split("&page=")[0];
+  const geo = urlMapping[baseUrl] || { county: "", state: "" };
 
   // Geo
   mapped["State"] = geo.state;
@@ -90,11 +90,11 @@ function mapRow(raw, urlMapping) {
   mapped["Property Address"] = raw.propertyAddress || "";
   mapped["Parcel / APN Number"] = raw.parcelId || "";
   mapped["Case Number"] = raw.caseNumber || "";
-  mapped["Auction Date"] = raw.auctionDate || "";
+  mapped["Auction Date"] = raw.auctionDate || raw.date || "";
 
   // Sale details
   mapped["Sale Finalized (Yes/No)"] = "Yes";
-  mapped["Sale Price"] = raw.salePrice || "";
+  mapped["Sale Price"] = raw.salePrice || raw.amount || "";
   mapped["Opening / Minimum Bid"] = raw.openingBid || "";
 
   // Surplus
@@ -157,9 +157,16 @@ async function appendRows(rows) {
   const urlMapping = await getUrlMapping();
   console.log(`🌐 Fetched ${Object.keys(urlMapping).length} URL → County/State mappings`);
 
-  const mappedRows = rawData
-    .map(raw => mapRow(raw, urlMapping))
-    .filter(r => r !== null);
+  // Deduplicate before mapping
+  const uniqueMap = new Map();
+  rawData.forEach(raw => {
+    const key = `${(raw.sourceUrl || "").split("&page=")[0]}|${raw.caseNumber}|${raw.parcelId}`;
+    if (!uniqueMap.has(key)) {
+      const mapped = mapRow(raw, urlMapping);
+      if (mapped) uniqueMap.set(key, mapped);
+    }
+  });
+  const mappedRows = [...uniqueMap.values()];
 
   if (mappedRows.length) {
     console.log("🧪 Sample mapped row preview:", mappedRows[0]);
