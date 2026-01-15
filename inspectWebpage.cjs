@@ -162,7 +162,7 @@ async function inspectAndParse(page, url) {
 }
 
 // =========================
-// Scrape all pages (pagination)
+// Scrape all pages (URL-based pagination)
 // =========================
 async function scrapeAllPages(browser, startUrl) {
   const page = await browser.newPage();
@@ -173,29 +173,29 @@ async function scrapeAllPages(browser, startUrl) {
   const allRows = [];
   const errors = [];
 
-  let currentUrl = startUrl;
   let pageIndex = 1;
 
   while (true) {
+    // Construct URL with page index
+    const currentUrl = pageIndex === 1 ? startUrl : `${startUrl}&page=${pageIndex}`;
+    console.log(`🌐 Visiting ${currentUrl}`);
+
     const { relevantElements, parsedRows, error } = await inspectAndParse(page, currentUrl);
     allElements.push(...relevantElements);
     allRows.push(...parsedRows);
     if (error) errors.push(error);
 
-    // Detect "Next Page" button
-    const nextButton = await page.$('a[aria-label="Next"], a.pagination-next, button.next');
-    if (!nextButton) {
+    // Stop if no new rows/elements found
+    if (!relevantElements.length && !parsedRows.length) {
       console.log("⛔ No more pages");
       break;
     }
 
-    await Promise.all([
-      nextButton.click(),
-      page.waitForNavigation({ waitUntil: "domcontentloaded" })
-    ]);
-
-    currentUrl = page.url();
     pageIndex++;
+    if (pageIndex > 50) { // safety cap
+      console.log("⚠️ Reached page limit, stopping.");
+      break;
+    }
     console.log(`➡️ Moving to page ${pageIndex}`);
   }
 
