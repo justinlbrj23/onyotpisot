@@ -1,11 +1,14 @@
-// inspectWebpage.cjs
+// inspectWebpage.cjs (Stage 2: evaluation + filtration with stealth hardening)
 // Requires:
-// npm install puppeteer cheerio googleapis
+// npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis
 
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const cheerio = require('cheerio');
 const fs = require('fs');
 const { google } = require('googleapis');
+
+puppeteer.use(StealthPlugin());
 
 // =========================
 // CONFIG
@@ -18,6 +21,7 @@ const URL_RANGE = 'C2:C';
 const OUTPUT_ELEMENTS_FILE = 'raw-elements.json';
 const OUTPUT_ROWS_FILE = 'parsed-auctions.json';
 const OUTPUT_ERRORS_FILE = 'errors.json';
+const OUTPUT_SUMMARY_FILE = 'summary.json';
 
 const MIN_SURPLUS = 25000;
 
@@ -60,11 +64,15 @@ function parseCurrency(str) {
 async function inspectAndParse(page, url) {
   try {
     console.log(`🌐 Visiting ${url}`);
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 120000 });
-    await new Promise(r => setTimeout(r, 5000));
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 120000 });
+    await page.waitForTimeout(15000); // longer wait for scripts
 
     const html = await page.content();
-    if (html.includes('403 Forbidden') || html.includes('Access Denied')) {
+    if (
+      html.includes('403 Forbidden') ||
+      html.includes('Access Denied') ||
+      html.toLowerCase().includes('forbidden')
+    ) {
       throw new Error('Blocked by target website (403)');
     }
 
@@ -84,7 +92,7 @@ async function inspectAndParse(page, url) {
       }
     });
 
-    // (5) CARD-BASED AUCTION PARSER
+    // (2) CARD-BASED AUCTION PARSER
     const parsedRows = [];
     $('div').each((_, container) => {
       const blockText = $(container).text().replace(/\s+/g, ' ').trim();
@@ -147,7 +155,8 @@ async function inspectAndParse(page, url) {
 // =========================
 async function scrapeAllPages(browser, startUrl) {
   const page = await browser.newPage();
-  page.setDefaultNavigationTimeout(120000);
+  page.setViewport({ width: 1280, height: 800 });
+  await page.emulateTimezone('America/New_York');
 
   const allElements = [];
   const allRows = [];
@@ -171,11 +180,12 @@ async function scrapeAllPages(browser, startUrl) {
 
     await Promise.all([
       nextButton.click(),
-      page.waitForNavigation({ waitUntil: "networkidle2" })
+      page.waitForNavigation({ waitUntil: "domcontentloaded" })
     ]);
 
     currentUrl = page.url();
     pageIndex++;
+    console.log(`➡️ Moving to page ${pageIndex}`);
   }
 
   await page.close();
@@ -190,13 +200,13 @@ async function scrapeAllPages(browser, startUrl) {
   const urls = await loadTargetUrls();
 
   const browser = await puppeteer.launch({
-    headless: 'new',
+    headless: true,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-blink-features=AutomationControlled',
-      '--ignore-certificate-errors'
+      '--ignore-certificate-errors',
     ],
   });
 
@@ -213,6 +223,7 @@ async function scrapeAllPages(browser, startUrl) {
 
   await browser.close();
 
+  // Write artifacts
   fs.writeFileSync(OUTPUT_ELEMENTS_FILE, JSON.stringify(allElements, null, 2));
   fs.writeFileSync(OUTPUT_ROWS_FILE, JSON.stringify(allRows, null, 2));
   if (errors.length) {
@@ -220,7 +231,18 @@ async function scrapeAllPages(browser, startUrl) {
     console.log(`⚠️ Saved ${errors.length} errors → ${OUTPUT_ERRORS_FILE}`);
   }
 
+  const summary = {
+    totalUrls: urls.length,
+    totalElements: allElements.length,
+    totalRowsFinal: allRows.length,
+    errorsCount: errors.length,
+    surplusAboveThreshold: allRows.filter(r => r.meetsMinimumSurplus === 'Yes').length,
+    surplusBelowThreshold: allRows.filter(r => r.meetsMinimumSurplus === 'No').length,
+  };
+  fs.writeFileSync(OUTPUT_SUMMARY_FILE, JSON.stringify(summary, null, 2));
+
   console.log(`✅ Saved ${allElements.length} elements → ${OUTPUT_ELEMENTS_FILE}`);
   console.log(`✅ Saved ${allRows.length} auctions → ${OUTPUT_ROWS_FILE}`);
+  console.log(`📊 Saved summary → ${OUTPUT_SUMMARY_FILE}`);
   console.log('🏁 Done');
 })();
