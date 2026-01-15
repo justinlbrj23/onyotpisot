@@ -59,13 +59,24 @@ function parseCurrency(str) {
 }
 
 // =========================
+// Delay helper (cross-version safe)
+// =========================
+async function delay(page, ms) {
+  if (typeof page.waitForTimeout === 'function') {
+    await page.waitForTimeout(ms);
+  } else {
+    await new Promise(resolve => setTimeout(resolve, ms));
+  }
+}
+
+// =========================
 // Inspect + Parse Page
 // =========================
 async function inspectAndParse(page, url) {
   try {
     console.log(`🌐 Visiting ${url}`);
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 120000 });
-    await page.waitForTimeout(15000); // longer wait for scripts
+    await delay(page, 15000); // longer wait for scripts
 
     const html = await page.content();
     if (
