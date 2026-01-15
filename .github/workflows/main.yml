@@ -32,6 +32,8 @@ jobs:
           else
             npm install
           fi
+          # Ensure stealth packages are present
+          npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis
 
       # --------------------------------------------------
       # Write RAW Service Account JSON
