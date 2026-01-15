@@ -72,7 +72,7 @@ async function delay(page, ms) {
 // =========================
 // Inspect + Parse Page
 // =========================
-async function inspectAndParse(page, url, seen) {
+async function inspectAndParse(page, url) {
   try {
     console.log(`🌐 Visiting ${url}`);
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 120000 });
@@ -143,24 +143,17 @@ async function inspectAndParse(page, url, seen) {
       const parcelLink = $(container).find('a').first();
       const parcelId = parcelLink.text().trim();
 
-      const caseNumber = extract('Case #');
-
-      if (!parcelId || !openingBid || !caseNumber) return;
+      if (!parcelId || !openingBid) return;
 
       const open = parseCurrency(openingBid);
       const assess = parseCurrency(assessedValue);
       const surplus = assess !== null && open !== null ? assess - open : null;
 
-      const baseUrl = url.split('&page=')[0];
-      const dedupeKey = `${baseUrl}|${caseNumber}|${parcelId}`;
-      if (seen.has(dedupeKey)) return;
-      seen.add(dedupeKey);
-
       parsedRows.push({
-        sourceUrl: baseUrl,
+        sourceUrl: url,
         auctionStatus,
         auctionType: extract('Auction Type'),
-        caseNumber,
+        caseNumber: extract('Case #'),
         parcelId,
         propertyAddress: extract('Property Address'),
         openingBid,
@@ -191,7 +184,6 @@ async function scrapeAllPages(browser, startUrl) {
   const allElements = [];
   const allRows = [];
   const errors = [];
-  const seen = new Set();
 
   let pageIndex = 1;
 
@@ -199,7 +191,7 @@ async function scrapeAllPages(browser, startUrl) {
     const currentUrl = pageIndex === 1 ? startUrl : `${startUrl}&page=${pageIndex}`;
     console.log(`🌐 Visiting ${currentUrl}`);
 
-    const { relevantElements, parsedRows, error } = await inspectAndParse(page, currentUrl, seen);
+    const { relevantElements, parsedRows, error } = await inspectAndParse(page, currentUrl);
     allElements.push(...relevantElements);
     allRows.push(...parsedRows);
     if (error) errors.push(error);
@@ -266,10 +258,6 @@ async function scrapeAllPages(browser, startUrl) {
     errorsCount: errors.length,
     surplusAboveThreshold: allRows.filter(r => r.meetsMinimumSurplus === 'Yes').length,
     surplusBelowThreshold: allRows.filter(r => r.meetsMinimumSurplus === 'No').length,
-    blanks: {
-      auctionDateBlank: allRows.filter(r => !r.auctionDate).length,
-      salePriceBlank: allRows.filter(r => !r.salePrice).length,
-    },
   };
 
   fs.writeFileSync(OUTPUT_SUMMARY_FILE, JSON.stringify(summary, null, 2));
