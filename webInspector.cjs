@@ -47,7 +47,7 @@ async function loadTargetUrls() {
 }
 
 // =========================
-/** Currency parser: accepts $1,234 or $1,234.56 */
+// Currency parser
 // =========================
 function parseCurrency(str) {
   if (!str) return null;
@@ -56,31 +56,27 @@ function parseCurrency(str) {
 }
 
 // =========================
-// Helpers to extract fields
+// Helpers
 // =========================
 function extractBetween(text, startLabel, stopLabels = []) {
   const idx = text.toLowerCase().indexOf(startLabel.toLowerCase());
   if (idx === -1) return '';
-
   let substr = text.slice(idx + startLabel.length).trim();
-
   let stopIndex = substr.length;
   for (const stop of stopLabels) {
     const i = substr.toLowerCase().indexOf(stop.toLowerCase());
     if (i !== -1 && i < stopIndex) stopIndex = i;
   }
-
   return substr.slice(0, stopIndex).trim();
 }
 
-/** Flexible date capture across common formats */
 function extractDateFlexible(text) {
   const patterns = [
-    /Date\s*:?\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)\s*\w*)?)/i,
-    /Auction Date\s*:?\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)\s*\w*)?)/i,
-    /Sale Date\s*:?\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)\s*\w*)?)/i,
-    /Date Sold\s*:?\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)\s*\w*)?)/i,
-    /([0-9]{4}-[0-9]{2}-[0-9]{2}(?:\s+[0-9]{2}:[0-9]{2}(?::[0-9]{2})?\s*(?:AM|PM)?\s*\w*)?)/i,
+    /Date\/Time\s*:?\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4}\s+[0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)\s*\w*)/i,
+    /Auction Date\s*:?\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4})/i,
+    /Sale Date\s*:?\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4})/i,
+    /Date Sold\s*:?\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4})/i,
+    /([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}(?::[0-9]{2})?\s*(?:AM|PM)?)/i,
   ];
   for (const re of patterns) {
     const m = text.match(re);
@@ -89,7 +85,6 @@ function extractDateFlexible(text) {
   return '';
 }
 
-/** Currency after label: optional colon, optional cents */
 function extractAmountAfter(text, label) {
   const regex = new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:?' + '\\s*\\$[\\d,]+(?:\\.\\d{2})?', 'i');
   const m = text.match(regex);
@@ -98,7 +93,6 @@ function extractAmountAfter(text, label) {
   return moneyMatch ? moneyMatch[0] : '';
 }
 
-/** Proximity-based currency near any of the labels (within N chars) */
 function extractCurrencyNearLabels(text, labels, window = 60) {
   const lower = text.toLowerCase();
   for (const label of labels) {
@@ -112,9 +106,6 @@ function extractCurrencyNearLabels(text, labels, window = 60) {
   return '';
 }
 
-// =========================
-// Multi-label sale price extractor (robust)
-// =========================
 function extractSalePrice(text) {
   const labels = [
     'Amount',
@@ -130,21 +121,15 @@ function extractSalePrice(text) {
     'Winning Amount',
     'Winning Offer',
   ];
-
-  // 1) Try strict label→amount
   for (const label of labels) {
     const v = extractAmountAfter(text, label);
     if (v) return v;
   }
-  // 2) Try proximity-based fallback
   const near = extractCurrencyNearLabels(text, labels, 80);
   if (near) return near;
-
-  // 3) Last resort: pick the largest currency in the block (often sale price)
   const allMoney = [...text.matchAll(/\$[\d,]+(?:\.\d{2})?/g)].map(m => m[0]);
   if (allMoney.length) {
-    const sorted = allMoney
-      .map(s => ({ s, n: parseCurrency(s) }))
+    const sorted = allMoney.map(s => ({ s, n: parseCurrency(s) }))
       .filter(x => x.n !== null)
       .sort((a, b) => b.n - a.n);
     return sorted.length ? sorted[0].s : '';
@@ -152,9 +137,6 @@ function extractSalePrice(text) {
   return '';
 }
 
-// =========================
-// Schema validation
-// =========================
 function validateRow(row) {
   return (
     row.caseNumber &&
@@ -165,27 +147,19 @@ function validateRow(row) {
   );
 }
 
-// =========================
-// Build label→value map from container nodes
-// =========================
 function buildLabelValueMap($container) {
   const map = {};
   const textNodes = [];
-
   $container.find('*').each((_, el) => {
     const t = $container.find(el).text().replace(/\s+/g, ' ').trim();
     if (t) textNodes.push(t);
   });
-
-  // Heuristic: split on common separators
   for (const t of textNodes) {
     const parts = t.split(/[:|-]\s*/);
     if (parts.length >= 2) {
       const label = parts[0].trim().toLowerCase();
       const value = parts.slice(1).join(':').trim();
-      if (label && value) {
-        map[label] = value;
-      }
+      if (label && value) map[label] = value;
     }
   }
   return { map, text: textNodes.join(' | ') };
@@ -194,46 +168,20 @@ function buildLabelValueMap($container) {
 // =========================
 // Inspect + Parse Page (SOLD only)
 // =========================
-async function inspectAndParse(browser, url) {
-  const page = await browser.newPage();
-  page.setDefaultNavigationTimeout(120000);
-
+async function inspectAndParse(page, url) {
   try {
-    // Anti-bot hardening
-    await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
-        'AppleWebKit/537.36 (KHTML, like Gecko) ' +
-        'Chrome/120.0.0.0 Safari/537.36'
-    );
-    await page.setExtraHTTPHeaders({
-      'Accept-Language': 'en-US,en;q=0.9',
-      Accept:
-        'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    });
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => false });
-    });
-
     console.log(`🌐 Visiting ${url}`);
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 120000 });
-    await new Promise(r => setTimeout(r, 8000));
+    await new Promise(r => setTimeout(r, 5000));
 
     const html = await page.content();
-
-    if (
-      html.includes('403 Forbidden') ||
-      html.includes('Access Denied') ||
-      html.toLowerCase().includes('forbidden')
-    ) {
+    if (html.includes('403 Forbidden') || html.includes('Access Denied')) {
       throw new Error('Blocked by target website (403)');
     }
 
     const $ = cheerio.load(html);
-
-    // (1) FILTER: auction-relevant elements ONLY (for diagnostics)
     const relevantElements = [];
-    const auctionTextRegex =
-      /(\$\d{1,3}(,\d{3})+)|(\bAPN\b)|(\bParcel\b)|(\bAuction\b)|(\bCase\b)|(\bWinning Bid\b)|(\bSale Price\b)/i;
+    const auctionTextRegex = /(\$\d{1,3}(,\d{3})+)|(\bAPN\b)|(\bParcel\b)|(\bAuction\b)|(\bCase\b)|(\bWinning Bid\b)|(\bSale Price\b)/i;
 
     $('*').each((_, el) => {
       const tag = el.tagName;
@@ -244,7 +192,6 @@ async function inspectAndParse(browser, url) {
       }
     });
 
-    // (2) CARD-BASED AUCTION PARSER (SOLD ONLY)
     const parsedRows = [];
     const seen = new Set();
 
@@ -254,7 +201,6 @@ async function inspectAndParse(browser, url) {
       if (!/Auction Sold/i.test(blockText)) return;
 
       const { map: kv, text: joinedText } = buildLabelValueMap($container);
-
       const auctionStatus = 'Sold';
 
       const auctionType =
@@ -344,9 +290,47 @@ async function inspectAndParse(browser, url) {
   } catch (err) {
     console.error(`❌ Error on ${url}:`, err.message);
     return { relevantElements: [], parsedRows: [], error: { url, message: err.message } };
-  } finally {
-    await page.close();
   }
+}
+
+// =========================
+// Scrape all pages (pagination)
+// =========================
+async function scrapeAllPages(browser, startUrl) {
+  const page = await browser.newPage();
+  page.setDefaultNavigationTimeout(120000);
+
+  const allElements = [];
+  const allRows = [];
+  const errors = [];
+
+  let currentUrl = startUrl;
+  let pageIndex = 1;
+
+  while (true) {
+    const { relevantElements, parsedRows, error } = await inspectAndParse(page, currentUrl);
+    allElements.push(...relevantElements);
+    allRows.push(...parsedRows);
+    if (error) errors.push(error);
+
+    // Detect "Next Page" button
+    const nextButton = await page.$('a[aria-label="Next"], a.pagination-next, button.next');
+    if (!nextButton) {
+      console.log("⛔ No more pages");
+      break;
+    }
+
+    await Promise.all([
+      nextButton.click(),
+      page.waitForNavigation({ waitUntil: "networkidle2" })
+    ]);
+
+    currentUrl = page.url();
+    pageIndex++;
+  }
+
+  await page.close();
+  return { allElements, allRows, errors };
 }
 
 // =========================
@@ -372,10 +356,10 @@ async function inspectAndParse(browser, url) {
   const errors = [];
 
   for (const url of urls) {
-    const { relevantElements, parsedRows, error } = await inspectAndParse(browser, url);
-    allElements.push(...relevantElements);
-    allRows.push(...parsedRows);
-    if (error) errors.push(error);
+    const result = await scrapeAllPages(browser, url);
+    allElements.push(...result.allElements);
+    allRows.push(...result.allRows);
+    errors.push(...result.errors);
   }
 
   await browser.close();
