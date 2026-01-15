@@ -198,6 +198,10 @@ async function inspectAndParse(browser, url) {
   const page = await browser.newPage();
   page.setDefaultNavigationTimeout(120000);
 
+  const allRelevantElements = [];
+  const allParsedRows = [];
+  const seen = new Set();
+
   try {
     // Anti-bot hardening
     await page.setUserAgent(
@@ -214,133 +218,142 @@ async function inspectAndParse(browser, url) {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
-    console.log(`🌐 Visiting ${url}`);
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 120000 });
-    await new Promise(r => setTimeout(r, 8000));
+    let pageIndex = 1;
+    while (true) {
+      const pageUrl = pageIndex === 1 ? url : `${url}&page=${pageIndex}`;
+      console.log(`🌐 Visiting ${pageUrl}`);
+      await page.goto(pageUrl, { waitUntil: 'networkidle2', timeout: 120000 });
+      await new Promise(r => setTimeout(r, 8000));
 
-    const html = await page.content();
+      const html = await page.content();
+      if (
+        html.includes('403 Forbidden') ||
+        html.includes('Access Denied') ||
+        html.toLowerCase().includes('forbidden')
+      ) {
+        throw new Error('Blocked by target website (403)');
+      }
 
-    if (
-      html.includes('403 Forbidden') ||
-      html.includes('Access Denied') ||
-      html.toLowerCase().includes('forbidden')
-    ) {
-      throw new Error('Blocked by target website (403)');
+      const $ = cheerio.load(html);
+
+      // (1) FILTER: auction-relevant elements ONLY (for diagnostics)
+      const auctionTextRegex =
+        /(\$\d{1,3}(,\d{3})+)|(\bAPN\b)|(\bParcel\b)|(\bAuction\b)|(\bCase\b)|(\bWinning Bid\b)|(\bSale Price\b)/i;
+
+      $('*').each((_, el) => {
+        const tag = el.tagName;
+        const text = $(el).text().replace(/\s+/g, ' ').trim();
+        const attrs = el.attribs || {};
+        if (text && auctionTextRegex.test(text)) {
+          allRelevantElements.push({ sourceUrl: pageUrl, tag, text, attrs });
+        }
+      });
+
+      // (2) CARD-BASED AUCTION PARSER (SOLD ONLY)
+      $('div').each((_, container) => {
+        const $container = $(container);
+        const blockText = $container.text().replace(/\s+/g, ' ').trim();
+        if (!/Auction Sold/i.test(blockText)) return;
+
+        const { map: kv, text: joinedText } = buildLabelValueMap($container);
+
+        const auctionStatus = 'Sold';
+        const auctionType =
+          extractBetween(blockText, 'Auction Type:', ['Case #', 'Certificate', 'Opening Bid']) ||
+          (kv['auction type'] || '');
+
+        const rawCase =
+          extractBetween(blockText, 'Case #:', ['Certificate', 'Opening Bid']) ||
+          (kv['case #'] || kv['case'] || '');
+        const caseNumber = rawCase.split(/\s+/)[0].trim();
+
+        const openingBidStr =
+          extractAmountAfter(blockText, 'Opening Bid') ||
+          extractAmountAfter(joinedText, 'Opening Bid') ||
+          (kv['opening bid'] && kv['opening bid'].match(/\$[\d,]+(?:\.\d{2})?/)?.[0]) ||
+          '';
+
+        const assessedValueStr =
+          extractBetween(blockText, 'Assessed Value:', []) ||
+          (kv['assessed value'] || '');
+        const assessedMoneyMatch = assessedValueStr.match(/\$[\d,]+(?:\.\d{2})?/);
+        const assessedValue = assessedMoneyMatch ? assessedMoneyMatch[0] : '';
+
+        const salePriceStr =
+          extractSalePrice(blockText) ||
+          extractSalePrice(joinedText) ||
+          (kv['sale price'] && kv['sale price'].match(/\$[\d,]+(?:\.\d{2})?/)?.[0]) ||
+          (kv['sold price'] && kv['sold price'].match(/\$[\d,]+(?:\.\d{2})?/)?.[0]) ||
+          (kv['winning bid'] && kv['winning bid'].match(/\$[\d,]+(?:\.\d{2})?/)?.[0]) ||
+          (kv['sold amount'] && kv['sold amount'].match(/\$[\d,]+(?:\.\d{2})?/)?.[0]) ||
+          '';
+
+        const parcelRaw =
+          extractBetween(blockText, 'Parcel ID:', ['Property Address', 'Assessed Value']) ||
+          (kv['parcel id'] || kv['apn'] || '');
+        const parcelId = parcelRaw.split('|')[0].trim();
+
+        const propertyAddress =
+          extractBetween(blockText, 'Property Address:', ['Assessed Value']) ||
+          (kv['property address'] || kv['address'] || '');
+
+        const auctionDate =
+          extractDateFlexible(blockText) ||
+          extractDateFlexible(joinedText) ||
+          (kv['auction date'] || kv['date sold'] || kv['sale date'] || kv['date'] || '');
+
+        const row = {
+          sourceUrl: pageUrl,
+          auctionStatus,
+          auctionType: auctionType || 'Tax Sale',
+          caseNumber,
+          parcelId,
+          propertyAddress,
+          openingBid: openingBidStr,
+          salePrice: salePriceStr,
+          assessedValue,
+          auctionDate,
+        };
+
+        if (!validateRow(row)) return;
+
+        const open = parseCurrency(openingBidStr);
+        const assess = parseCurrency(assessedValue);
+        const salePrice = parseCurrency(salePriceStr);
+
+        row.surplusAssessVsSale =
+          assess !== null && salePrice !== null ? assess - salePrice : null;
+
+        row.surplusSaleVsOpen =
+          salePrice !== null && open !== null ? salePrice - open : null;
+
+        row.meetsMinimumSurplus =
+          row.surplusAssessVsSale !== null &&
+          row.surplusAssessVsSale >= MIN_SURPLUS
+            ? 'Yes'
+            : 'No';
+
+        const dedupeKey = `${pageUrl}|${caseNumber}|${parcelId}`;
+        if (seen.has(dedupeKey)) return;
+        seen.add(dedupeKey);
+
+        allParsedRows.push(row);
+      });
+
+      console.log(`📦 Page ${pageIndex}: Elements ${allRelevantElements.length} | SOLD auctions so far ${allParsedRows.length}`);
+
+      // Detect if there is a "Next" link
+      const nextLink = $('a').filter((_, el) => {
+        const txt = $(el).text().trim().toLowerCase();
+        return txt === 'next' || txt.includes('next');
+      }).attr('href');
+
+      if (!nextLink) break;
+      pageIndex++;
+      if (pageIndex > 50) break; // safety cap
     }
 
-    const $ = cheerio.load(html);
-
-    // (1) FILTER: auction-relevant elements ONLY (for diagnostics)
-    const relevantElements = [];
-    const auctionTextRegex =
-      /(\$\d{1,3}(,\d{3})+)|(\bAPN\b)|(\bParcel\b)|(\bAuction\b)|(\bCase\b)|(\bWinning Bid\b)|(\bSale Price\b)/i;
-
-    $('*').each((_, el) => {
-      const tag = el.tagName;
-      const text = $(el).text().replace(/\s+/g, ' ').trim();
-      const attrs = el.attribs || {};
-      if (text && auctionTextRegex.test(text)) {
-        relevantElements.push({ sourceUrl: url, tag, text, attrs });
-      }
-    });
-
-    // (2) CARD-BASED AUCTION PARSER (SOLD ONLY)
-    const parsedRows = [];
-    const seen = new Set();
-
-    $('div').each((_, container) => {
-      const $container = $(container);
-      const blockText = $container.text().replace(/\s+/g, ' ').trim();
-      if (!/Auction Sold/i.test(blockText)) return;
-
-      const { map: kv, text: joinedText } = buildLabelValueMap($container);
-
-      const auctionStatus = 'Sold';
-
-      const auctionType =
-        extractBetween(blockText, 'Auction Type:', ['Case #', 'Certificate', 'Opening Bid']) ||
-        (kv['auction type'] || '');
-
-      const rawCase =
-        extractBetween(blockText, 'Case #:', ['Certificate', 'Opening Bid']) ||
-        (kv['case #'] || kv['case'] || '');
-      const caseNumber = rawCase.split(/\s+/)[0].trim();
-
-      const openingBidStr =
-        extractAmountAfter(blockText, 'Opening Bid') ||
-        extractAmountAfter(joinedText, 'Opening Bid') ||
-        (kv['opening bid'] && kv['opening bid'].match(/\$[\d,]+(?:\.\d{2})?/)?.[0]) ||
-        '';
-
-      const assessedValueStr =
-        extractBetween(blockText, 'Assessed Value:', []) ||
-        (kv['assessed value'] || '');
-      const assessedMoneyMatch = assessedValueStr.match(/\$[\d,]+(?:\.\d{2})?/);
-      const assessedValue = assessedMoneyMatch ? assessedMoneyMatch[0] : '';
-
-      const salePriceStr =
-        extractSalePrice(blockText) ||
-        extractSalePrice(joinedText) ||
-        (kv['sale price'] && kv['sale price'].match(/\$[\d,]+(?:\.\d{2})?/)?.[0]) ||
-        (kv['sold price'] && kv['sold price'].match(/\$[\d,]+(?:\.\d{2})?/)?.[0]) ||
-        (kv['winning bid'] && kv['winning bid'].match(/\$[\d,]+(?:\.\d{2})?/)?.[0]) ||
-        (kv['sold amount'] && kv['sold amount'].match(/\$[\d,]+(?:\.\d{2})?/)?.[0]) ||
-        '';
-
-      const parcelRaw =
-        extractBetween(blockText, 'Parcel ID:', ['Property Address', 'Assessed Value']) ||
-        (kv['parcel id'] || kv['apn'] || '');
-      const parcelId = parcelRaw.split('|')[0].trim();
-
-      const propertyAddress =
-        extractBetween(blockText, 'Property Address:', ['Assessed Value']) ||
-        (kv['property address'] || kv['address'] || '');
-
-      const auctionDate =
-        extractDateFlexible(blockText) ||
-        extractDateFlexible(joinedText) ||
-        (kv['auction date'] || kv['date sold'] || kv['sale date'] || kv['date'] || '');
-
-      const row = {
-        sourceUrl: url,
-        auctionStatus,
-        auctionType: auctionType || 'Tax Sale',
-        caseNumber,
-        parcelId,
-        propertyAddress,
-        openingBid: openingBidStr,
-        salePrice: salePriceStr,
-        assessedValue,
-        auctionDate,
-      };
-
-      if (!validateRow(row)) return;
-
-      const open = parseCurrency(openingBidStr);
-      const assess = parseCurrency(assessedValue);
-      const salePrice = parseCurrency(salePriceStr);
-
-      row.surplusAssessVsSale =
-        assess !== null && salePrice !== null ? assess - salePrice : null;
-
-      row.surplusSaleVsOpen =
-        salePrice !== null && open !== null ? salePrice - open : null;
-
-      row.meetsMinimumSurplus =
-        row.surplusAssessVsSale !== null &&
-        row.surplusAssessVsSale >= MIN_SURPLUS
-          ? 'Yes'
-          : 'No';
-
-      const dedupeKey = `${url}|${caseNumber}|${parcelId}`;
-      if (seen.has(dedupeKey)) return;
-      seen.add(dedupeKey);
-
-      parsedRows.push(row);
-    });
-
-    console.log(`📦 Elements: ${relevantElements.length} | SOLD auctions: ${parsedRows.length}`);
-    return { relevantElements, parsedRows };
+    return { relevantElements: allRelevantElements, parsedRows: allParsedRows };
   } catch (err) {
     console.error(`❌ Error on ${url}:`, err.message);
     return { relevantElements: [], parsedRows: [], error: { url, message: err.message } };
