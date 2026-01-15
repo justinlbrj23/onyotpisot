@@ -385,10 +385,15 @@ async function inspectAndParse(browser, url) {
   const errors = [];
 
   for (const url of urls) {
-    const { relevantElements, parsedRows, error } = await inspectAndParse(browser, url);
-    allElements.push(...relevantElements);
-    allRows.push(...parsedRows);
-    if (error) errors.push(error);
+    try {
+      const { relevantElements, parsedRows, error } = await inspectAndParse(browser, url);
+      allElements.push(...relevantElements);
+      allRows.push(...parsedRows);
+      if (error) errors.push(error);
+    } catch (err) {
+      console.error(`❌ Fatal error on ${url}:`, err.message);
+      errors.push({ url, message: err.message });
+    }
   }
 
   await browser.close();
