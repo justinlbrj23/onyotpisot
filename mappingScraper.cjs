@@ -1,4 +1,4 @@
-// mappingScraper.cjs (Stage 3: map parsed auctions → Google Sheets)
+// mappingScraper.cjs (Stage 3: map parsed auctions → Google Sheets + artifact output)
 // Requires: npm install googleapis
 
 const fs = require("fs");
@@ -12,6 +12,7 @@ const SPREADSHEET_ID = "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
 const SHEET_NAME_URLS = "web_tda";   // County | State | URL mapping
 const SHEET_NAME_RAW = "raw_main";   // Target sheet for mapped rows
 const INPUT_FILE = process.argv[2] || "parsed-auctions.json"; 
+const OUTPUT_FILE = "mapped-output.json"; // 👈 new artifact file
 
 // =========================
 // GOOGLE AUTH
@@ -73,7 +74,6 @@ function yn(val) {
 // Map parsed auction row → TSSF headers
 // =========================
 function mapRow(raw, urlMapping) {
-  // 🚫 Guard: skip non-Sold rows
   if (raw.auctionStatus && raw.auctionStatus !== "Sold") return null;
 
   const mapped = {};
@@ -107,8 +107,6 @@ function mapRow(raw, urlMapping) {
   }
 
   mapped["Meets Minimum Surplus? (Yes/No)"] = yn(raw.meetsMinimumSurplus);
-
-  // Deal viability
   mapped["Deal Viable? (Yes/No)"] =
     yn(raw.meetsMinimumSurplus) === "Yes" ? "Yes" : "No";
 
@@ -161,11 +159,15 @@ async function appendRows(rows) {
 
   const mappedRows = rawData
     .map(raw => mapRow(raw, urlMapping))
-    .filter(r => r !== null); // 🚫 filter out non-Sold
+    .filter(r => r !== null);
 
   if (mappedRows.length) {
     console.log("🧪 Sample mapped row preview:", mappedRows[0]);
   }
+
+  // Save artifact file for GitHub Actions
+  fs.writeFileSync(OUTPUT_FILE, JSON.stringify(mappedRows, null, 2));
+  console.log(`💾 Saved mapped rows → ${OUTPUT_FILE}`);
 
   await appendRows(mappedRows);
   console.log("🏁 Done.");
