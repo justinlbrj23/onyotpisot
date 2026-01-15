@@ -59,7 +59,7 @@ function parseCurrency(str) {
 }
 
 // =========================
-// Delay helper (cross-version safe)
+// Delay helper
 // =========================
 async function delay(page, ms) {
   if (typeof page.waitForTimeout === 'function') {
@@ -76,7 +76,7 @@ async function inspectAndParse(page, url) {
   try {
     console.log(`🌐 Visiting ${url}`);
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 120000 });
-    await delay(page, 15000); // longer wait for scripts
+    await delay(page, 15000);
 
     const html = await page.content();
     if (
@@ -122,12 +122,22 @@ async function inspectAndParse(page, url) {
           ? 'Sold'
           : 'Active';
 
-      const openingBidMatch = blockText.match(/\$[\d,]+\.\d{2}/);
-      const openingBid = openingBidMatch ? openingBidMatch[0] : '';
+      const openingBidMatch = blockText.match(/Opening Bid:\s*\$[\d,]+\.\d{2}/i);
+      const openingBid = openingBidMatch
+        ? openingBidMatch[0].replace(/Opening Bid:/i, '').trim()
+        : '';
 
       const assessedValueMatch = blockText.match(/Assessed Value:\s*\$[\d,]+\.\d{2}/i);
       const assessedValue = assessedValueMatch
         ? assessedValueMatch[0].replace(/Assessed Value:/i, '').trim()
+        : '';
+
+      const auctionDateMatch = blockText.match(/Date\/Time:\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?\s*ET)?)/i);
+      const auctionDate = auctionDateMatch ? auctionDateMatch[1].trim() : '';
+
+      const salePriceMatch = blockText.match(/Amount:\s*\$[\d,]+\.\d{2}/i);
+      const salePrice = salePriceMatch
+        ? salePriceMatch[0].replace(/Amount:/i, '').trim()
         : '';
 
       const parcelLink = $(container).find('a').first();
@@ -137,7 +147,7 @@ async function inspectAndParse(page, url) {
 
       const open = parseCurrency(openingBid);
       const assess = parseCurrency(assessedValue);
-      const surplus = open !== null && assess !== null ? assess - open : null;
+      const surplus = assess !== null && open !== null ? assess - open : null;
 
       parsedRows.push({
         sourceUrl: url,
@@ -148,6 +158,8 @@ async function inspectAndParse(page, url) {
         propertyAddress: extract('Property Address'),
         openingBid,
         assessedValue,
+        auctionDate,
+        salePrice,
         surplus,
         meetsMinimumSurplus: surplus !== null && surplus >= MIN_SURPLUS ? 'Yes' : 'No',
       });
@@ -176,7 +188,6 @@ async function scrapeAllPages(browser, startUrl) {
   let pageIndex = 1;
 
   while (true) {
-    // Construct URL with page index
     const currentUrl = pageIndex === 1 ? startUrl : `${startUrl}&page=${pageIndex}`;
     console.log(`🌐 Visiting ${currentUrl}`);
 
@@ -185,14 +196,13 @@ async function scrapeAllPages(browser, startUrl) {
     allRows.push(...parsedRows);
     if (error) errors.push(error);
 
-    // Stop if no new rows/elements found
     if (!relevantElements.length && !parsedRows.length) {
       console.log("⛔ No more pages");
       break;
     }
 
     pageIndex++;
-    if (pageIndex > 50) { // safety cap
+    if (pageIndex > 50) {
       console.log("⚠️ Reached page limit, stopping.");
       break;
     }
@@ -234,7 +244,6 @@ async function scrapeAllPages(browser, startUrl) {
 
   await browser.close();
 
-  // Write artifacts
   fs.writeFileSync(OUTPUT_ELEMENTS_FILE, JSON.stringify(allElements, null, 2));
   fs.writeFileSync(OUTPUT_ROWS_FILE, JSON.stringify(allRows, null, 2));
   if (errors.length) {
@@ -250,6 +259,7 @@ async function scrapeAllPages(browser, startUrl) {
     surplusAboveThreshold: allRows.filter(r => r.meetsMinimumSurplus === 'Yes').length,
     surplusBelowThreshold: allRows.filter(r => r.meetsMinimumSurplus === 'No').length,
   };
+
   fs.writeFileSync(OUTPUT_SUMMARY_FILE, JSON.stringify(summary, null, 2));
 
   console.log(`✅ Saved ${allElements.length} elements → ${OUTPUT_ELEMENTS_FILE}`);
