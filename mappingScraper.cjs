@@ -11,10 +11,9 @@ const SERVICE_ACCOUNT_FILE = "./service-account.json";
 const SPREADSHEET_ID = "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
 const SHEET_NAME_URLS = "web_tda";   // County | State | URL mapping
 const SHEET_NAME_RAW = "raw_main";   // Target sheet for mapped rows
-const INPUT_FILE = process.argv[2] || "parsed-auctions.json"; 
-const OUTPUT_FILE = "mapped-output.json"; // 👈 new artifact file
-
-// =========================
+const INPUT_FILE = process.argv[2] || "parsed-auctions.json";
+const OUTPUT_FILE = "mapped-output.json"; // artifact file
+const ANOMALY_FILE = "mapping-anomalies.json"; // NEW: diagnostics========
 // GOOGLE AUTH
 // =========================
 const auth = new google.auth.GoogleAuth({
@@ -43,7 +42,7 @@ const HEADERS = [
 async function getUrlMapping() {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_NAME_URLS}!A2:C`, // County | State | URL
+    range: `${SHEET_NAME_URLS}!A2:C`,
   });
 
   const rows = res.data.values || [];
@@ -73,11 +72,12 @@ function yn(val) {
 // =========================
 // Map parsed auction row → TSSF headers
 // =========================
-function mapRow(raw, urlMapping) {
+function mapRow(raw, urlMapping, anomalies) {
+  // Only map SOLD rows
   if (raw.auctionStatus && raw.auctionStatus !== "Sold") return null;
 
   const mapped = {};
-  HEADERS.forEach(h => (mapped[h] = "")); // initialize all headers
+  HEADERS.forEach(h => (mapped[h] = "")); // initialize
 
   const baseUrl = (raw.sourceUrl || "").split("&page=")[0];
   const geo = urlMapping[baseUrl] || { county: "", state: "" };
@@ -94,17 +94,42 @@ function mapRow(raw, urlMapping) {
 
   // Sale details
   mapped["Sale Finalized (Yes/No)"] = "Yes";
-  mapped["Sale Price"] = raw.salePrice || raw.amount || "";
+
+  // Validate sale price
+  const salePrice = raw.salePrice || raw.amount || "";
+  if (!salePrice) {
+    anomalies.push({
+      type: "MissingSalePrice",
+      message: "Sold auction missing sale price",
+      parcelId: raw.parcelId,
+      caseNumber: raw.caseNumber,
+      sourceUrl: raw.sourceUrl
+    });
+  }
+  mapped["Sale Price"] = salePrice;
+
   mapped["Opening / Minimum Bid"] = raw.openingBid || "";
 
-  // Surplus
+  // Surplus (already computed correctly in Stage 2)
+  let surplus = null;
   if (raw.surplus !== undefined && raw.surplus !== null) {
-    mapped["Estimated Surplus"] = String(raw.surplus);
-    mapped["Final Estimated Surplus to Owner"] = String(raw.surplus);
+    surplus = raw.surplus;
   } else if (raw.surplusAssessVsSale !== undefined) {
-    mapped["Estimated Surplus"] = String(raw.surplusAssessVsSale);
-    mapped["Final Estimated Surplus to Owner"] = String(raw.surplusAssessVsSale);
+    surplus = raw.surplusAssessVsSale;
   }
+
+  if (surplus === null) {
+    anomalies.push({
+      type: "MissingSurplus",
+      message: "Surplus missing for SOLD auction",
+      parcelId: raw.parcelId,
+      caseNumber: raw.caseNumber,
+      sourceUrl: raw.sourceUrl
+    });
+  }
+
+  mapped["Estimated Surplus"] = surplus !== null ? String(surplus) : "";
+  mapped["Final Estimated Surplus to Owner"] = surplus !== null ? String(surplus) : "";
 
   mapped["Meets Minimum Surplus? (Yes/No)"] = yn(raw.meetsMinimumSurplus);
   mapped["Deal Viable? (Yes/No)"] =
@@ -157,24 +182,32 @@ async function appendRows(rows) {
   const urlMapping = await getUrlMapping();
   console.log(`🌐 Fetched ${Object.keys(urlMapping).length} URL → County/State mappings`);
 
-  // Deduplicate before mapping
+  const anomalies = [];
   const uniqueMap = new Map();
+
   rawData.forEach(raw => {
     const key = `${(raw.sourceUrl || "").split("&page=")[0]}|${raw.caseNumber}|${raw.parcelId}`;
     if (!uniqueMap.has(key)) {
-      const mapped = mapRow(raw, urlMapping);
+      const mapped = mapRow(raw, urlMapping, anomalies);
       if (mapped) uniqueMap.set(key, mapped);
     }
   });
+
   const mappedRows = [...uniqueMap.values()];
 
   if (mappedRows.length) {
     console.log("🧪 Sample mapped row preview:", mappedRows[0]);
   }
 
-  // Save artifact file for GitHub Actions
+  // Save artifact file
   fs.writeFileSync(OUTPUT_FILE, JSON.stringify(mappedRows, null, 2));
   console.log(`💾 Saved mapped rows → ${OUTPUT_FILE}`);
+
+  // Save anomalies
+  if (anomalies.length) {
+    fs.writeFileSync(ANOMALY_FILE, JSON.stringify(anomalies, null, 2));
+    console.log(`⚠️ Saved ${anomalies.length} anomalies → ${ANOMALY_FILE}`);
+  }
 
   await appendRows(mappedRows);
   console.log("🏁 Done.");
