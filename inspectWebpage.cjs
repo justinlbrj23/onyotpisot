@@ -35,7 +35,7 @@ const auth = new google.auth.GoogleAuth({
 const sheets = google.sheets({ version: 'v4', auth });
 
 // =========================
-/** Load URLs */
+// Load URLs
 // =========================
 async function loadTargetUrls() {
   const res = await sheets.spreadsheets.values.get({
@@ -50,7 +50,7 @@ async function loadTargetUrls() {
 }
 
 // =========================
-/** Currency parser */
+// Currency parser
 // =========================
 function parseCurrency(str) {
   if (!str) return null;
@@ -59,7 +59,7 @@ function parseCurrency(str) {
 }
 
 // =========================
-/** Delay helper */
+// Delay helper
 // =========================
 async function delay(page, ms) {
   if (typeof page.waitForTimeout === 'function') {
@@ -70,7 +70,7 @@ async function delay(page, ms) {
 }
 
 // =========================
-/** Inspect + Parse Page */
+// Inspect + Parse Page
 // =========================
 async function inspectAndParse(page, url) {
   try {
@@ -103,89 +103,43 @@ async function inspectAndParse(page, url) {
       }
     });
 
-    // Helper: robust label-based extractor within a block of text
-    const makeExtractor = blockText => label => {
-      // Try "Label: value"
-      let regex = new RegExp(`${label}\\s*:?\\s*([^\\n$]+)`, 'i');
-      let m = blockText.match(regex);
-      if (m) return m[1].trim();
-
-      // Fallback: "Label value" until next label-like token
-      regex = new RegExp(`${label}\\s+([^\\n$]+)`, 'i');
-      m = blockText.match(regex);
-      return m ? m[1].trim() : '';
-    };
-
-    // Sale price label variants
-    const SALE_PRICE_LABELS = [
-      'Amount',
-      'Sale Price',
-      'Sold Amount',
-      'Winning Bid',
-      'Final Bid',
-      'Sale Amount',
-    ];
-
     // (2) CARD-BASED AUCTION PARSER
     const parsedRows = [];
     $('div').each((_, container) => {
       const blockText = $(container).text().replace(/\s+/g, ' ').trim();
       if (!blockText.includes('Auction Type')) return;
 
-      const extract = makeExtractor(blockText);
+      const extract = label => {
+        const regex = new RegExp(`${label}\\s*:?\\s*([^\\n$]+)`, 'i');
+        const m = blockText.match(regex);
+        return m ? m[1].trim() : '';
+      };
 
-      // Auction Status
-      let auctionStatus = 'Active';
-      if (/redeemed/i.test(blockText)) {
-        auctionStatus = 'Redeemed';
-      } else if (/auction sold/i.test(blockText)) {
-        auctionStatus = 'Sold';
-      }
+      const auctionStatus =
+        blockText.includes('Redeemed')
+          ? 'Redeemed'
+          : blockText.includes('Auction Sold')
+          ? 'Sold'
+          : 'Active';
 
-      // Opening Bid
-      const openingBidMatch = blockText.match(/Opening Bid:\s*\$[0-9,]+(?:\.[0-9]{2})?/i);
+      const openingBidMatch = blockText.match(/Opening Bid:\s*\$[\d,]+\.\d{2}/i);
       const openingBid = openingBidMatch
         ? openingBidMatch[0].replace(/Opening Bid:/i, '').trim()
         : '';
 
-      // Assessed Value
-      const assessedValueMatch = blockText.match(/Assessed Value:\s*\$[0-9,]+(?:\.[0-9]{2})?/i);
+      const assessedValueMatch = blockText.match(/Assessed Value:\s*\$[\d,]+\.\d{2}/i);
       const assessedValue = assessedValueMatch
         ? assessedValueMatch[0].replace(/Assessed Value:/i, '').trim()
         : '';
 
-      // Auction Date (keep your existing pattern)
-      const auctionDateMatch = blockText.match(
-        /Date\/Time:\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?\s*ET)?)/i
-      );
+      const auctionDateMatch = blockText.match(/Date\/Time:\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?\s*ET)?)/i);
       const auctionDate = auctionDateMatch ? auctionDateMatch[1].trim() : '';
 
-      // Sale Price: try multiple labels
-      let salePrice = '';
-      const salePriceCandidates = {};
+      const salePriceMatch = blockText.match(/Amount:\s*\$[\d,]+\.\d{2}/i);
+      const salePrice = salePriceMatch
+        ? salePriceMatch[0].replace(/Amount:/i, '').trim()
+        : '';
 
-      for (const label of SALE_PRICE_LABELS) {
-        const regex = new RegExp(
-          `${label}\\s*:?\\s*\\$[0-9,]+(?:\\.[0-9]{2})?`,
-          'i'
-        );
-        const m = blockText.match(regex);
-        if (m) {
-          const raw = m[0];
-          const cleaned = raw.replace(new RegExp(label + '\\s*:?\\s*', 'i'), '').trim();
-          salePriceCandidates[label] = cleaned;
-          if (!salePrice) {
-            salePrice = cleaned;
-          }
-        }
-      }
-
-      // Optional: uncomment for debugging label hits
-      // if (Object.keys(salePriceCandidates).length) {
-      //   console.log('Sale Price Candidates for block:', { url, salePriceCandidates });
-      // }
-
-      // Parcel ID from first link text
       const parcelLink = $(container).find('a').first();
       const parcelId = parcelLink.text().trim();
 
@@ -193,18 +147,7 @@ async function inspectAndParse(page, url) {
 
       const open = parseCurrency(openingBid);
       const assess = parseCurrency(assessedValue);
-      const soldPrice = parseCurrency(salePrice);
-
-      let surplus = null;
-      if (assess !== null) {
-        if (auctionStatus === 'Sold' && soldPrice !== null) {
-          // Correct surplus for sold auctions: Assessed - Sale Price
-          surplus = assess - soldPrice;
-        } else if (open !== null) {
-          // Fallback: Assessed - Opening Bid
-          surplus = assess - open;
-        }
-      }
+      const surplus = assess !== null && open !== null ? assess - open : null;
 
       parsedRows.push({
         sourceUrl: url,
@@ -218,8 +161,7 @@ async function inspectAndParse(page, url) {
         auctionDate,
         salePrice,
         surplus,
-        meetsMinimumSurplus:
-          surplus !== null && surplus >= MIN_SURPLUS ? 'Yes' : 'No',
+        meetsMinimumSurplus: surplus !== null && surplus >= MIN_SURPLUS ? 'Yes' : 'No',
       });
     });
 
@@ -232,7 +174,7 @@ async function inspectAndParse(page, url) {
 }
 
 // =========================
-/** Scrape all pages (URL-based pagination) */
+// Scrape all pages (URL-based pagination)
 // =========================
 async function scrapeAllPages(browser, startUrl) {
   const page = await browser.newPage();
@@ -255,13 +197,13 @@ async function scrapeAllPages(browser, startUrl) {
     if (error) errors.push(error);
 
     if (!relevantElements.length && !parsedRows.length) {
-      console.log('⛔ No more pages');
+      console.log("⛔ No more pages");
       break;
     }
 
     pageIndex++;
     if (pageIndex > 50) {
-      console.log('⚠️ Reached page limit, stopping.');
+      console.log("⚠️ Reached page limit, stopping.");
       break;
     }
     console.log(`➡️ Moving to page ${pageIndex}`);
@@ -272,7 +214,7 @@ async function scrapeAllPages(browser, startUrl) {
 }
 
 // =========================
-/** MAIN */
+// MAIN
 // =========================
 (async () => {
   console.log('📥 Loading URLs...');
