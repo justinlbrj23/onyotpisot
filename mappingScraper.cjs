@@ -9,11 +9,11 @@ const { google } = require("googleapis");
 // =========================
 const SERVICE_ACCOUNT_FILE = "./service-account.json";
 const SPREADSHEET_ID = "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
-const SHEET_NAME_URLS = "web_tda";   // County | State | URL mapping
-const SHEET_NAME_RAW = "raw_main";   // Target sheet for mapped rows
+const SHEET_NAME_URLS = "web_tda";
+const SHEET_NAME_RAW = "raw_main";
 const INPUT_FILE = process.argv[2] || "parsed-auctions.json";
-const OUTPUT_FILE = "mapped-output.json"; // artifact file
-const ANOMALY_FILE = "mapping-anomalies.json"; // NEW: diagnostics
+const OUTPUT_FILE = "mapped-output.json";
+const ANOMALY_FILE = "mapping-anomalies.json";
 
 // =========================
 // GOOGLE AUTH
@@ -72,34 +72,45 @@ function yn(val) {
 }
 
 // =========================
+// Currency parser
+// =========================
+function parseCurrency(str) {
+  if (!str) return null;
+  const n = parseFloat(str.replace(/[^0-9.-]/g, ""));
+  return isNaN(n) ? null : n;
+}
+
+// =========================
 // Map parsed auction row → TSSF headers
 // =========================
 function mapRow(raw, urlMapping, anomalies) {
-  // Only map SOLD rows
-  if (raw.auctionStatus && raw.auctionStatus !== "Sold") return null;
+  if (raw.auctionStatus !== "Sold") return null;
 
   const mapped = {};
-  HEADERS.forEach(h => (mapped[h] = "")); // initialize
+  HEADERS.forEach(h => (mapped[h] = ""));
 
   const baseUrl = (raw.sourceUrl || "").split("&page=")[0];
   const geo = urlMapping[baseUrl] || { county: "", state: "" };
 
-  // Geo
   mapped["State"] = geo.state;
   mapped["County"] = geo.county;
-
-  // Basic auction fields
   mapped["Property Address"] = raw.propertyAddress || "";
   mapped["Parcel / APN Number"] = raw.parcelId || "";
   mapped["Case Number"] = raw.caseNumber || "";
   mapped["Auction Date"] = raw.auctionDate || raw.date || "";
-
-  // Sale details
   mapped["Sale Finalized (Yes/No)"] = "Yes";
 
-  // Validate sale price
   const salePrice = raw.salePrice || raw.amount || "";
-  if (!salePrice) {
+  const openingBid = raw.openingBid || "";
+
+  mapped["Sale Price"] = salePrice;
+  mapped["Opening / Minimum Bid"] = openingBid;
+
+  const sale = parseCurrency(salePrice);
+  const open = parseCurrency(openingBid);
+  const estimatedSurplus = sale !== null && open !== null ? sale - open : null;
+
+  if (sale === null) {
     anomalies.push({
       type: "MissingSalePrice",
       message: "Sold auction missing sale price",
@@ -108,36 +119,24 @@ function mapRow(raw, urlMapping, anomalies) {
       sourceUrl: raw.sourceUrl
     });
   }
-  mapped["Sale Price"] = salePrice;
 
-  mapped["Opening / Minimum Bid"] = raw.openingBid || "";
-
-  // Surplus (already computed correctly in Stage 2)
-  let surplus = null;
-  if (raw.surplus !== undefined && raw.surplus !== null) {
-    surplus = raw.surplus;
-  } else if (raw.surplusAssessVsSale !== undefined) {
-    surplus = raw.surplusAssessVsSale;
-  }
-
-  if (surplus === null) {
+  if (estimatedSurplus === null) {
     anomalies.push({
       type: "MissingSurplus",
-      message: "Surplus missing for SOLD auction",
+      message: "Could not compute surplus",
       parcelId: raw.parcelId,
       caseNumber: raw.caseNumber,
       sourceUrl: raw.sourceUrl
     });
   }
 
-  mapped["Estimated Surplus"] = surplus !== null ? String(surplus) : "";
-  mapped["Final Estimated Surplus to Owner"] = surplus !== null ? String(surplus) : "";
+  mapped["Estimated Surplus"] = estimatedSurplus !== null ? String(estimatedSurplus) : "";
+  mapped["Final Estimated Surplus to Owner"] = estimatedSurplus !== null ? String(estimatedSurplus) : "";
 
-  mapped["Meets Minimum Surplus? (Yes/No)"] = yn(raw.meetsMinimumSurplus);
-  mapped["Deal Viable? (Yes/No)"] =
-    yn(raw.meetsMinimumSurplus) === "Yes" ? "Yes" : "No";
+  const meetsMinimum = estimatedSurplus !== null && estimatedSurplus >= 25000;
+  mapped["Meets Minimum Surplus? (Yes/No)"] = yn(meetsMinimum ? "Yes" : "No");
+  mapped["Deal Viable? (Yes/No)"] = meetsMinimum ? "Yes" : "No";
 
-  // Defaults for downstream workflow
   mapped["Ownership Deed Collected? (Yes/No)"] = "No";
   mapped["Foreclosure Deed Collected? (Yes/No)"] = "No";
   mapped["Proof of Sale Collected? (Yes/No)"] = "No";
@@ -201,11 +200,9 @@ async function appendRows(rows) {
     console.log("🧪 Sample mapped row preview:", mappedRows[0]);
   }
 
-  // Save artifact file
   fs.writeFileSync(OUTPUT_FILE, JSON.stringify(mappedRows, null, 2));
   console.log(`💾 Saved mapped rows → ${OUTPUT_FILE}`);
 
-  // Save anomalies
   if (anomalies.length) {
     fs.writeFileSync(ANOMALY_FILE, JSON.stringify(anomalies, null, 2));
     console.log(`⚠️ Saved ${anomalies.length} anomalies → ${ANOMALY_FILE}`);
