@@ -13,7 +13,9 @@ const SHEET_NAME_URLS = "web_tda";   // County | State | URL mapping
 const SHEET_NAME_RAW = "raw_main";   // Target sheet for mapped rows
 const INPUT_FILE = process.argv[2] || "parsed-auctions.json";
 const OUTPUT_FILE = "mapped-output.json"; // artifact file
-const ANOMALY_FILE = "mapping-anomalies.json"; // NEW: diagnostics========
+const ANOMALY_FILE = "mapping-anomalies.json"; // NEW: diagnostics
+
+// =========================
 // GOOGLE AUTH
 // =========================
 const auth = new google.auth.GoogleAuth({
