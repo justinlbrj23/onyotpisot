@@ -2,6 +2,7 @@
  * Milwaukee County Parcels Scraper
  * Clears sheet, then logs results directly into Google Sheets
  * Queries MPROP_full (layer 2) for full attributes
+ * Includes row cap safeguard
  */
 
 import fetch from "node-fetch";
@@ -28,6 +29,8 @@ const ENDPOINT =
   "https://milwaukeemaps.milwaukee.gov/arcgis/rest/services/property/parcels_mprop/MapServer/2/query";
 
 const PAGE_SIZE = 2000;
+// Safety cap: stop after 100k rows to avoid hitting 10M cell limit
+const MAX_ROWS = 100000;
 
 // =========================
 // GOOGLE SHEETS AUTH
@@ -98,9 +101,12 @@ async function run() {
 
   console.log("🔎 Fetching parcels from ArcGIS (MPROP_full)...");
 
-  while (hasMore) {
+  while (hasMore && parcels.length < MAX_ROWS) {
     const data = await fetchPage(offset);
-    if (!data.features?.length) break;
+    if (!data.features?.length) {
+      console.log("⚠️ No features returned at offset", offset);
+      break;
+    }
 
     console.log(`➡️ Page fetched: ${data.features.length} records`);
     parcels.push(...data.features.map(f => f.attributes));
