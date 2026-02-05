@@ -1,13 +1,12 @@
 /**
- * Milwaukee County Tax-Delinquent Parcels Scraper
+ * Milwaukee County Parcels Scraper
  * Clears sheet, then logs results directly into Google Sheets
- * Auto-detects TAX_DELQ type (numeric vs string)
+ * Pulls all records without filtering
  * Overwrites instead of appending to avoid 10M cell limit
  */
 
 import fetch from "node-fetch";
 import { google } from "googleapis";
-import fs from "fs";
 
 // =========================
 // CONFIG
@@ -25,12 +24,9 @@ const HEADERS = [
   "LAST_SYNC"
 ];
 
-// Use the MPROP layer (layer 1) which has ownership and delinquency fields
+// Use the MPROP layer (layer 1) which has ownership fields
 const ENDPOINT =
   "https://milwaukeemaps.milwaukee.gov/arcgis/rest/services/property/parcels_mprop/MapServer/1/query";
-
-const METADATA_URL =
-  "https://milwaukeemaps.milwaukee.gov/arcgis/rest/services/property/parcels_mprop/MapServer/1?f=pjson";
 
 const PAGE_SIZE = 2000;
 
@@ -47,71 +43,10 @@ const sheets = google.sheets({ version: "v4", auth });
 // =========================
 // ARC GIS FETCH FUNCTIONS
 // =========================
-async function detectDelqType() {
-  // Fetch one sample record to inspect TAX_DELQ
+async function fetchPage(offset) {
   const params = new URLSearchParams({
-    where: "1=1",
-    outFields: "TAX_DELQ",
-    returnGeometry: "false",
-    f: "json",
-    resultRecordCount: 1
-  });
-
-  const res = await fetch(`${ENDPOINT}?${params}`);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
-
-  const sample = data.features?.[0]?.attributes?.TAX_DELQ;
-  console.log("🔍 Sample TAX_DELQ value:", sample);
-
-  if (sample == null) return { field: null, type: "none" };
-  if (typeof sample === "number") return { field: "TAX_DELQ", type: "numeric" };
-
-  // If it's a string, check common values
-  const val = sample.toString().trim().toUpperCase();
-  if (["Y", "YES", "TRUE"].includes(val)) return { field: "TAX_DELQ", type: "stringFlag" };
-
-  // If it's a string number
-  if (!isNaN(Number(val))) return { field: "TAX_DELQ", type: "numericString" };
-
-  return { field: "TAX_DELQ", type: "stringOther" };
-}
-
-async function fetchPage(offset, delqInfo) {
-  let where = "1=1";
-  if (delqInfo.field) {
-    switch (delqInfo.type) {
-      case "numeric":
-        where = `${delqInfo.field} > 0`;
-        break;
-      case "numericString":
-        where = `${delqInfo.field} <> '0' AND ${delqInfo.field} IS NOT NULL`;
-        break;
-      case "stringFlag":
-        where = `${delqInfo.field} = 'Y' OR ${delqInfo.field} = 'YES' OR ${delqInfo.field} = 'TRUE'`;
-        break;
-      case "stringOther":
-        // fallback: exclude blanks
-        where = `${delqInfo.field} IS NOT NULL AND ${delqInfo.field} <> ''`;
-        break;
-    }
-  }
-
-  const outFields = [
-    "TAXKEY",
-    "OWNER_NAME_1",
-    "ADDRESS",
-    "OWNER_MAIL_ADDR",
-    "OWNER_CITY_STATE",
-    "OWNER_ZIP",
-    "CITY",
-    delqInfo.field || "",
-    "NET_TAX"
-  ].filter(Boolean).join(",");
-
-  const params = new URLSearchParams({
-    where,
-    outFields,
+    where: "1=1", // no filter, pull everything
+    outFields: "TAXKEY,OWNER_NAME_1,ADDRESS,CITY,TAX_DELQ,NET_TAX",
     returnGeometry: "false",
     f: "json",
     resultOffset: offset,
@@ -158,8 +93,6 @@ async function overwriteRows(rows) {
 // MAIN
 // =========================
 async function run() {
-  const delqInfo = await detectDelqType();
-
   let offset = 0;
   let hasMore = true;
   let parcels = [];
@@ -167,7 +100,7 @@ async function run() {
   console.log("🔎 Fetching parcels from ArcGIS...");
 
   while (hasMore) {
-    const data = await fetchPage(offset, delqInfo);
+    const data = await fetchPage(offset);
     if (!data.features?.length) break;
 
     console.log(`➡️ Page fetched: ${data.features.length} records`);
@@ -192,19 +125,13 @@ async function run() {
     const taxKey = p.TAXKEY?.toString();
     if (!taxKey) continue;
 
-    const owner = p.OWNER_NAME_1 || "";
-    const address = p.ADDRESS || "";
-    const city = p.CITY || p.OWNER_CITY_STATE || "";
-    const delqVal = delqInfo.field ? p[delqInfo.field] || "" : "";
-    const netTax = p.NET_TAX || "";
-
     rows.push([
       taxKey,
-      owner,
-      address,
-      city,
-      delqVal,
-      netTax,
+      p.OWNER_NAME_1 || "",
+      p.ADDRESS || "",
+      p.CITY || "",
+      p.TAX_DELQ || "",
+      p.NET_TAX || "",
       new Date().toISOString()
     ]);
   }
