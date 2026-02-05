@@ -1,8 +1,8 @@
 /**
  * Milwaukee County Parcels Scraper
  * Clears sheet, then logs results directly into Google Sheets
- * Queries MPROP_full (layer 2) for full attributes
- * Includes row cap safeguard
+ * Overwrites instead of appending to avoid 10M cell limit
+ * Limits parsed data to 10k rows
  */
 
 import fetch from "node-fetch";
@@ -24,13 +24,12 @@ const HEADERS = [
   "LAST_SYNC"
 ];
 
-// Use MPROP_full layer (id 2)
+// Use MPROP layer (id 1 or whichever has data)
 const ENDPOINT =
-  "https://milwaukeemaps.milwaukee.gov/arcgis/rest/services/property/parcels_mprop/MapServer/2/query";
+  "https://milwaukeemaps.milwaukee.gov/arcgis/rest/services/property/parcels_mprop/MapServer/1/query";
 
 const PAGE_SIZE = 2000;
-// Safety cap: stop after 100k rows to avoid hitting 10M cell limit
-const MAX_ROWS = 100000;
+const MAX_ROWS = 10000; // cap at 10k rows
 
 // =========================
 // GOOGLE SHEETS AUTH
@@ -48,7 +47,7 @@ const sheets = google.sheets({ version: "v4", auth });
 async function fetchPage(offset) {
   const params = new URLSearchParams({
     where: "1=1", // no filter, pull everything
-    outFields: "TAXKEY,OWNER_NAME_1,ADDRESS,CITY,TAX_DELQ,NET_TAX",
+    outFields: "*", // request all available fields
     returnGeometry: "false",
     f: "json",
     resultOffset: offset,
@@ -99,7 +98,7 @@ async function run() {
   let hasMore = true;
   let parcels = [];
 
-  console.log("🔎 Fetching parcels from ArcGIS (MPROP_full)...");
+  console.log("🔎 Fetching parcels from ArcGIS...");
 
   while (hasMore && parcels.length < MAX_ROWS) {
     const data = await fetchPage(offset);
@@ -114,6 +113,11 @@ async function run() {
     hasMore = data.exceededTransferLimit === true;
   }
 
+  // Cap at MAX_ROWS
+  if (parcels.length > MAX_ROWS) {
+    parcels = parcels.slice(0, MAX_ROWS);
+  }
+
   console.log(`📦 Total parcels fetched: ${parcels.length}`);
 
   await clearSheet();
@@ -125,10 +129,10 @@ async function run() {
 
   const rows = parcels.map(p => [
     p.TAXKEY?.toString() || "",
-    p.OWNER_NAME_1 || "",
-    p.ADDRESS || "",
-    p.CITY || "",
-    p.TAX_DELQ || "",
+    p.OWNER_NAME || p.OWNER_NAME2 || p.OWNER_NAME_1 || "",
+    p.ADDRESS || p.PROP_ADDR || `${p.PROP_HOUSE_NR || ""} ${p.PROP_STREET || ""}`.trim(),
+    p.CITY || p.MUNI || p.OWNER_CITY_STATE || "",
+    p.TAX_DELQ || p.TAXDELQ_AMT || "",
     p.NET_TAX || "",
     new Date().toISOString()
   ]);
