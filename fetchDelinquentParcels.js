@@ -27,6 +27,9 @@ const HEADERS = [
 const ENDPOINT =
   "https://milwaukeemaps.milwaukee.gov/arcgis/rest/services/property/parcels_mprop/MapServer/0/query";
 
+const METADATA_URL =
+  "https://milwaukeemaps.milwaukee.gov/arcgis/rest/services/property/parcels_mprop/MapServer/0?f=pjson";
+
 const PAGE_SIZE = 2000;
 
 // =========================
@@ -42,9 +45,32 @@ const sheets = google.sheets({ version: "v4", auth });
 // =========================
 // ARC GIS FETCH FUNCTIONS
 // =========================
-async function fetchPage(offset) {
+async function getDelinquencyField() {
+  const res = await fetch(METADATA_URL);
+  if (!res.ok) throw new Error(`Metadata HTTP ${res.status}`);
+  const meta = await res.json();
+
+  const fields = meta.fields.map(f => f.name.toUpperCase());
+  console.log("📑 Available fields:", fields);
+
+  // Try common candidates
+  const candidates = ["TAXDELQ_AMT", "TAX_DELQ", "DELINQUENT_TAX", "TAX_STATUS"];
+  const found = candidates.find(c => fields.includes(c));
+
+  if (found) {
+    console.log(`✅ Using delinquency field: ${found}`);
+    return found;
+  }
+
+  console.warn("⚠️ No known delinquency field found. Falling back to 1=1 query.");
+  return null;
+}
+
+async function fetchPage(offset, delinquencyField) {
+  const where = delinquencyField ? `${delinquencyField} > 0` : "1=1";
+
   const params = new URLSearchParams({
-    where: "TAX_DELQ > 0",
+    where,
     outFields: "*",
     returnGeometry: "false",
     f: "json",
@@ -103,16 +129,19 @@ async function appendRows(rows) {
 // MAIN
 // =========================
 async function run() {
+  const delinquencyField = await getDelinquencyField();
+
   let offset = 0;
   let hasMore = true;
   let parcels = [];
 
-  console.log("🔎 Fetching delinquent parcels from ArcGIS...");
+  console.log("🔎 Fetching parcels from ArcGIS...");
 
   while (hasMore) {
-    const data = await fetchPage(offset);
+    const data = await fetchPage(offset, delinquencyField);
     if (!data.features?.length) break;
 
+    console.log(`➡️ Page fetched: ${data.features.length} records`);
     parcels.push(...data.features.map(f => f.attributes));
     offset += PAGE_SIZE;
     hasMore = data.exceededTransferLimit === true;
@@ -135,7 +164,7 @@ async function run() {
       p.OWNER_NAME_1 || "",
       p.SITE_ADDR || "",
       p.MUNICIPALITY || "",
-      p.TAX_DELQ || "",
+      delinquencyField ? p[delinquencyField] || "" : "",
       p.NET_TAX || "",
       new Date().toISOString()
     ]);
