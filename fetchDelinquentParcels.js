@@ -1,6 +1,6 @@
 /**
  * Milwaukee County Tax-Delinquent Parcels Scraper
- * Logs results directly into Google Sheets
+ * Clears sheet, then logs results directly into Google Sheets
  * Root-only JS
  */
 
@@ -86,33 +86,22 @@ async function fetchPage(offset, delinquencyField) {
 // =========================
 // SHEET HELPERS
 // =========================
-async function ensureHeaders() {
-  const res = await sheets.spreadsheets.values.get({
+async function clearSheet() {
+  console.log("🧹 Clearing entire sheet contents...");
+  await sheets.spreadsheets.values.clear({
     spreadsheetId: SHEET_ID,
-    range: `${SHEET_NAME}!A1:G1`
+    range: SHEET_NAME
   });
-
-  const existing = res.data.values?.[0];
-
-  if (!existing || existing.length === 0) {
-    console.log("🧾 Writing sheet headers...");
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SHEET_ID,
-      range: `${SHEET_NAME}!A1`,
-      valueInputOption: "RAW",
-      requestBody: { values: [HEADERS] }
-    });
-  } else {
-    console.log("🧾 Headers already exist");
-  }
 }
 
-async function getExistingKeys() {
-  const res = await sheets.spreadsheets.values.get({
+async function writeHeaders() {
+  console.log("🧾 Writing sheet headers...");
+  await sheets.spreadsheets.values.update({
     spreadsheetId: SHEET_ID,
-    range: `${SHEET_NAME}!A2:A`
+    range: `${SHEET_NAME}!A1`,
+    valueInputOption: "RAW",
+    requestBody: { values: [HEADERS] }
   });
-  return new Set((res.data.values || []).flat());
 }
 
 async function appendRows(rows) {
@@ -149,21 +138,21 @@ async function run() {
 
   console.log(`📦 Total parcels fetched: ${parcels.length}`);
 
-  // Ensure headers exist before appending
-  await ensureHeaders();
+  // Clear sheet and re-write headers
+  await clearSheet();
+  await writeHeaders();
 
-  const existingKeys = await getExistingKeys();
   const rows = [];
 
   for (const p of parcels) {
     const taxKey = p.TAXKEY?.toString();
-    if (!taxKey || existingKeys.has(taxKey)) continue;
+    if (!taxKey) continue;
 
     rows.push([
       taxKey,
-      p.OWNER_NAME_1 || "",
-      p.SITE_ADDR || "",
-      p.MUNICIPALITY || "",
+      p.OWNER_NAME_1 || p.OWNER || "",
+      p.SITE_ADDR || p.ADDRESS || "",
+      p.MUNICIPALITY || p.CITY || "",
       delinquencyField ? p[delinquencyField] || "" : "",
       p.NET_TAX || "",
       new Date().toISOString()
@@ -171,12 +160,12 @@ async function run() {
   }
 
   if (!rows.length) {
-    console.log("✅ No new rows to append");
+    console.log("✅ No rows to append");
     return;
   }
 
   await appendRows(rows);
-  console.log(`✅ Appended ${rows.length} new rows to Google Sheets`);
+  console.log(`✅ Appended ${rows.length} rows to Google Sheets`);
 }
 
 // =========================
