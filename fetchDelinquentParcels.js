@@ -1,6 +1,7 @@
 /**
  * Milwaukee County Tax-Delinquent Parcels Scraper
  * Clears sheet, then logs results directly into Google Sheets
+ * Auto-detects TAX_DELQ type (numeric vs string)
  * Overwrites instead of appending to avoid 10M cell limit
  */
 
@@ -24,8 +25,7 @@ const HEADERS = [
   "LAST_SYNC"
 ];
 
-// IMPORTANT: Use the MPROP layer instead of layer 0
-// Layer 1 typically contains the Master Property File attributes
+// Use the MPROP layer (layer 1) which has ownership and delinquency fields
 const ENDPOINT =
   "https://milwaukeemaps.milwaukee.gov/arcgis/rest/services/property/parcels_mprop/MapServer/1/query";
 
@@ -47,42 +47,66 @@ const sheets = google.sheets({ version: "v4", auth });
 // =========================
 // ARC GIS FETCH FUNCTIONS
 // =========================
-async function getDelinquencyField() {
-  const res = await fetch(METADATA_URL);
-  if (!res.ok) throw new Error(`Metadata HTTP ${res.status}`);
-  const meta = await res.json();
+async function detectDelqType() {
+  // Fetch one sample record to inspect TAX_DELQ
+  const params = new URLSearchParams({
+    where: "1=1",
+    outFields: "TAX_DELQ",
+    returnGeometry: "false",
+    f: "json",
+    resultRecordCount: 1
+  });
 
-  const fields = meta.fields.map(f => f.name.toUpperCase());
-  console.log("📑 Available fields:", fields);
+  const res = await fetch(`${ENDPOINT}?${params}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
 
-  // Try common candidates
-  const candidates = ["TAXDELQ_AMT", "TAX_DELQ", "DELINQUENT_TAX", "TAX_STATUS"];
-  const found = candidates.find(c => fields.includes(c));
+  const sample = data.features?.[0]?.attributes?.TAX_DELQ;
+  console.log("🔍 Sample TAX_DELQ value:", sample);
 
-  if (found) {
-    console.log(`✅ Using delinquency field: ${found}`);
-    return found;
-  }
+  if (sample == null) return { field: null, type: "none" };
+  if (typeof sample === "number") return { field: "TAX_DELQ", type: "numeric" };
 
-  console.warn("⚠️ No known delinquency field found. Falling back to 1=1 query.");
-  return null;
+  // If it's a string, check common values
+  const val = sample.toString().trim().toUpperCase();
+  if (["Y", "YES", "TRUE"].includes(val)) return { field: "TAX_DELQ", type: "stringFlag" };
+
+  // If it's a string number
+  if (!isNaN(Number(val))) return { field: "TAX_DELQ", type: "numericString" };
+
+  return { field: "TAX_DELQ", type: "stringOther" };
 }
 
-async function fetchPage(offset, delinquencyField) {
-  const where = delinquencyField ? `${delinquencyField} > 0` : "1=1";
+async function fetchPage(offset, delqInfo) {
+  let where = "1=1";
+  if (delqInfo.field) {
+    switch (delqInfo.type) {
+      case "numeric":
+        where = `${delqInfo.field} > 0`;
+        break;
+      case "numericString":
+        where = `${delqInfo.field} <> '0' AND ${delqInfo.field} IS NOT NULL`;
+        break;
+      case "stringFlag":
+        where = `${delqInfo.field} = 'Y' OR ${delqInfo.field} = 'YES' OR ${delqInfo.field} = 'TRUE'`;
+        break;
+      case "stringOther":
+        // fallback: exclude blanks
+        where = `${delqInfo.field} IS NOT NULL AND ${delqInfo.field} <> ''`;
+        break;
+    }
+  }
 
-  // Request only needed fields to reduce payload
   const outFields = [
     "TAXKEY",
-    "OWNER_NAME",
-    "OWNER_NAME2",
-    "PROP_ADDR",
-    "PROP_HOUSE_NR",
-    "PROP_STREET",
-    "MUNI",
+    "OWNER_NAME_1",
+    "ADDRESS",
+    "OWNER_MAIL_ADDR",
+    "OWNER_CITY_STATE",
+    "OWNER_ZIP",
     "CITY",
-    "NET_TAX",
-    delinquencyField || ""
+    delqInfo.field || "",
+    "NET_TAX"
   ].filter(Boolean).join(",");
 
   const params = new URLSearchParams({
@@ -134,7 +158,7 @@ async function overwriteRows(rows) {
 // MAIN
 // =========================
 async function run() {
-  const delinquencyField = await getDelinquencyField();
+  const delqInfo = await detectDelqType();
 
   let offset = 0;
   let hasMore = true;
@@ -143,7 +167,7 @@ async function run() {
   console.log("🔎 Fetching parcels from ArcGIS...");
 
   while (hasMore) {
-    const data = await fetchPage(offset, delinquencyField);
+    const data = await fetchPage(offset, delqInfo);
     if (!data.features?.length) break;
 
     console.log(`➡️ Page fetched: ${data.features.length} records`);
@@ -168,23 +192,19 @@ async function run() {
     const taxKey = p.TAXKEY?.toString();
     if (!taxKey) continue;
 
-    // Flexible mapping: try multiple possible field names
-    const owner =
-      p.OWNER_NAME || p.OWNER_NAME2 || p.OWNER || "";
-    const address =
-      p.PROP_ADDR ||
-      `${p.PROP_HOUSE_NR || ""} ${p.PROP_STREET || ""}`.trim() ||
-      p.ADDRESS || "";
-    const city =
-      p.MUNI || p.CITY || "";
+    const owner = p.OWNER_NAME_1 || "";
+    const address = p.ADDRESS || "";
+    const city = p.CITY || p.OWNER_CITY_STATE || "";
+    const delqVal = delqInfo.field ? p[delqInfo.field] || "" : "";
+    const netTax = p.NET_TAX || "";
 
     rows.push([
       taxKey,
       owner,
       address,
       city,
-      delinquencyField ? p[delinquencyField] || "" : "",
-      p.NET_TAX || "",
+      delqVal,
+      netTax,
       new Date().toISOString()
     ]);
   }
