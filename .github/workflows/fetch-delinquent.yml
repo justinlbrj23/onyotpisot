@@ -36,21 +36,11 @@ jobs:
           npm install googleapis node-fetch
 
       # --------------------------------------------------
-      # Write Service Account JSON (safe for multiline)
+      # Write RAW Service Account JSON
       # --------------------------------------------------
       - name: Write Service Account JSON
         run: |
-          echo '${{ secrets.GOOGLE_SERVICE_ACCOUNT }}' > service-account.json
-
-      # --------------------------------------------------
-      # Debug service account file (optional, remove later)
-      # --------------------------------------------------
-      - name: Debug service account file
-        run: |
-          echo "File size:"
-          wc -c service-account.json
-          echo "First few lines:"
-          head -n 10 service-account.json
+          echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
 
       # --------------------------------------------------
       # Validate Service Account JSON
