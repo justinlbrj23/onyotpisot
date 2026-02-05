@@ -1,8 +1,7 @@
 /**
  * Milwaukee County Parcels Scraper
  * Clears sheet, then logs results directly into Google Sheets
- * Pulls all records without filtering
- * Overwrites instead of appending to avoid 10M cell limit
+ * Queries MPROP_full (layer 2) for full attributes
  */
 
 import fetch from "node-fetch";
@@ -12,7 +11,7 @@ import { google } from "googleapis";
 // CONFIG
 // =========================
 const SHEET_ID = "192sAixH2UDvOcb5PL9kSnzLRJUom-0ZiSuTH9cYAi1A";
-const SHEET_NAME = "Sheet1"; // Change if your tab has a different name
+const SHEET_NAME = "Sheet1";
 
 const HEADERS = [
   "TAXKEY",
@@ -24,9 +23,9 @@ const HEADERS = [
   "LAST_SYNC"
 ];
 
-// Use the MPROP layer (layer 1) which has ownership fields
+// Use MPROP_full layer (id 2)
 const ENDPOINT =
-  "https://milwaukeemaps.milwaukee.gov/arcgis/rest/services/property/parcels_mprop/MapServer/1/query";
+  "https://milwaukeemaps.milwaukee.gov/arcgis/rest/services/property/parcels_mprop/MapServer/2/query";
 
 const PAGE_SIZE = 2000;
 
@@ -97,7 +96,7 @@ async function run() {
   let hasMore = true;
   let parcels = [];
 
-  console.log("🔎 Fetching parcels from ArcGIS...");
+  console.log("🔎 Fetching parcels from ArcGIS (MPROP_full)...");
 
   while (hasMore) {
     const data = await fetchPage(offset);
@@ -111,7 +110,6 @@ async function run() {
 
   console.log(`📦 Total parcels fetched: ${parcels.length}`);
 
-  // Clear sheet and re-write headers
   await clearSheet();
   await writeHeaders();
 
@@ -119,22 +117,15 @@ async function run() {
     console.log("🔍 Sample record keys:", Object.keys(parcels[0]));
   }
 
-  const rows = [];
-
-  for (const p of parcels) {
-    const taxKey = p.TAXKEY?.toString();
-    if (!taxKey) continue;
-
-    rows.push([
-      taxKey,
-      p.OWNER_NAME_1 || "",
-      p.ADDRESS || "",
-      p.CITY || "",
-      p.TAX_DELQ || "",
-      p.NET_TAX || "",
-      new Date().toISOString()
-    ]);
-  }
+  const rows = parcels.map(p => [
+    p.TAXKEY?.toString() || "",
+    p.OWNER_NAME_1 || "",
+    p.ADDRESS || "",
+    p.CITY || "",
+    p.TAX_DELQ || "",
+    p.NET_TAX || "",
+    new Date().toISOString()
+  ]);
 
   if (!rows.length) {
     console.log("✅ No rows to write");
