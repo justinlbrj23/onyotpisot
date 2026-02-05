@@ -24,11 +24,13 @@ const HEADERS = [
   "LAST_SYNC"
 ];
 
+// IMPORTANT: Use the MPROP layer instead of layer 0
+// Layer 1 typically contains the Master Property File attributes
 const ENDPOINT =
-  "https://milwaukeemaps.milwaukee.gov/arcgis/rest/services/property/parcels_mprop/MapServer/0/query";
+  "https://milwaukeemaps.milwaukee.gov/arcgis/rest/services/property/parcels_mprop/MapServer/1/query";
 
 const METADATA_URL =
-  "https://milwaukeemaps.milwaukee.gov/arcgis/rest/services/property/parcels_mprop/MapServer/0?f=pjson";
+  "https://milwaukeemaps.milwaukee.gov/arcgis/rest/services/property/parcels_mprop/MapServer/1?f=pjson";
 
 const PAGE_SIZE = 2000;
 
