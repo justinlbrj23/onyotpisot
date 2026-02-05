@@ -1,0 +1,49 @@
+name: Sync Milwaukee Tax Delinquent Parcels
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 6am UTC
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      # --------------------------------------------------
+      # Create Service Account JSON
+      # --------------------------------------------------
+      - name: Create service account file
+        run: |
+          echo '${{ secrets.GOOGLE_SERVICE_ACCOUNT }}' > service-account.json
+
+      # --------------------------------------------------
+      # Validate Service Account JSON
+      # --------------------------------------------------
+      - name: Validate service account JSON
+        run: |
+          node -e "
+            const fs = require('fs');
+            const j = JSON.parse(fs.readFileSync('service-account.json','utf8'));
+            if (!j.private_key || !j.client_email) {
+              throw new Error('Invalid service account JSON');
+            }
+            console.log('Service account OK:', j.client_email);
+          "
+
+      # --------------------------------------------------
+      # Run Scraper + Sheet Sync
+      # --------------------------------------------------
+      - name: Run sync
+        run: npm start
