@@ -26,14 +26,21 @@ jobs:
       # Install Dependencies
       # --------------------------------------------------
       - name: Install dependencies
-        run: npm install
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+          # Ensure required packages are present
+          npm install googleapis node-fetch
 
       # --------------------------------------------------
-      # Create Service Account JSON (SAFE for multiline)
+      # Write Service Account JSON (safe for multiline)
       # --------------------------------------------------
-      - name: Create service account file
+      - name: Write Service Account JSON
         run: |
-          printf "%s" "${{ secrets.GOOGLE_SERVICE_ACCOUNT }}" > service-account.json
+          echo '${{ secrets.GOOGLE_SERVICE_ACCOUNT }}' > service-account.json
 
       # --------------------------------------------------
       # Validate Service Account JSON
@@ -54,3 +61,10 @@ jobs:
       # --------------------------------------------------
       - name: Run Milwaukee scraper
         run: npm run fetch:milwaukee
+
+      # --------------------------------------------------
+      # Cleanup credentials
+      # --------------------------------------------------
+      - name: Cleanup secrets
+        if: always()
+        run: rm -f service-account.json
