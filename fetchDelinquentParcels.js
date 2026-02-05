@@ -1,17 +1,18 @@
 /**
- * Fetch Milwaukee tax-delinquent parcels
- * Auto-create Google Sheet headers
- * Append non-duplicate rows
+ * Milwaukee County Tax-Delinquent Parcels Scraper
+ * Logs results directly into Google Sheets
+ * Root-only JS
  */
 
-const fetch = require("node-fetch");
-const { google } = require("googleapis");
+import fetch from "node-fetch";
+import { google } from "googleapis";
+import fs from "fs";
 
 // =========================
 // CONFIG
 // =========================
 const SHEET_ID = "192sAixH2UDvOcb5PL9kSnzLRJUom-0ZiSuTH9cYAi1A";
-const SHEET_NAME = "Sheet1";
+const SHEET_NAME = "Sheet1"; // Change if your tab has a different name
 
 const HEADERS = [
   "TAXKEY",
@@ -29,7 +30,7 @@ const ENDPOINT =
 const PAGE_SIZE = 2000;
 
 // =========================
-// GOOGLE AUTH
+// GOOGLE SHEETS AUTH
 // =========================
 const auth = new google.auth.GoogleAuth({
   keyFile: "./service-account.json",
@@ -39,7 +40,7 @@ const auth = new google.auth.GoogleAuth({
 const sheets = google.sheets({ version: "v4", auth });
 
 // =========================
-// ARC GIS FETCH
+// ARC GIS FETCH FUNCTIONS
 // =========================
 async function fetchPage(offset) {
   const params = new URLSearchParams({
@@ -73,9 +74,7 @@ async function ensureHeaders() {
       spreadsheetId: SHEET_ID,
       range: `${SHEET_NAME}!A1`,
       valueInputOption: "RAW",
-      requestBody: {
-        values: [HEADERS]
-      }
+      requestBody: { values: [HEADERS] }
     });
   } else {
     console.log("🧾 Headers already exist");
@@ -87,7 +86,6 @@ async function getExistingKeys() {
     spreadsheetId: SHEET_ID,
     range: `${SHEET_NAME}!A2:A`
   });
-
   return new Set((res.data.values || []).flat());
 }
 
@@ -106,10 +104,10 @@ async function appendRows(rows) {
 // =========================
 async function run() {
   let offset = 0;
-  let parcels = [];
   let hasMore = true;
+  let parcels = [];
 
-  console.log("🔎 Fetching delinquent parcels...");
+  console.log("🔎 Fetching delinquent parcels from ArcGIS...");
 
   while (hasMore) {
     const data = await fetchPage(offset);
@@ -120,9 +118,9 @@ async function run() {
     hasMore = data.exceededTransferLimit === true;
   }
 
-  console.log(`📦 Pulled ${parcels.length} records`);
+  console.log(`📦 Total parcels fetched: ${parcels.length}`);
 
-  // ✅ Ensure headers FIRST
+  // Ensure headers exist before appending
   await ensureHeaders();
 
   const existingKeys = await getExistingKeys();
@@ -149,9 +147,12 @@ async function run() {
   }
 
   await appendRows(rows);
-  console.log(`✅ Appended ${rows.length} new rows`);
+  console.log(`✅ Appended ${rows.length} new rows to Google Sheets`);
 }
 
+// =========================
+// RUN
+// =========================
 run().catch(err => {
   console.error("❌ Error:", err);
   process.exit(1);
