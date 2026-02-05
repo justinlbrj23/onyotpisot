@@ -142,17 +142,33 @@ async function run() {
   await clearSheet();
   await writeHeaders();
 
+  if (parcels.length > 0) {
+    console.log("🔍 Sample record keys:", Object.keys(parcels[0]));
+  }
+
   const rows = [];
 
   for (const p of parcels) {
     const taxKey = p.TAXKEY?.toString();
     if (!taxKey) continue;
 
+    // Flexible mapping: try multiple possible field names
+    const owner =
+      p.OWNER_NAME || p.OWNER_NAME2 || p.OWNER || "";
+    const address =
+      p.PROP_ADDR ||
+      `${p.PROP_HOUSE_NR || ""} ${p.PROP_STREET || ""}`.trim() ||
+      p.SITE_ADDR ||
+      p.ADDRESS ||
+      "";
+    const city =
+      p.MUNI || p.MUNICIPALITY || p.CITY || "";
+
     rows.push([
       taxKey,
-      p.OWNER_NAME_1 || p.OWNER || "",
-      p.SITE_ADDR || p.ADDRESS || "",
-      p.MUNICIPALITY || p.CITY || "",
+      owner,
+      address,
+      city,
       delinquencyField ? p[delinquencyField] || "" : "",
       p.NET_TAX || "",
       new Date().toISOString()
