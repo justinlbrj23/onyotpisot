@@ -2,7 +2,7 @@
  * Milwaukee County Parcels Scraper
  * Clears sheet, then logs results directly into Google Sheets
  * Dynamically fetches available fields and uses them as sheet headers
- * Limits parsed data to 10k rows
+ * First tests with 10 records, then fetches up to 10k rows
  */
 
 import fetch from "node-fetch";
@@ -14,14 +14,15 @@ import { google } from "googleapis";
 const SHEET_ID = "192sAixH2UDvOcb5PL9kSnzLRJUom-0ZiSuTH9cYAi1A";
 const SHEET_NAME = "Sheet1";
 
-// Use MPROP layer (id 1 or whichever has data)
+// Use MPROP_full layer (id 2 is usually populated)
 const ENDPOINT =
-  "https://milwaukeemaps.milwaukee.gov/arcgis/rest/services/property/parcels_mprop/MapServer/1/query";
+  "https://milwaukeemaps.milwaukee.gov/arcgis/rest/services/property/parcels_mprop/MapServer/2/query";
 
 const METADATA_URL =
-  "https://milwaukeemaps.milwaukee.gov/arcgis/rest/services/property/parcels_mprop/MapServer/1?f=pjson";
+  "https://milwaukeemaps.milwaukee.gov/arcgis/rest/services/property/parcels_mprop/MapServer/2?f=pjson";
 
-const PAGE_SIZE = 2000;
+const TEST_SIZE = 10;
+const PAGE_SIZE = 500; // smaller page size to reduce timeout risk
 const MAX_ROWS = 10000; // cap at 10k rows
 
 // =========================
@@ -47,14 +48,14 @@ async function getAvailableFields() {
   return fields;
 }
 
-async function fetchPage(offset, outFields) {
+async function fetchPage(offset, outFields, size) {
   const params = new URLSearchParams({
-    where: "1=1", // no filter, pull everything
+    where: "1=1",
     outFields: outFields.join(","),
     returnGeometry: "false",
     f: "json",
     resultOffset: offset,
-    resultRecordCount: PAGE_SIZE
+    resultRecordCount: size
   });
 
   const res = await fetch(`${ENDPOINT}?${params}`);
@@ -99,14 +100,25 @@ async function overwriteRows(rows) {
 async function run() {
   const fields = await getAvailableFields();
 
+  console.log("🔎 Testing ArcGIS with 10 records...");
+  const testData = await fetchPage(0, fields, TEST_SIZE);
+  if (!testData.features?.length) {
+    console.log("⚠️ Test query returned no features. Layer may be empty or restricted.");
+    return;
+  }
+
+  console.log("🔍 Sample record keys:", Object.keys(testData.features[0].attributes));
+  console.log("🔍 Sample record values:", testData.features[0].attributes);
+
+  // Proceed to full fetch
   let offset = 0;
   let hasMore = true;
   let parcels = [];
 
-  console.log("🔎 Fetching parcels from ArcGIS...");
+  console.log("🔎 Fetching parcels from ArcGIS (bulk)...");
 
   while (hasMore && parcels.length < MAX_ROWS) {
-    const data = await fetchPage(offset, fields);
+    const data = await fetchPage(offset, fields, PAGE_SIZE);
     if (!data.features?.length) {
       console.log("⚠️ No features returned at offset", offset);
       break;
@@ -127,10 +139,6 @@ async function run() {
 
   await clearSheet();
   await writeHeaders(fields);
-
-  if (parcels.length > 0) {
-    console.log("🔍 Sample record keys:", Object.keys(parcels[0]));
-  }
 
   const rows = parcels.map(p =>
     fields.map(field => p[field] ?? "")
