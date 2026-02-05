@@ -1,32 +1,39 @@
 name: Sync Milwaukee Tax Delinquent Parcels
 
 on:
-  workflow_dispatch:
-  schedule:
-    - cron: "0 6 * * 1" # Mondays 6am UTC
+  workflow_dispatch:  # Manual trigger only
 
 jobs:
   sync:
     runs-on: ubuntu-latest
 
     steps:
+      # --------------------------------------------------
+      # Checkout Repo
+      # --------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # --------------------------------------------------
+      # Setup Node.js
+      # --------------------------------------------------
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
+      # --------------------------------------------------
+      # Install Dependencies
+      # --------------------------------------------------
       - name: Install dependencies
         run: npm install
 
       # --------------------------------------------------
-      # Create Service Account JSON
+      # Create Service Account JSON (SAFE for multiline)
       # --------------------------------------------------
       - name: Create service account file
         run: |
-          echo '${{ secrets.GOOGLE_SERVICE_ACCOUNT }}' > service-account.json
+          printf "%s" "${{ secrets.GOOGLE_SERVICE_ACCOUNT }}" > service-account.json
 
       # --------------------------------------------------
       # Validate Service Account JSON
@@ -43,7 +50,7 @@ jobs:
           "
 
       # --------------------------------------------------
-      # Run Scraper + Sheet Sync
+      # Run Milwaukee scraper via npm script
       # --------------------------------------------------
-      - name: Run sync
-        run: npm start
+      - name: Run Milwaukee scraper
+        run: npm run fetch:milwaukee
