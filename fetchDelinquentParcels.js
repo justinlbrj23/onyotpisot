@@ -1,7 +1,7 @@
 /**
  * Milwaukee County Parcels Scraper
  * Clears sheet, then logs results directly into Google Sheets
- * Overwrites instead of appending to avoid 10M cell limit
+ * Dynamically fetches available fields and uses them as sheet headers
  * Limits parsed data to 10k rows
  */
 
@@ -14,19 +14,12 @@ import { google } from "googleapis";
 const SHEET_ID = "192sAixH2UDvOcb5PL9kSnzLRJUom-0ZiSuTH9cYAi1A";
 const SHEET_NAME = "Sheet1";
 
-const HEADERS = [
-  "TAXKEY",
-  "OWNER",
-  "ADDRESS",
-  "CITY",
-  "DELQ",
-  "NET_TAX",
-  "LAST_SYNC"
-];
-
 // Use MPROP layer (id 1 or whichever has data)
 const ENDPOINT =
   "https://milwaukeemaps.milwaukee.gov/arcgis/rest/services/property/parcels_mprop/MapServer/1/query";
+
+const METADATA_URL =
+  "https://milwaukeemaps.milwaukee.gov/arcgis/rest/services/property/parcels_mprop/MapServer/1?f=pjson";
 
 const PAGE_SIZE = 2000;
 const MAX_ROWS = 10000; // cap at 10k rows
@@ -44,10 +37,20 @@ const sheets = google.sheets({ version: "v4", auth });
 // =========================
 // ARC GIS FETCH FUNCTIONS
 // =========================
-async function fetchPage(offset) {
+async function getAvailableFields() {
+  const res = await fetch(METADATA_URL);
+  if (!res.ok) throw new Error(`Metadata HTTP ${res.status}`);
+  const meta = await res.json();
+
+  const fields = meta.fields.map(f => f.name);
+  console.log("📑 Available fields:", fields);
+  return fields;
+}
+
+async function fetchPage(offset, outFields) {
   const params = new URLSearchParams({
     where: "1=1", // no filter, pull everything
-    outFields: "*", // request all available fields
+    outFields: outFields.join(","),
     returnGeometry: "false",
     f: "json",
     resultOffset: offset,
@@ -70,13 +73,13 @@ async function clearSheet() {
   });
 }
 
-async function writeHeaders() {
+async function writeHeaders(headers) {
   console.log("🧾 Writing sheet headers...");
   await sheets.spreadsheets.values.update({
     spreadsheetId: SHEET_ID,
     range: `${SHEET_NAME}!A1`,
     valueInputOption: "RAW",
-    requestBody: { values: [HEADERS] }
+    requestBody: { values: [headers] }
   });
 }
 
@@ -94,6 +97,8 @@ async function overwriteRows(rows) {
 // MAIN
 // =========================
 async function run() {
+  const fields = await getAvailableFields();
+
   let offset = 0;
   let hasMore = true;
   let parcels = [];
@@ -101,7 +106,7 @@ async function run() {
   console.log("🔎 Fetching parcels from ArcGIS...");
 
   while (hasMore && parcels.length < MAX_ROWS) {
-    const data = await fetchPage(offset);
+    const data = await fetchPage(offset, fields);
     if (!data.features?.length) {
       console.log("⚠️ No features returned at offset", offset);
       break;
@@ -121,21 +126,15 @@ async function run() {
   console.log(`📦 Total parcels fetched: ${parcels.length}`);
 
   await clearSheet();
-  await writeHeaders();
+  await writeHeaders(fields);
 
   if (parcels.length > 0) {
     console.log("🔍 Sample record keys:", Object.keys(parcels[0]));
   }
 
-  const rows = parcels.map(p => [
-    p.TAXKEY?.toString() || "",
-    p.OWNER_NAME || p.OWNER_NAME2 || p.OWNER_NAME_1 || "",
-    p.ADDRESS || p.PROP_ADDR || `${p.PROP_HOUSE_NR || ""} ${p.PROP_STREET || ""}`.trim(),
-    p.CITY || p.MUNI || p.OWNER_CITY_STATE || "",
-    p.TAX_DELQ || p.TAXDELQ_AMT || "",
-    p.NET_TAX || "",
-    new Date().toISOString()
-  ]);
+  const rows = parcels.map(p =>
+    fields.map(field => p[field] ?? "")
+  );
 
   if (!rows.length) {
     console.log("✅ No rows to write");
