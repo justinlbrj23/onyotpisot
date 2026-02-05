@@ -1,7 +1,7 @@
 /**
  * Milwaukee County Tax-Delinquent Parcels Scraper
  * Clears sheet, then logs results directly into Google Sheets
- * Root-only JS
+ * Overwrites instead of appending to avoid 10M cell limit
  */
 
 import fetch from "node-fetch";
@@ -69,9 +69,23 @@ async function getDelinquencyField() {
 async function fetchPage(offset, delinquencyField) {
   const where = delinquencyField ? `${delinquencyField} > 0` : "1=1";
 
+  // Request only needed fields to reduce payload
+  const outFields = [
+    "TAXKEY",
+    "OWNER_NAME",
+    "OWNER_NAME2",
+    "PROP_ADDR",
+    "PROP_HOUSE_NR",
+    "PROP_STREET",
+    "MUNI",
+    "CITY",
+    "NET_TAX",
+    delinquencyField || ""
+  ].filter(Boolean).join(",");
+
   const params = new URLSearchParams({
     where,
-    outFields: "*",
+    outFields,
     returnGeometry: "false",
     f: "json",
     resultOffset: offset,
@@ -104,12 +118,12 @@ async function writeHeaders() {
   });
 }
 
-async function appendRows(rows) {
-  await sheets.spreadsheets.values.append({
+async function overwriteRows(rows) {
+  console.log("✍️ Writing rows (overwrite mode)...");
+  await sheets.spreadsheets.values.update({
     spreadsheetId: SHEET_ID,
     range: `${SHEET_NAME}!A2`,
     valueInputOption: "RAW",
-    insertDataOption: "INSERT_ROWS",
     requestBody: { values: rows }
   });
 }
@@ -158,11 +172,9 @@ async function run() {
     const address =
       p.PROP_ADDR ||
       `${p.PROP_HOUSE_NR || ""} ${p.PROP_STREET || ""}`.trim() ||
-      p.SITE_ADDR ||
-      p.ADDRESS ||
-      "";
+      p.ADDRESS || "";
     const city =
-      p.MUNI || p.MUNICIPALITY || p.CITY || "";
+      p.MUNI || p.CITY || "";
 
     rows.push([
       taxKey,
@@ -176,12 +188,12 @@ async function run() {
   }
 
   if (!rows.length) {
-    console.log("✅ No rows to append");
+    console.log("✅ No rows to write");
     return;
   }
 
-  await appendRows(rows);
-  console.log(`✅ Appended ${rows.length} rows to Google Sheets`);
+  await overwriteRows(rows);
+  console.log(`✅ Wrote ${rows.length} rows to Google Sheets (overwrite mode)`);
 }
 
 // =========================
