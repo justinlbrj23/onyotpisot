@@ -43,6 +43,16 @@ jobs:
           echo '${{ secrets.GOOGLE_SERVICE_ACCOUNT }}' > service-account.json
 
       # --------------------------------------------------
+      # Debug service account file (optional, remove later)
+      # --------------------------------------------------
+      - name: Debug service account file
+        run: |
+          echo "File size:"
+          wc -c service-account.json
+          echo "First few lines:"
+          head -n 10 service-account.json
+
+      # --------------------------------------------------
       # Validate Service Account JSON
       # --------------------------------------------------
       - name: Validate service account JSON
