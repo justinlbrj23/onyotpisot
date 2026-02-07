@@ -3,7 +3,8 @@
  * Clears sheet, then logs results directly into Google Sheets
  * Dynamically fetches available fields and uses them as sheet headers
  * Limits parsed data to 10k rows
- * Retries failed fetches up to 3 times
+ * Retries failed fetches up to 3 times with backoff
+ * Supports ArcGIS token authentication
  */
 
 import fetch from "node-fetch";
@@ -12,7 +13,7 @@ import { google } from "googleapis";
 const SHEET_ID = "192sAixH2UDvOcb5PL9kSnzLRJUom-0ZiSuTH9cYAi1A";
 const SHEET_NAME = "Sheet1";
 
-// Correct ArcGIS Online FeatureServer endpoints
+// ArcGIS Online FeatureServer endpoints
 const ENDPOINT =
   "https://services.arcgis.com/CKfU4jEsYl9Y4y5O/arcgis/rest/services/Milwaukee_County_Tax_Delinquent_Parcels/FeatureServer/0/query";
 
@@ -24,6 +25,16 @@ const PAGE_SIZE = 500;
 const MAX_ROWS = 10000;
 const MAX_RETRIES = 3;
 
+// =========================
+// ArcGIS Token (set your token here)
+// =========================
+// You can generate a token at https://www.arcgis.com/sharing/rest/generateToken
+// or via your ArcGIS Online account. Paste it here:
+const ARCGIS_TOKEN = process.env.ARCGIS_TOKEN || ""; // safer to load from env var
+
+// =========================
+// GOOGLE SHEETS AUTH
+// =========================
 const auth = new google.auth.GoogleAuth({
   keyFile: "./service-account.json",
   scopes: ["https://www.googleapis.com/auth/spreadsheets"]
@@ -51,7 +62,8 @@ async function fetchWithRetry(url, options = {}, retries = MAX_RETRIES) {
 // ARC GIS FETCH FUNCTIONS
 // =========================
 async function getAvailableFields() {
-  const meta = await fetchWithRetry(METADATA_URL);
+  const url = ARCGIS_TOKEN ? `${METADATA_URL}&token=${ARCGIS_TOKEN}` : METADATA_URL;
+  const meta = await fetchWithRetry(url);
   if (!meta.fields) {
     console.error("⚠️ No fields array found in metadata. Raw metadata:", meta);
     return [];
@@ -70,6 +82,7 @@ async function fetchPage(offset, outFields, size) {
     resultOffset: offset,
     resultRecordCount: size
   });
+  if (ARCGIS_TOKEN) params.append("token", ARCGIS_TOKEN);
   return await fetchWithRetry(`${ENDPOINT}?${params}`);
 }
 
