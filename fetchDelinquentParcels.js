@@ -4,6 +4,7 @@
  * Dynamically fetches available fields and uses them as sheet headers
  * Limits parsed data to 5k rows
  * Retries failed fetches up to 3 times with backoff
+ * Supports ArcGIS token authentication
  * ✅ Writes in batches to avoid exceeding Google Sheets cell limits
  */
 
@@ -16,6 +17,7 @@ const SHEET_NAME = "Sheet1";
 const SERVICE_ROOT =
   "https://services2.arcgis.com/s1wgJQKbKJihhhaT/arcgis/rest/services/Milwaukee_County_Parcels_Property_Information_view/FeatureServer";
 
+// ✅ Correct layer ID
 const LAYER_ID = 58;
 
 const ENDPOINT = `${SERVICE_ROOT}/${LAYER_ID}/query`;
@@ -25,8 +27,9 @@ const TEST_SIZE = 10;
 const PAGE_SIZE = 500;
 const MAX_ROWS = 5000;
 const MAX_RETRIES = 3;
-const BATCH_SIZE = 500;
+const BATCH_SIZE = 500; // ✅ write rows in chunks
 
+// ArcGIS token (if dataset is private)
 const ARCGIS_TOKEN = process.env.ARCGIS_TOKEN || "";
 
 const auth = new google.auth.GoogleAuth({
@@ -35,7 +38,9 @@ const auth = new google.auth.GoogleAuth({
 });
 const sheets = google.sheets({ version: "v4", auth });
 
-// Retry wrapper
+// =========================
+// Retry wrapper for fetch
+// =========================
 async function fetchWithRetry(url, options = {}, retries = MAX_RETRIES) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
@@ -45,12 +50,14 @@ async function fetchWithRetry(url, options = {}, retries = MAX_RETRIES) {
     } catch (err) {
       console.warn(`⚠️ Fetch attempt ${attempt} failed: ${err.message}`);
       if (attempt === retries) throw err;
-      await new Promise(r => setTimeout(r, 1000 * attempt));
+      await new Promise(r => setTimeout(r, 1000 * attempt)); // backoff
     }
   }
 }
 
-// Get fields
+// =========================
+// ARC GIS FETCH FUNCTIONS
+// =========================
 async function getAvailableFields() {
   const url = ARCGIS_TOKEN ? `${METADATA_URL}&token=${ARCGIS_TOKEN}` : METADATA_URL;
   const meta = await fetchWithRetry(url);
@@ -63,7 +70,6 @@ async function getAvailableFields() {
   return fields;
 }
 
-// Fetch page
 async function fetchPage(offset, outFields, size) {
   const params = new URLSearchParams({
     where: "1=1",
@@ -77,7 +83,9 @@ async function fetchPage(offset, outFields, size) {
   return await fetchWithRetry(`${ENDPOINT}?${params}`);
 }
 
-// Sheet helpers
+// =========================
+// SHEET HELPERS
+// =========================
 async function clearSheet() {
   await sheets.spreadsheets.values.clear({
     spreadsheetId: SHEET_ID,
@@ -104,14 +112,16 @@ async function appendRowsBatch(rows) {
   });
 }
 
-// Main
+// =========================
+// MAIN
+// =========================
 async function run() {
   const fields = await getAvailableFields();
 
   console.log("🔎 Testing ArcGIS with 10 records...");
   const testData = await fetchPage(0, fields, TEST_SIZE);
   if (!testData.features?.length) {
-    console.log("⚠️ Test query returned no features.");
+    console.log("⚠️ Test query returned no features. Layer may be empty or restricted.");
     return;
   }
 
@@ -140,18 +150,20 @@ async function run() {
   }
 
   console.log(`📦 Total parcels fetched: ${parcels.length}`);
-  console.log(`📊 Total cells to write: ${parcels.length * fields.length}`);
 
   await clearSheet();
   await writeHeaders(fields);
 
-  const rows = parcels.map(p => fields.map(field => p[field] ?? ""));
+  const rows = parcels.map(p =>
+    fields.map(field => p[field] ?? "")
+  );
 
   if (!rows.length) {
     console.log("✅ No rows to write");
     return;
   }
 
+  // ✅ Write in batches to avoid hitting cell limits
   for (let i = 0; i < rows.length; i += BATCH_SIZE) {
     const batch = rows.slice(i, i + BATCH_SIZE);
     await appendRowsBatch(batch);
