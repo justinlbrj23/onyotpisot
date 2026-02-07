@@ -1,6 +1,7 @@
 /**
  * Milwaukee County Parcels Property Information Scraper
  * Splits fields across multiple sheets to avoid 10M cell limit
+ * Automatically creates new sheet tabs if they don't exist
  */
 
 import fetch from "node-fetch";
@@ -17,6 +18,9 @@ const METADATA_URL = `${SERVICE_ROOT}/${LAYER_ID}?f=pjson`;
 const PAGE_SIZE = 500;
 const MAX_ROWS = 5000;
 const BATCH_SIZE = 500;
+const CHUNK_SIZE = 20; // number of fields per sheet tab
+
+const ARCGIS_TOKEN = process.env.ARCGIS_TOKEN || "";
 
 const auth = new google.auth.GoogleAuth({
   keyFile: "./service-account.json",
@@ -24,17 +28,21 @@ const auth = new google.auth.GoogleAuth({
 });
 const sheets = google.sheets({ version: "v4", auth });
 
+// Retry wrapper
 async function fetchWithRetry(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return await res.json();
 }
 
+// Get fields
 async function getAvailableFields() {
-  const meta = await fetchWithRetry(METADATA_URL);
+  const url = ARCGIS_TOKEN ? `${METADATA_URL}&token=${ARCGIS_TOKEN}` : METADATA_URL;
+  const meta = await fetchWithRetry(url);
   return meta.fields.map(f => f.name);
 }
 
+// Fetch page
 async function fetchPage(offset, outFields, size) {
   const params = new URLSearchParams({
     where: "1=1",
@@ -44,20 +52,47 @@ async function fetchPage(offset, outFields, size) {
     resultOffset: offset,
     resultRecordCount: size
   });
+  if (ARCGIS_TOKEN) params.append("token", ARCGIS_TOKEN);
   return await fetchWithRetry(`${ENDPOINT}?${params}`);
 }
 
+// Ensure sheet tab exists
+async function ensureSheetExists(sheetName) {
+  const spreadsheet = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
+  const exists = spreadsheet.data.sheets.some(s => s.properties.title === sheetName);
+  if (!exists) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SHEET_ID,
+      requestBody: {
+        requests: [
+          {
+            addSheet: {
+              properties: { title: sheetName }
+            }
+          }
+        ]
+      }
+    });
+    console.log(`✅ Created new sheet tab: ${sheetName}`);
+  }
+}
+
+// Write data to sheet
 async function writeToSheet(sheetName, headers, rows) {
+  await ensureSheetExists(sheetName);
+
   await sheets.spreadsheets.values.clear({
     spreadsheetId: SHEET_ID,
     range: sheetName
   });
+
   await sheets.spreadsheets.values.update({
     spreadsheetId: SHEET_ID,
     range: `${sheetName}!A1`,
     valueInputOption: "RAW",
     requestBody: { values: [headers] }
   });
+
   for (let i = 0; i < rows.length; i += BATCH_SIZE) {
     const batch = rows.slice(i, i + BATCH_SIZE);
     await sheets.spreadsheets.values.append({
@@ -71,6 +106,7 @@ async function writeToSheet(sheetName, headers, rows) {
   }
 }
 
+// Main
 async function run() {
   const fields = await getAvailableFields();
   console.log("📑 Available fields:", fields);
@@ -88,12 +124,11 @@ async function run() {
 
   console.log(`📦 Total parcels fetched: ${parcels.length}`);
 
-  // Split fields into chunks of 20
-  const chunkSize = 20;
-  for (let i = 0; i < fields.length; i += chunkSize) {
-    const fieldChunk = fields.slice(i, i + chunkSize);
+  // Split fields into chunks of CHUNK_SIZE
+  for (let i = 0; i < fields.length; i += CHUNK_SIZE) {
+    const fieldChunk = fields.slice(i, i + CHUNK_SIZE);
     const rows = parcels.map(p => fieldChunk.map(f => p[f] ?? ""));
-    const sheetName = `Fields_${i / chunkSize + 1}`;
+    const sheetName = `Fields_${i / CHUNK_SIZE + 1}`;
     await writeToSheet(sheetName, fieldChunk, rows);
   }
 
