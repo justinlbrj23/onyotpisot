@@ -1,44 +1,70 @@
-name: Fetch Milwaukee Parcels
+name: Sync Milwaukee Tax Delinquent Parcels
 
 on:
-  workflow_dispatch:   # manual trigger
-  schedule:
-    - cron: "0 6 * * *"   # run daily at 6 AM UTC
+  workflow_dispatch:  # Manual trigger only
 
 jobs:
-  fetch-milwaukee:
+  sync:
     runs-on: ubuntu-latest
 
     steps:
-      # Checkout repo
+      # --------------------------------------------------
+      # Checkout Repo
+      # --------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # --------------------------------------------------
       # Setup Node.js
+      # --------------------------------------------------
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
-          cache: "npm"
+          node-version: 20
 
-      # Install dependencies
+      # --------------------------------------------------
+      # Install Dependencies
+      # --------------------------------------------------
       - name: Install dependencies
-        run: npm ci
-
-      # Run scraper
-      - name: Run Milwaukee Parcels scraper
-        env:
-          ARCGIS_TOKEN: ${{ secrets.ARCGIS_TOKEN }}   # optional, if dataset is private
         run: |
-          echo "Starting Milwaukee Parcels fetch..."
-          npm run fetch:milwaukee
-          echo "Scraper finished."
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+          # Ensure required packages are present
+          npm install googleapis node-fetch
 
-      # Upload logs (optional)
-      - name: Upload run logs
+      # --------------------------------------------------
+      # Write RAW Service Account JSON
+      # --------------------------------------------------
+      - name: Write Service Account JSON
+        run: |
+          echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
+
+      # --------------------------------------------------
+      # Validate Service Account JSON
+      # --------------------------------------------------
+      - name: Validate service account JSON
+        run: |
+          node -e "
+            const fs = require('fs');
+            const j = JSON.parse(fs.readFileSync('service-account.json','utf8'));
+            if (!j.private_key || !j.client_email) {
+              throw new Error('Invalid service account JSON');
+            }
+            console.log('Service account OK:', j.client_email);
+          "
+
+      # --------------------------------------------------
+      # Run Milwaukee scraper via npm script
+      # --------------------------------------------------
+      - name: Run Milwaukee scraper
+        run: npm run fetch:milwaukee
+
+      # --------------------------------------------------
+      # Cleanup credentials
+      # --------------------------------------------------
+      - name: Cleanup secrets
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: milwaukee-scraper-logs
-          path: ./fetchDelinquentParcels.log
-          if-no-files-found: ignore
+        run: rm -f service-account.json
