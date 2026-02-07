@@ -1,9 +1,7 @@
 name: Sync Milwaukee Tax Delinquent Parcels
 
 on:
-  workflow_dispatch:   # Manual trigger only
-  schedule:
-    - cron: "0 6 * * *"   # optional: run daily at 6 AM UTC
+  workflow_dispatch:  # Manual trigger only
 
 jobs:
   sync:
@@ -23,7 +21,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: "npm"
 
       # --------------------------------------------------
       # Install Dependencies
@@ -35,10 +32,11 @@ jobs:
           else
             npm install
           fi
+          # Ensure required packages are present
           npm install googleapis node-fetch
 
       # --------------------------------------------------
-      # Write Service Account JSON
+      # Write RAW Service Account JSON
       # --------------------------------------------------
       - name: Write Service Account JSON
         run: |
@@ -59,13 +57,10 @@ jobs:
           "
 
       # --------------------------------------------------
-      # Run Milwaukee scraper
+      # Run Milwaukee scraper via npm script
       # --------------------------------------------------
       - name: Run Milwaukee scraper
-        run: |
-          echo 'Starting Milwaukee Parcels fetch...'
-          npm run fetch:milwaukee
-          echo 'Scraper finished.'
+        run: npm run fetch:milwaukee
 
       # --------------------------------------------------
       # Cleanup credentials
