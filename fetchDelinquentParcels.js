@@ -43,6 +43,11 @@ async function getAvailableFields() {
   if (!res.ok) throw new Error(`Metadata HTTP ${res.status}`);
   const meta = await res.json();
 
+  if (!meta.fields) {
+    console.error("⚠️ No fields array found in metadata. Raw metadata:", meta);
+    return [];
+  }
+
   const fields = meta.fields.map(f => f.name);
   console.log("📑 Available fields:", fields);
   return fields;
@@ -51,7 +56,7 @@ async function getAvailableFields() {
 async function fetchPage(offset, outFields, size) {
   const params = new URLSearchParams({
     where: "1=1",
-    outFields: outFields.join(","),
+    outFields: outFields.length ? outFields.join(",") : "*",
     returnGeometry: "false",
     f: "json",
     resultOffset: offset,
@@ -138,10 +143,10 @@ async function run() {
   console.log(`📦 Total parcels fetched: ${parcels.length}`);
 
   await clearSheet();
-  await writeHeaders(fields);
+  await writeHeaders(fields.length ? fields : Object.keys(testData.features[0].attributes));
 
   const rows = parcels.map(p =>
-    fields.map(field => p[field] ?? "")
+    (fields.length ? fields : Object.keys(p)).map(field => p[field] ?? "")
   );
 
   if (!rows.length) {
