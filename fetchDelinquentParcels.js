@@ -17,7 +17,7 @@ const SHEET_NAME = "Sheet1";
 const SERVICE_ROOT =
   "https://services2.arcgis.com/s1wgJQKbKJihhhaT/arcgis/rest/services/Milwaukee_County_Parcels_Property_Information_view/FeatureServer";
 
-// 🔄 Correct layer ID
+// ✅ Correct layer ID
 const LAYER_ID = 58;
 
 const ENDPOINT = `${SERVICE_ROOT}/${LAYER_ID}/query`;
