@@ -13,12 +13,15 @@ import { google } from "googleapis";
 const SHEET_ID = "192sAixH2UDvOcb5PL9kSnzLRJUom-0ZiSuTH9cYAi1A";
 const SHEET_NAME = "Sheet1";
 
-// ✅ Correct ArcGIS Online FeatureServer endpoints
-const ENDPOINT =
-  "https://services2.arcgis.com/s1wgJQKbKJihhhaT/arcgis/rest/services/Milwaukee_County_Parcels_Property_Information_view/FeatureServer/0/query";
+// ✅ Correct service root
+const SERVICE_ROOT =
+  "https://services2.arcgis.com/s1wgJQKbKJihhhaT/arcgis/rest/services/Milwaukee_County_Parcels_Property_Information_view/FeatureServer";
 
-const METADATA_URL =
-  "https://services2.arcgis.com/s1wgJQKbKJihhhaT/arcgis/rest/services/Milwaukee_County_Parcels_Property_Information_view/FeatureServer/0?f=pjson";
+// 🔄 Change this if the layer isn’t 0
+const LAYER_ID = 1;
+
+const ENDPOINT = `${SERVICE_ROOT}/${LAYER_ID}/query`;
+const METADATA_URL = `${SERVICE_ROOT}/${LAYER_ID}?f=pjson`;
 
 const TEST_SIZE = 10;
 const PAGE_SIZE = 500;
