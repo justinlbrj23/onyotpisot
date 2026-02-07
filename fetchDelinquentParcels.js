@@ -18,7 +18,7 @@ const SERVICE_ROOT =
   "https://services2.arcgis.com/s1wgJQKbKJihhhaT/arcgis/rest/services/Milwaukee_County_Parcels_Property_Information_view/FeatureServer";
 
 // 🔄 Change this if the layer isn’t 0
-const LAYER_ID = 1;
+const LAYER_ID = 0;
 
 const ENDPOINT = `${SERVICE_ROOT}/${LAYER_ID}/query`;
 const METADATA_URL = `${SERVICE_ROOT}/${LAYER_ID}?f=pjson`;
