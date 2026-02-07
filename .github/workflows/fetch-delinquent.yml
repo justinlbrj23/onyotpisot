@@ -1,15 +1,15 @@
 name: Sync Milwaukee Tax Delinquent Parcels
 
 on:
-  workflow_dispatch:  # Manual trigger only
+  workflow_dispatch:
 
 jobs:
-  sync:
+  tda_pipeline:
     runs-on: ubuntu-latest
 
     steps:
       # --------------------------------------------------
-      # Checkout Repo
+      # Checkout repository
       # --------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -17,13 +17,13 @@ jobs:
       # --------------------------------------------------
       # Setup Node.js
       # --------------------------------------------------
-      - name: Setup Node.js
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
       # --------------------------------------------------
-      # Install Dependencies
+      # Install dependencies
       # --------------------------------------------------
       - name: Install dependencies
         run: |
@@ -32,8 +32,8 @@ jobs:
           else
             npm install
           fi
-          # Ensure required packages are present
-          npm install googleapis node-fetch
+          # Ensure stealth packages are present
+          npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis
 
       # --------------------------------------------------
       # Write RAW Service Account JSON
@@ -57,14 +57,7 @@ jobs:
           "
 
       # --------------------------------------------------
-      # Run Milwaukee scraper via npm script
+      # STEP 1 — Create TSSF Headers
       # --------------------------------------------------
-      - name: Run Milwaukee scraper
-        run: npm run fetch:milwaukee
-
-      # --------------------------------------------------
-      # Cleanup credentials
-      # --------------------------------------------------
-      - name: Cleanup secrets
-        if: always()
-        run: rm -f service-account.json
+      - name: Run fetchDelinquentParcels.js
+        run: node fetchDelinquentParcels.js
