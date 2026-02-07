@@ -1,8 +1,8 @@
 /**
- * Milwaukee County Parcels Scraper
+ * Milwaukee County Tax Delinquent Parcels Scraper
  * Clears sheet, then logs results directly into Google Sheets
  * Dynamically fetches available fields and uses them as sheet headers
- * First tests with 10 records, then fetches up to 10k rows
+ * Limits parsed data to 10k rows
  */
 
 import fetch from "node-fetch";
@@ -14,16 +14,16 @@ import { google } from "googleapis";
 const SHEET_ID = "192sAixH2UDvOcb5PL9kSnzLRJUom-0ZiSuTH9cYAi1A";
 const SHEET_NAME = "Sheet1";
 
-// Use MPROP_full layer (id 2 is usually populated)
+// ArcGIS Online FeatureServer (layer 0)
 const ENDPOINT =
-  "https://milwaukeemaps.milwaukee.gov/arcgis/rest/services/property/parcels_mprop/MapServer/2/query";
+  "https://services.arcgis.com/CKfU4jEsYl9Y4y5O/arcgis/rest/services/Milwaukee_County_Tax_Delinquent_Parcels/FeatureServer/0/query";
 
 const METADATA_URL =
-  "https://milwaukeemaps.milwaukee.gov/arcgis/rest/services/property/parcels_mprop/MapServer/2?f=pjson";
+  "https://services.arcgis.com/CKfU4jEsYl9Y4y5O/arcgis/rest/services/Milwaukee_County_Tax_Delinquent_Parcels/FeatureServer/0?f=pjson";
 
 const TEST_SIZE = 10;
-const PAGE_SIZE = 500; // smaller page size to reduce timeout risk
-const MAX_ROWS = 10000; // cap at 10k rows
+const PAGE_SIZE = 500;
+const MAX_ROWS = 10000;
 
 // =========================
 // GOOGLE SHEETS AUTH
