@@ -8,13 +8,10 @@
 import fetch from "node-fetch";
 import { google } from "googleapis";
 
-// =========================
-// CONFIG
-// =========================
 const SHEET_ID = "192sAixH2UDvOcb5PL9kSnzLRJUom-0ZiSuTH9cYAi1A";
 const SHEET_NAME = "Sheet1";
 
-// ArcGIS Online FeatureServer (layer 0)
+// Correct ArcGIS Online FeatureServer endpoints
 const ENDPOINT =
   "https://services.arcgis.com/CKfU4jEsYl9Y4y5O/arcgis/rest/services/Milwaukee_County_Tax_Delinquent_Parcels/FeatureServer/0/query";
 
@@ -25,19 +22,12 @@ const TEST_SIZE = 10;
 const PAGE_SIZE = 500;
 const MAX_ROWS = 10000;
 
-// =========================
-// GOOGLE SHEETS AUTH
-// =========================
 const auth = new google.auth.GoogleAuth({
   keyFile: "./service-account.json",
   scopes: ["https://www.googleapis.com/auth/spreadsheets"]
 });
-
 const sheets = google.sheets({ version: "v4", auth });
 
-// =========================
-// ARC GIS FETCH FUNCTIONS
-// =========================
 async function getAvailableFields() {
   const res = await fetch(METADATA_URL);
   if (!res.ok) throw new Error(`Metadata HTTP ${res.status}`);
@@ -47,7 +37,6 @@ async function getAvailableFields() {
     console.error("⚠️ No fields array found in metadata. Raw metadata:", meta);
     return [];
   }
-
   const fields = meta.fields.map(f => f.name);
   console.log("📑 Available fields:", fields);
   return fields;
@@ -62,17 +51,12 @@ async function fetchPage(offset, outFields, size) {
     resultOffset: offset,
     resultRecordCount: size
   });
-
   const res = await fetch(`${ENDPOINT}?${params}`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 
-// =========================
-// SHEET HELPERS
-// =========================
 async function clearSheet() {
-  console.log("🧹 Clearing entire sheet contents...");
   await sheets.spreadsheets.values.clear({
     spreadsheetId: SHEET_ID,
     range: SHEET_NAME
@@ -80,7 +64,6 @@ async function clearSheet() {
 }
 
 async function writeHeaders(headers) {
-  console.log("🧾 Writing sheet headers...");
   await sheets.spreadsheets.values.update({
     spreadsheetId: SHEET_ID,
     range: `${SHEET_NAME}!A1`,
@@ -90,7 +73,6 @@ async function writeHeaders(headers) {
 }
 
 async function overwriteRows(rows) {
-  console.log("✍️ Writing rows (overwrite mode)...");
   await sheets.spreadsheets.values.update({
     spreadsheetId: SHEET_ID,
     range: `${SHEET_NAME}!A2`,
@@ -99,9 +81,6 @@ async function overwriteRows(rows) {
   });
 }
 
-// =========================
-// MAIN
-// =========================
 async function run() {
   const fields = await getAvailableFields();
 
@@ -115,7 +94,6 @@ async function run() {
   console.log("🔍 Sample record keys:", Object.keys(testData.features[0].attributes));
   console.log("🔍 Sample record values:", testData.features[0].attributes);
 
-  // Proceed to full fetch
   let offset = 0;
   let hasMore = true;
   let parcels = [];
@@ -128,14 +106,11 @@ async function run() {
       console.log("⚠️ No features returned at offset", offset);
       break;
     }
-
-    console.log(`➡️ Page fetched: ${data.features.length} records`);
     parcels.push(...data.features.map(f => f.attributes));
     offset += PAGE_SIZE;
     hasMore = data.exceededTransferLimit === true;
   }
 
-  // Cap at MAX_ROWS
   if (parcels.length > MAX_ROWS) {
     parcels = parcels.slice(0, MAX_ROWS);
   }
@@ -158,9 +133,6 @@ async function run() {
   console.log(`✅ Wrote ${rows.length} rows to Google Sheets (overwrite mode)`);
 }
 
-// =========================
-// RUN
-// =========================
 run().catch(err => {
   console.error("❌ Error:", err);
   process.exit(1);
