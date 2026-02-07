@@ -1,33 +1,22 @@
 /**
  * Milwaukee County Parcels Property Information Scraper
- * Clears sheet, then logs ALL available fields directly into Google Sheets
- * Dynamically fetches available fields and uses them as sheet headers
- * Limits parsed data to 5k rows
- * Retries failed fetches up to 3 times with backoff
- * ✅ Writes in batches to avoid exceeding Google Sheets cell limits
+ * Splits fields across multiple sheets to avoid 10M cell limit
  */
 
 import fetch from "node-fetch";
 import { google } from "googleapis";
 
 const SHEET_ID = "192sAixH2UDvOcb5PL9kSnzLRJUom-0ZiSuTH9cYAi1A";
-const SHEET_NAME = "Sheet1";
-
 const SERVICE_ROOT =
   "https://services2.arcgis.com/s1wgJQKbKJihhhaT/arcgis/rest/services/Milwaukee_County_Parcels_Property_Information_view/FeatureServer";
-
 const LAYER_ID = 58;
 
 const ENDPOINT = `${SERVICE_ROOT}/${LAYER_ID}/query`;
 const METADATA_URL = `${SERVICE_ROOT}/${LAYER_ID}?f=pjson`;
 
-const TEST_SIZE = 10;
 const PAGE_SIZE = 500;
 const MAX_ROWS = 5000;
-const MAX_RETRIES = 3;
 const BATCH_SIZE = 500;
-
-const ARCGIS_TOKEN = process.env.ARCGIS_TOKEN || "";
 
 const auth = new google.auth.GoogleAuth({
   keyFile: "./service-account.json",
@@ -35,130 +24,80 @@ const auth = new google.auth.GoogleAuth({
 });
 const sheets = google.sheets({ version: "v4", auth });
 
-// Retry wrapper
-async function fetchWithRetry(url, options = {}, retries = MAX_RETRIES) {
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      const res = await fetch(url, options);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return await res.json();
-    } catch (err) {
-      console.warn(`⚠️ Fetch attempt ${attempt} failed: ${err.message}`);
-      if (attempt === retries) throw err;
-      await new Promise(r => setTimeout(r, 1000 * attempt));
-    }
-  }
+async function fetchWithRetry(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return await res.json();
 }
 
-// Get fields
 async function getAvailableFields() {
-  const url = ARCGIS_TOKEN ? `${METADATA_URL}&token=${ARCGIS_TOKEN}` : METADATA_URL;
-  const meta = await fetchWithRetry(url);
-  if (!meta.fields) {
-    console.error("⚠️ No fields array found in metadata. Raw metadata:", meta);
-    return [];
-  }
-  const fields = meta.fields.map(f => f.name);
-  console.log("📑 Available fields:", fields);
-  return fields;
+  const meta = await fetchWithRetry(METADATA_URL);
+  return meta.fields.map(f => f.name);
 }
 
-// Fetch page
 async function fetchPage(offset, outFields, size) {
   const params = new URLSearchParams({
     where: "1=1",
-    outFields: outFields.length ? outFields.join(",") : "*",
+    outFields: outFields.join(","),
     returnGeometry: "false",
     f: "json",
     resultOffset: offset,
     resultRecordCount: size
   });
-  if (ARCGIS_TOKEN) params.append("token", ARCGIS_TOKEN);
   return await fetchWithRetry(`${ENDPOINT}?${params}`);
 }
 
-// Sheet helpers
-async function clearSheet() {
+async function writeToSheet(sheetName, headers, rows) {
   await sheets.spreadsheets.values.clear({
     spreadsheetId: SHEET_ID,
-    range: SHEET_NAME
+    range: sheetName
   });
-}
-
-async function writeHeaders(headers) {
   await sheets.spreadsheets.values.update({
     spreadsheetId: SHEET_ID,
-    range: `${SHEET_NAME}!A1`,
+    range: `${sheetName}!A1`,
     valueInputOption: "RAW",
     requestBody: { values: [headers] }
   });
-}
-
-async function appendRowsBatch(rows) {
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: SHEET_ID,
-    range: `${SHEET_NAME}!A2`,
-    valueInputOption: "RAW",
-    insertDataOption: "INSERT_ROWS",
-    requestBody: { values: rows }
-  });
-}
-
-// Main
-async function run() {
-  const fields = await getAvailableFields();
-
-  console.log("🔎 Testing ArcGIS with 10 records...");
-  const testData = await fetchPage(0, fields, TEST_SIZE);
-  if (!testData.features?.length) {
-    console.log("⚠️ Test query returned no features.");
-    return;
-  }
-
-  console.log("🔍 Sample record keys:", Object.keys(testData.features[0].attributes));
-  console.log("🔍 Sample record values:", testData.features[0].attributes);
-
-  let offset = 0;
-  let hasMore = true;
-  let parcels = [];
-
-  console.log("🔎 Fetching parcels from ArcGIS (bulk)...");
-
-  while (hasMore && parcels.length < MAX_ROWS) {
-    const data = await fetchPage(offset, fields, PAGE_SIZE);
-    if (!data.features?.length) {
-      console.log("⚠️ No features returned at offset", offset);
-      break;
-    }
-    parcels.push(...data.features.map(f => f.attributes));
-    offset += PAGE_SIZE;
-    hasMore = data.exceededTransferLimit === true;
-  }
-
-  if (parcels.length > MAX_ROWS) {
-    parcels = parcels.slice(0, MAX_ROWS);
-  }
-
-  console.log(`📦 Total parcels fetched: ${parcels.length}`);
-  console.log(`📊 Total cells to write: ${parcels.length * fields.length}`);
-
-  await clearSheet();
-  await writeHeaders(fields);
-
-  const rows = parcels.map(p => fields.map(field => p[field] ?? ""));
-
-  if (!rows.length) {
-    console.log("✅ No rows to write");
-    return;
-  }
-
   for (let i = 0; i < rows.length; i += BATCH_SIZE) {
     const batch = rows.slice(i, i + BATCH_SIZE);
-    await appendRowsBatch(batch);
-    console.log(`✅ Appended batch ${i / BATCH_SIZE + 1} (${batch.length} rows)`);
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID,
+      range: `${sheetName}!A2`,
+      valueInputOption: "RAW",
+      insertDataOption: "INSERT_ROWS",
+      requestBody: { values: batch }
+    });
+    console.log(`✅ Appended ${batch.length} rows to ${sheetName}`);
+  }
+}
+
+async function run() {
+  const fields = await getAvailableFields();
+  console.log("📑 Available fields:", fields);
+
+  let offset = 0;
+  let parcels = [];
+  while (parcels.length < MAX_ROWS) {
+    const data = await fetchPage(offset, fields, PAGE_SIZE);
+    if (!data.features?.length) break;
+    parcels.push(...data.features.map(f => f.attributes));
+    offset += PAGE_SIZE;
+    if (!data.exceededTransferLimit) break;
+  }
+  parcels = parcels.slice(0, MAX_ROWS);
+
+  console.log(`📦 Total parcels fetched: ${parcels.length}`);
+
+  // Split fields into chunks of 20
+  const chunkSize = 20;
+  for (let i = 0; i < fields.length; i += chunkSize) {
+    const fieldChunk = fields.slice(i, i + chunkSize);
+    const rows = parcels.map(p => fieldChunk.map(f => p[f] ?? ""));
+    const sheetName = `Fields_${i / chunkSize + 1}`;
+    await writeToSheet(sheetName, fieldChunk, rows);
   }
 
-  console.log(`✅ Wrote ${rows.length} rows to Google Sheets in batches`);
+  console.log("✅ Data written across multiple sheets");
 }
 
 run().catch(err => {
