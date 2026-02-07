@@ -1,22 +1,33 @@
 name: Sync Milwaukee Tax Delinquent Parcels
 
 on:
-  workflow_dispatch:  # Manual trigger only
+  workflow_dispatch:   # Manual trigger only
+  schedule:
+    - cron: "0 6 * * *"   # optional: run daily at 6 AM UTC
 
 jobs:
   sync:
     runs-on: ubuntu-latest
 
     steps:
+      # --------------------------------------------------
+      # Checkout Repo
+      # --------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # --------------------------------------------------
+      # Setup Node.js
+      # --------------------------------------------------
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: "npm"
 
+      # --------------------------------------------------
+      # Install Dependencies
+      # --------------------------------------------------
       - name: Install dependencies
         run: |
           if [ -f package-lock.json ]; then
@@ -26,10 +37,16 @@ jobs:
           fi
           npm install googleapis node-fetch
 
+      # --------------------------------------------------
+      # Write Service Account JSON
+      # --------------------------------------------------
       - name: Write Service Account JSON
         run: |
           echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
 
+      # --------------------------------------------------
+      # Validate Service Account JSON
+      # --------------------------------------------------
       - name: Validate service account JSON
         run: |
           node -e "
@@ -41,11 +58,18 @@ jobs:
             console.log('Service account OK:', j.client_email);
           "
 
+      # --------------------------------------------------
+      # Run Milwaukee scraper
+      # --------------------------------------------------
       - name: Run Milwaukee scraper
-        env:
-          ARCGIS_TOKEN: ${{ secrets.ARCGIS_TOKEN }}   # optional
-        run: npm run fetch:milwaukee
+        run: |
+          echo 'Starting Milwaukee Parcels fetch...'
+          npm run fetch:milwaukee
+          echo 'Scraper finished.'
 
+      # --------------------------------------------------
+      # Cleanup credentials
+      # --------------------------------------------------
       - name: Cleanup secrets
         if: always()
         run: rm -f service-account.json
