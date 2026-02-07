@@ -1,5 +1,5 @@
 /**
- * Milwaukee County Tax Delinquent Parcels Scraper
+ * Milwaukee County Parcels Property Information Scraper
  * Clears sheet, then logs results directly into Google Sheets
  * Dynamically fetches available fields and uses them as sheet headers
  * Limits parsed data to 10k rows
@@ -13,28 +13,21 @@ import { google } from "googleapis";
 const SHEET_ID = "192sAixH2UDvOcb5PL9kSnzLRJUom-0ZiSuTH9cYAi1A";
 const SHEET_NAME = "Sheet1";
 
-// ArcGIS Online FeatureServer endpoints
+// ✅ Correct ArcGIS Online FeatureServer endpoints
 const ENDPOINT =
-  "https://services.arcgis.com/CKfU4jEsYl9Y4y5O/arcgis/rest/services/Milwaukee_County_Tax_Delinquent_Parcels/FeatureServer/0/query";
+  "https://services2.arcgis.com/s1wgJQKbKJihhhaT/arcgis/rest/services/Milwaukee_County_Parcels_Property_Information_view/FeatureServer/0/query";
 
 const METADATA_URL =
-  "https://services.arcgis.com/CKfU4jEsYl9Y4y5O/arcgis/rest/services/Milwaukee_County_Tax_Delinquent_Parcels/FeatureServer/0?f=pjson";
+  "https://services2.arcgis.com/s1wgJQKbKJihhhaT/arcgis/rest/services/Milwaukee_County_Parcels_Property_Information_view/FeatureServer/0?f=pjson";
 
 const TEST_SIZE = 10;
 const PAGE_SIZE = 500;
 const MAX_ROWS = 10000;
 const MAX_RETRIES = 3;
 
-// =========================
-// ArcGIS Token (set your token here)
-// =========================
-// You can generate a token at https://www.arcgis.com/sharing/rest/generateToken
-// or via your ArcGIS Online account. Paste it here:
-const ARCGIS_TOKEN = process.env.ARCGIS_TOKEN || ""; // safer to load from env var
+// ArcGIS token (if dataset is private)
+const ARCGIS_TOKEN = process.env.ARCGIS_TOKEN || "";
 
-// =========================
-// GOOGLE SHEETS AUTH
-// =========================
 const auth = new google.auth.GoogleAuth({
   keyFile: "./service-account.json",
   scopes: ["https://www.googleapis.com/auth/spreadsheets"]
