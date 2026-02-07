@@ -3,6 +3,7 @@
  * Clears sheet, then logs results directly into Google Sheets
  * Dynamically fetches available fields and uses them as sheet headers
  * Limits parsed data to 10k rows
+ * Retries failed fetches up to 3 times
  */
 
 import fetch from "node-fetch";
@@ -21,6 +22,7 @@ const METADATA_URL =
 const TEST_SIZE = 10;
 const PAGE_SIZE = 500;
 const MAX_ROWS = 10000;
+const MAX_RETRIES = 3;
 
 const auth = new google.auth.GoogleAuth({
   keyFile: "./service-account.json",
@@ -28,11 +30,28 @@ const auth = new google.auth.GoogleAuth({
 });
 const sheets = google.sheets({ version: "v4", auth });
 
-async function getAvailableFields() {
-  const res = await fetch(METADATA_URL);
-  if (!res.ok) throw new Error(`Metadata HTTP ${res.status}`);
-  const meta = await res.json();
+// =========================
+// Retry wrapper for fetch
+// =========================
+async function fetchWithRetry(url, options = {}, retries = MAX_RETRIES) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url, options);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } catch (err) {
+      console.warn(`⚠️ Fetch attempt ${attempt} failed: ${err.message}`);
+      if (attempt === retries) throw err;
+      await new Promise(r => setTimeout(r, 1000 * attempt)); // backoff
+    }
+  }
+}
 
+// =========================
+// ARC GIS FETCH FUNCTIONS
+// =========================
+async function getAvailableFields() {
+  const meta = await fetchWithRetry(METADATA_URL);
   if (!meta.fields) {
     console.error("⚠️ No fields array found in metadata. Raw metadata:", meta);
     return [];
@@ -51,11 +70,12 @@ async function fetchPage(offset, outFields, size) {
     resultOffset: offset,
     resultRecordCount: size
   });
-  const res = await fetch(`${ENDPOINT}?${params}`);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+  return await fetchWithRetry(`${ENDPOINT}?${params}`);
 }
 
+// =========================
+// SHEET HELPERS
+// =========================
 async function clearSheet() {
   await sheets.spreadsheets.values.clear({
     spreadsheetId: SHEET_ID,
@@ -81,6 +101,9 @@ async function overwriteRows(rows) {
   });
 }
 
+// =========================
+// MAIN
+// =========================
 async function run() {
   const fields = await getAvailableFields();
 
