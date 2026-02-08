@@ -16,7 +16,7 @@ const SHEET_ID = "1QWUiJ2ddikZdwx9NdEfResI1FZPGkpVY-nQ4G6I95Ug";
 const SHEET_NAME = "Sheet1";
 
 const SERVICE_ROOT =
-  "https://lio.milwaukeecountywi.gov/arcgis/rest/services/Sheriff/SheriffSales/FeatureServer";
+  "https://mclio.maps.arcgis.com/home/item.html?id=717690b31bd24bacadffbf3679f28a88";
 
 const LAYER_ID = 0;
 
