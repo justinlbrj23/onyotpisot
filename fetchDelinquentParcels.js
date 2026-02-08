@@ -163,7 +163,7 @@ async function run() {
   // 🚫 Apply filters
   const beforeFilterCount = parcels.length;
   parcels = parcels.filter(
-    p => !isBusinessOwner(p.OWNER_NAME) && isResidential(p.DESCRIPTION)
+    p => !isBusinessOwner(p.OWNERNAME1) && isResidential(p.DESCRIPTION)
   );
 
   console.log(`📦 Parcels before filter: ${beforeFilterCount}`);
