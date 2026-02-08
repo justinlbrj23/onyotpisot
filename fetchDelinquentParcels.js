@@ -1,22 +1,25 @@
 /**
  * Milwaukee County Parcels Property Information Scraper
  *
- * ✔ Fetches parcel data from ArcGIS
- * ✔ Creates a NEW sheet per run
- * ✔ Writes headers + rows in batches
- * ✔ Deletes all previous Milwaukee_* sheets after success
- * ✔ Avoids Google Sheets 10M cell limit permanently
- * ✔ Retries ArcGIS requests with backoff
+ * 🔒 CELL-LIMIT SAFE STRATEGY
+ * - Create TEMP sheet
+ * - Write data once
+ * - Delete OLD sheet (frees cells)
+ * - Rename TEMP → MAIN
+ *
+ * This prevents the Google Sheets 10M cell limit permanently.
  */
 
 import fetch from "node-fetch";
 import { google } from "googleapis";
 
-// =========================
-// CONFIG
-// =========================
-const SHEET_ID = "192sAixH2UDvOcb5PL9kSnzLRJUom-0ZiSuTH9cYAi1A";
-const SHEET_NAME = `Milwaukee_${new Date().toISOString().replace(/[:.]/g, "-")}`;
+/* =========================
+   CONFIG
+========================= */
+
+const SPREADSHEET_ID = "192sAixH2UDvOcb5PL9kSnzLRJUom-0ZiSuTH9cYAi1A";
+const MAIN_SHEET_NAME = "Milwaukee_Parcels";
+const TEMP_SHEET_NAME = `TEMP_${Date.now()}`;
 
 const SERVICE_ROOT =
   "https://services2.arcgis.com/s1wgJQKbKJihhhaT/arcgis/rest/services/Milwaukee_County_Parcels_Property_Information_view/FeatureServer";
@@ -32,9 +35,10 @@ const BATCH_SIZE = 500;
 
 const ARCGIS_TOKEN = process.env.ARCGIS_TOKEN || "";
 
-// =========================
-// GOOGLE SHEETS AUTH
-// =========================
+/* =========================
+   GOOGLE AUTH
+========================= */
+
 const auth = new google.auth.GoogleAuth({
   keyFile: "./service-account.json",
   scopes: ["https://www.googleapis.com/auth/spreadsheets"]
@@ -42,9 +46,10 @@ const auth = new google.auth.GoogleAuth({
 
 const sheets = google.sheets({ version: "v4", auth });
 
-// =========================
-// FIELDS (minimized)
-// =========================
+/* =========================
+   FIELDS (LIMIT CELLS)
+========================= */
+
 const FIELDS_TO_KEEP = [
   "TAXKEY",
   "OWNERNAME1",
@@ -55,165 +60,174 @@ const FIELDS_TO_KEEP = [
   "DESCRIPTION"
 ];
 
-// =========================
-// FETCH WITH RETRY
-// =========================
-async function fetchWithRetry(url, options = {}, retries = MAX_RETRIES) {
-  for (let attempt = 1; attempt <= retries; attempt++) {
+/* =========================
+   FETCH WITH RETRY
+========================= */
+
+async function fetchWithRetry(url, retries = MAX_RETRIES) {
+  for (let i = 1; i <= retries; i++) {
     try {
-      const res = await fetch(url, options);
+      const res = await fetch(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return await res.json();
     } catch (err) {
-      console.warn(`⚠️ Fetch attempt ${attempt} failed: ${err.message}`);
-      if (attempt === retries) throw err;
-      await new Promise(r => setTimeout(r, 1000 * attempt));
+      console.warn(`⚠️ Fetch attempt ${i} failed`);
+      if (i === retries) throw err;
+      await new Promise(r => setTimeout(r, i * 1000));
     }
   }
 }
 
-// =========================
-// ARCGIS HELPERS
-// =========================
+/* =========================
+   ARC GIS
+========================= */
+
 async function getAvailableFields() {
   const url = ARCGIS_TOKEN ? `${METADATA_URL}&token=${ARCGIS_TOKEN}` : METADATA_URL;
   const meta = await fetchWithRetry(url);
   return meta.fields?.map(f => f.name) || [];
 }
 
-async function fetchPage(offset, outFields, size) {
+async function fetchPage(offset, fields) {
   const params = new URLSearchParams({
     where: "1=1",
-    outFields: outFields.join(","),
+    outFields: fields.join(","),
     returnGeometry: "false",
     f: "json",
     resultOffset: offset,
-    resultRecordCount: size
+    resultRecordCount: PAGE_SIZE
   });
+
   if (ARCGIS_TOKEN) params.append("token", ARCGIS_TOKEN);
   return fetchWithRetry(`${ENDPOINT}?${params}`);
 }
 
-// =========================
-// SHEET HELPERS
-// =========================
-async function getSheets() {
-  const res = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
-  return res.data.sheets || [];
-}
+/* =========================
+   SHEET HELPERS
+========================= */
 
-async function createSheet(sheetName, columnCount) {
-  await sheets.spreadsheets.batchUpdate({
-    spreadsheetId: SHEET_ID,
+async function createTempSheet() {
+  const res = await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
     requestBody: {
-      requests: [
-        {
-          addSheet: {
-            properties: {
-              title: sheetName,
-              gridProperties: {
-                rowCount: 1000,
-                columnCount
-              }
-            }
-          }
+      requests: [{
+        addSheet: {
+          properties: { title: TEMP_SHEET_NAME }
         }
-      ]
+      }]
     }
   });
-  console.log(`🆕 Created sheet: ${sheetName}`);
+
+  return res.data.replies[0].addSheet.properties.sheetId;
 }
 
-async function writeHeaders(headers) {
+async function writeBatch(startRow, rows) {
   await sheets.spreadsheets.values.update({
-    spreadsheetId: SHEET_ID,
-    range: `${SHEET_NAME}!A1`,
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${TEMP_SHEET_NAME}!A${startRow}`,
     valueInputOption: "RAW",
-    requestBody: { values: [headers] }
-  });
-}
-
-async function appendRowsBatch(rows) {
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: SHEET_ID,
-    range: `${SHEET_NAME}!A2`,
-    valueInputOption: "RAW",
-    insertDataOption: "INSERT_ROWS",
     requestBody: { values: rows }
   });
 }
 
-async function deleteOldMilwaukeeSheets(currentSheetName) {
-  const allSheets = await getSheets();
-
-  const oldSheets = allSheets.filter(
-    s =>
-      s.properties.title.startsWith("Milwaukee_") &&
-      s.properties.title !== currentSheetName
-  );
-
-  if (!oldSheets.length) return;
-
-  await sheets.spreadsheets.batchUpdate({
-    spreadsheetId: SHEET_ID,
-    requestBody: {
-      requests: oldSheets.map(s => ({
-        deleteSheet: { sheetId: s.properties.sheetId }
-      }))
-    }
+async function deleteMainSheetIfExists() {
+  const meta = await sheets.spreadsheets.get({
+    spreadsheetId: SPREADSHEET_ID
   });
 
-  console.log(`🗑 Deleted ${oldSheets.length} old Milwaukee sheets`);
+  const sheet = meta.data.sheets.find(
+    s => s.properties.title === MAIN_SHEET_NAME
+  );
+
+  if (!sheet) return;
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: {
+      requests: [{
+        deleteSheet: {
+          sheetId: sheet.properties.sheetId
+        }
+      }]
+    }
+  });
 }
 
-// =========================
-// MAIN
-// =========================
+async function renameTempSheet(sheetId) {
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: {
+      requests: [{
+        updateSheetProperties: {
+          properties: {
+            sheetId,
+            title: MAIN_SHEET_NAME
+          },
+          fields: "title"
+        }
+      }]
+    }
+  });
+}
+
+/* =========================
+   MAIN
+========================= */
+
 async function run() {
-  const allFields = await getAvailableFields();
-  const selectedFields = allFields.filter(f => FIELDS_TO_KEEP.includes(f));
+  console.log("🔍 Fetching field metadata...");
+  const fields = await getAvailableFields();
+  const selectedFields = fields.filter(f => FIELDS_TO_KEEP.includes(f));
 
-  console.log("📑 Using fields:", selectedFields);
-
+  console.log("📡 Fetching parcel data...");
   let offset = 0;
-  let parcels = [];
+  let rows = [];
   let hasMore = true;
 
-  console.log("🔎 Fetching parcels from ArcGIS...");
-
-  while (hasMore && parcels.length < MAX_ROWS) {
-    const data = await fetchPage(offset, selectedFields, PAGE_SIZE);
+  while (hasMore && rows.length < MAX_ROWS) {
+    const data = await fetchPage(offset, selectedFields);
     if (!data.features?.length) break;
 
-    parcels.push(...data.features.map(f => f.attributes));
+    rows.push(
+      ...data.features.map(f =>
+        selectedFields.map(k => f.attributes[k] ?? "")
+      )
+    );
+
     offset += PAGE_SIZE;
     hasMore = data.exceededTransferLimit === true;
   }
 
-  parcels = parcels.slice(0, MAX_ROWS);
-  console.log(`📦 Total parcels fetched: ${parcels.length}`);
+  rows = rows.slice(0, MAX_ROWS);
 
-  // ✅ CREATE NEW SHEET
-  await createSheet(SHEET_NAME, selectedFields.length);
-
-  // ✅ WRITE HEADERS
-  await writeHeaders(selectedFields);
-
-  const rows = parcels.map(p =>
-    selectedFields.map(field => p[field] ?? "")
-  );
-
-  // ✅ WRITE ROWS IN BATCHES
-  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
-    const batch = rows.slice(i, i + BATCH_SIZE);
-    await appendRowsBatch(batch);
-    console.log(`✅ Appended batch ${i / BATCH_SIZE + 1}`);
+  if (!rows.length) {
+    console.log("⚠️ No data returned");
+    return;
   }
 
-  // ✅ DELETE OLD SHEETS
-  await deleteOldMilwaukeeSheets(SHEET_NAME);
+  console.log(`📦 Rows fetched: ${rows.length}`);
 
-  console.log("🎉 Milwaukee parcel import complete");
+  /* =========================
+     WRITE FLOW
+  ========================= */
+
+  console.log("🆕 Creating temp sheet...");
+  const tempSheetId = await createTempSheet();
+
+  console.log("✍️ Writing data...");
+  await writeBatch(1, [selectedFields]);
+
+  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+    await writeBatch(i + 2, rows.slice(i, i + BATCH_SIZE));
+  }
+
+  console.log("🗑️ Deleting old sheet...");
+  await deleteMainSheetIfExists();
+
+  console.log("🔁 Renaming temp → main...");
+  await renameTempSheet(tempSheetId);
+
+  console.log("✅ DONE — cell limit permanently avoided");
 }
 
 run().catch(err => {
