@@ -23,11 +23,11 @@ const LAYER_ID = 58;
 const ENDPOINT = `${SERVICE_ROOT}/${LAYER_ID}/query`;
 const METADATA_URL = `${SERVICE_ROOT}/${LAYER_ID}?f=pjson`;
 
-const TEST_SIZE = 10;
+const TEST_SIZE = 1;
 const PAGE_SIZE = 500;
-const MAX_ROWS = 10000;
+const MAX_ROWS = 5000;
 const MAX_RETRIES = 3;
-const BATCH_SIZE = 1000; // ✅ write rows in chunks
+const BATCH_SIZE = 500; // ✅ write rows in chunks
 
 // ArcGIS token (if dataset is private)
 const ARCGIS_TOKEN = process.env.ARCGIS_TOKEN || "";
