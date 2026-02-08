@@ -1,81 +1,48 @@
 /**
- * Milwaukee County Parcels Property Information Scraper
+ * Milwaukee County Parcels Scraper
  * Clears sheet, then logs results directly into Google Sheets
  * Dynamically fetches available fields and uses them as sheet headers
- * Limits parsed data to 10k rows
- * Retries failed fetches up to 3 times with backoff
- * Supports ArcGIS token authentication
- * ✅ Writes in batches to avoid exceeding Google Sheets cell limits
+ * First tests with 10 records, then fetches up to 10k rows
  */
 
 import fetch from "node-fetch";
 import { google } from "googleapis";
 
+// =========================
+// CONFIG
+// =========================
 const SHEET_ID = "192sAixH2UDvOcb5PL9kSnzLRJUom-0ZiSuTH9cYAi1A";
 const SHEET_NAME = "Sheet1";
 
-const SERVICE_ROOT =
-  "https://services2.arcgis.com/s1wgJQKbKJihhhaT/arcgis/rest/services/Milwaukee_County_Parcels_Property_Information_view/FeatureServer";
+// Use MPROP_full layer (id 2 is usually populated)
+const ENDPOINT =
+  "https://milwaukeemaps.milwaukee.gov/arcgis/rest/services/property/parcels_mprop/MapServer/2/query";
 
-// ✅ Correct layer ID
-const LAYER_ID = 58;
-
-const ENDPOINT = `${SERVICE_ROOT}/${LAYER_ID}/query`;
-const METADATA_URL = `${SERVICE_ROOT}/${LAYER_ID}?f=pjson`;
+const METADATA_URL =
+  "https://milwaukeemaps.milwaukee.gov/arcgis/rest/services/property/parcels_mprop/MapServer/2?f=pjson";
 
 const TEST_SIZE = 10;
-const PAGE_SIZE = 500;
-const MAX_ROWS = 10000;
-const MAX_RETRIES = 3;
-const BATCH_SIZE = 1000; // ✅ write rows in chunks
+const PAGE_SIZE = 500; // smaller page size to reduce timeout risk
+const MAX_ROWS = 10000; // cap at 10k rows
 
-// ArcGIS token (if dataset is private)
-const ARCGIS_TOKEN = process.env.ARCGIS_TOKEN || "";
-
+// =========================
+// GOOGLE SHEETS AUTH
+// =========================
 const auth = new google.auth.GoogleAuth({
   keyFile: "./service-account.json",
   scopes: ["https://www.googleapis.com/auth/spreadsheets"]
 });
+
 const sheets = google.sheets({ version: "v4", auth });
-
-// ✅ Only keep essential fields to reduce cell count
-const FIELDS_TO_KEEP = [
-  "TAXKEY",
-  "OWNERNAME1",
-  "OWNERADDR",
-  "MUNINAME",
-  "ADDRESS",
-  "ACRES",
-  "DESCRIPTION"
-];
-
-// =========================
-// Retry wrapper for fetch
-// =========================
-async function fetchWithRetry(url, options = {}, retries = MAX_RETRIES) {
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      const res = await fetch(url, options);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return await res.json();
-    } catch (err) {
-      console.warn(`⚠️ Fetch attempt ${attempt} failed: ${err.message}`);
-      if (attempt === retries) throw err;
-      await new Promise(r => setTimeout(r, 1000 * attempt)); // backoff
-    }
-  }
-}
 
 // =========================
 // ARC GIS FETCH FUNCTIONS
 // =========================
 async function getAvailableFields() {
-  const url = ARCGIS_TOKEN ? `${METADATA_URL}&token=${ARCGIS_TOKEN}` : METADATA_URL;
-  const meta = await fetchWithRetry(url);
-  if (!meta.fields) {
-    console.error("⚠️ No fields array found in metadata. Raw metadata:", meta);
-    return [];
-  }
+  const res = await fetch(METADATA_URL);
+  if (!res.ok) throw new Error(`Metadata HTTP ${res.status}`);
+  const meta = await res.json();
+
   const fields = meta.fields.map(f => f.name);
   console.log("📑 Available fields:", fields);
   return fields;
@@ -84,20 +51,23 @@ async function getAvailableFields() {
 async function fetchPage(offset, outFields, size) {
   const params = new URLSearchParams({
     where: "1=1",
-    outFields: outFields.length ? outFields.join(",") : "*",
+    outFields: outFields.join(","),
     returnGeometry: "false",
     f: "json",
     resultOffset: offset,
     resultRecordCount: size
   });
-  if (ARCGIS_TOKEN) params.append("token", ARCGIS_TOKEN);
-  return await fetchWithRetry(`${ENDPOINT}?${params}`);
+
+  const res = await fetch(`${ENDPOINT}?${params}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
 }
 
 // =========================
 // SHEET HELPERS
 // =========================
 async function clearSheet() {
+  console.log("🧹 Clearing entire sheet contents...");
   await sheets.spreadsheets.values.clear({
     spreadsheetId: SHEET_ID,
     range: SHEET_NAME
@@ -105,6 +75,7 @@ async function clearSheet() {
 }
 
 async function writeHeaders(headers) {
+  console.log("🧾 Writing sheet headers...");
   await sheets.spreadsheets.values.update({
     spreadsheetId: SHEET_ID,
     range: `${SHEET_NAME}!A1`,
@@ -113,12 +84,12 @@ async function writeHeaders(headers) {
   });
 }
 
-async function appendRowsBatch(rows) {
-  await sheets.spreadsheets.values.append({
+async function overwriteRows(rows) {
+  console.log("✍️ Writing rows (overwrite mode)...");
+  await sheets.spreadsheets.values.update({
     spreadsheetId: SHEET_ID,
     range: `${SHEET_NAME}!A2`,
     valueInputOption: "RAW",
-    insertDataOption: "INSERT_ROWS",
     requestBody: { values: rows }
   });
 }
@@ -128,10 +99,9 @@ async function appendRowsBatch(rows) {
 // =========================
 async function run() {
   const fields = await getAvailableFields();
-  const selectedFields = fields.filter(f => FIELDS_TO_KEEP.includes(f));
 
   console.log("🔎 Testing ArcGIS with 10 records...");
-  const testData = await fetchPage(0, selectedFields, TEST_SIZE);
+  const testData = await fetchPage(0, fields, TEST_SIZE);
   if (!testData.features?.length) {
     console.log("⚠️ Test query returned no features. Layer may be empty or restricted.");
     return;
@@ -140,6 +110,7 @@ async function run() {
   console.log("🔍 Sample record keys:", Object.keys(testData.features[0].attributes));
   console.log("🔍 Sample record values:", testData.features[0].attributes);
 
+  // Proceed to full fetch
   let offset = 0;
   let hasMore = true;
   let parcels = [];
@@ -147,16 +118,19 @@ async function run() {
   console.log("🔎 Fetching parcels from ArcGIS (bulk)...");
 
   while (hasMore && parcels.length < MAX_ROWS) {
-    const data = await fetchPage(offset, selectedFields, PAGE_SIZE);
+    const data = await fetchPage(offset, fields, PAGE_SIZE);
     if (!data.features?.length) {
       console.log("⚠️ No features returned at offset", offset);
       break;
     }
+
+    console.log(`➡️ Page fetched: ${data.features.length} records`);
     parcels.push(...data.features.map(f => f.attributes));
     offset += PAGE_SIZE;
     hasMore = data.exceededTransferLimit === true;
   }
 
+  // Cap at MAX_ROWS
   if (parcels.length > MAX_ROWS) {
     parcels = parcels.slice(0, MAX_ROWS);
   }
@@ -164,10 +138,10 @@ async function run() {
   console.log(`📦 Total parcels fetched: ${parcels.length}`);
 
   await clearSheet();
-  await writeHeaders(selectedFields);
+  await writeHeaders(fields);
 
   const rows = parcels.map(p =>
-    selectedFields.map(field => p[field] ?? "")
+    fields.map(field => p[field] ?? "")
   );
 
   if (!rows.length) {
@@ -175,16 +149,13 @@ async function run() {
     return;
   }
 
-  // ✅ Write in batches to avoid hitting cell limits
-  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
-    const batch = rows.slice(i, i + BATCH_SIZE);
-    await appendRowsBatch(batch);
-    console.log(`✅ Appended batch ${i / BATCH_SIZE + 1} (${batch.length} rows)`);
-  }
-
-  console.log(`✅ Wrote ${rows.length} rows to Google Sheets in batches`);
+  await overwriteRows(rows);
+  console.log(`✅ Wrote ${rows.length} rows to Google Sheets (overwrite mode)`);
 }
 
+// =========================
+// RUN
+// =========================
 run().catch(err => {
   console.error("❌ Error:", err);
   process.exit(1);
