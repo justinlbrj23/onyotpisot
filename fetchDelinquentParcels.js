@@ -23,7 +23,7 @@ const METADATA_URL =
 
 const TEST_SIZE = 10;
 const PAGE_SIZE = 500; // smaller page size to reduce timeout risk
-const MAX_ROWS = 10000; // cap at 10k rows
+const MAX_ROWS = 5000; // cap at 10k rows
 
 // =========================
 // GOOGLE SHEETS AUTH
