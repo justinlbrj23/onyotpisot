@@ -5,6 +5,8 @@
  * Limits parsed data to 5k rows
  * Retries failed fetches up to 3 times with backoff
  * ✅ Writes in batches to avoid exceeding Google Sheets cell limits
+ * 🚫 Excludes business owners (LLC, INC, etc.)
+ * 🚫 Excludes parcels not marked RESIDENTIAL under DESCRIPTION
  */
 
 import fetch from "node-fetch";
@@ -104,6 +106,25 @@ async function appendRowsBatch(rows) {
   });
 }
 
+// Filter helpers
+function isBusinessOwner(name) {
+  if (!name) return false;
+  const upper = name.toUpperCase();
+  return (
+    upper.includes("LLC") ||
+    upper.includes("INC") ||
+    upper.includes("CORP") ||
+    upper.includes("COMPANY") ||
+    upper.includes("CO.") ||
+    upper.includes("LTD")
+  );
+}
+
+function isResidential(description) {
+  if (!description) return false;
+  return description.toUpperCase().startsWith("RESIDENTIAL");
+}
+
 // Main
 async function run() {
   const fields = await getAvailableFields();
@@ -139,7 +160,14 @@ async function run() {
     parcels = parcels.slice(0, MAX_ROWS);
   }
 
-  console.log(`📦 Total parcels fetched: ${parcels.length}`);
+  // 🚫 Apply filters
+  const beforeFilterCount = parcels.length;
+  parcels = parcels.filter(
+    p => !isBusinessOwner(p.OWNER_NAME) && isResidential(p.DESCRIPTION)
+  );
+
+  console.log(`📦 Parcels before filter: ${beforeFilterCount}`);
+  console.log(`📦 Parcels after filter: ${parcels.length}`);
   console.log(`📊 Total cells to write: ${parcels.length * fields.length}`);
 
   await clearSheet();
