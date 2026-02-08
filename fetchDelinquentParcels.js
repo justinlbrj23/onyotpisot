@@ -20,7 +20,7 @@ const SERVICE_ROOT =
 
 const TEST_SIZE = 10;
 const PAGE_SIZE = 500;
-const MAX_ROWS = 10000;
+const MAX_ROWS = 5000;
 const MAX_RETRIES = 3;
 
 // ArcGIS token (if dataset is private)
