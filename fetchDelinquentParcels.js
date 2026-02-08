@@ -12,13 +12,13 @@
 import fetch from "node-fetch";
 import { google } from "googleapis";
 
-const SHEET_ID = "1Pqcu63nBmAjP1SOCWKHA1ZJFTnS808PuEYxnxQv9Xjk";
+const SHEET_ID = "1QWUiJ2ddikZdwx9NdEfResI1FZPGkpVY-nQ4G6I95Ug";
 const SHEET_NAME = "Sheet1";
 
 const SERVICE_ROOT =
-  "https://services2.arcgis.com/s1wgJQKbKJihhhaT/arcgis/rest/services/Milwaukee_County_Parcels_Property_Information_view/FeatureServer";
+  "https://lio.milwaukeecountywi.gov/arcgis/rest/services/Sheriff/SheriffSales/FeatureServer";
 
-const LAYER_ID = 58;
+const LAYER_ID = 0;
 
 const ENDPOINT = `${SERVICE_ROOT}/${LAYER_ID}/query`;
 const METADATA_URL = `${SERVICE_ROOT}/${LAYER_ID}?f=pjson`;
