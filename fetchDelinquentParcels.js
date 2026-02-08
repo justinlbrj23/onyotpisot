@@ -12,13 +12,13 @@
 import fetch from "node-fetch";
 import { google } from "googleapis";
 
-const SHEET_ID = "1QWUiJ2ddikZdwx9NdEfResI1FZPGkpVY-nQ4G6I95Ug";
+const SHEET_ID = "1Pqcu63nBmAjP1SOCWKHA1ZJFTnS808PuEYxnxQv9Xjk";
 const SHEET_NAME = "Sheet1";
 
 const SERVICE_ROOT =
-  "https://mclio.maps.arcgis.com/home/item.html?id=717690b31bd24bacadffbf3679f28a88";
+  "https://services2.arcgis.com/s1wgJQKbKJihhhaT/arcgis/rest/services/Milwaukee_County_Parcels_Property_Information_view/FeatureServer";
 
-const LAYER_ID = 0;
+const LAYER_ID = 58;
 
 const ENDPOINT = `${SERVICE_ROOT}/${LAYER_ID}/query`;
 const METADATA_URL = `${SERVICE_ROOT}/${LAYER_ID}?f=pjson`;
@@ -111,18 +111,18 @@ function isBusinessOwner(name) {
   if (!name) return false;
   const upper = name.toUpperCase();
   return (
-    upper.includes(" ") ||
-    upper.includes(" ") ||
-    upper.includes(" ") ||
-    upper.includes(" ") ||
-    upper.includes(" ") ||
-    upper.includes(" ")
+    upper.includes("LLC") ||
+    upper.includes("INC") ||
+    upper.includes("CORP") ||
+    upper.includes("COMPANY") ||
+    upper.includes("CO.") ||
+    upper.includes("LTD")
   );
 }
 
 function isResidential(description) {
   if (!description) return false;
-  return description.toUpperCase().startsWith(" ");
+  return description.toUpperCase().startsWith("RESIDENTIAL");
 }
 
 // Main
