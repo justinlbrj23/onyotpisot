@@ -1,27 +1,30 @@
 /**
- * Milwaukee County Parcels Property Information Scraper
- * Clears sheet, then logs ALL available fields directly into Google Sheets
- * Dynamically fetches available fields and uses them as sheet headers
- * Limits parsed data to 5k rows
- * Retries failed fetches up to 3 times with backoff
- * ✅ Writes in batches to avoid exceeding Google Sheets cell limits
- * 🚫 Excludes business owners (LLC, INC, etc.)
- * 🚫 Excludes parcels not marked RESIDENTIAL under DESCRIPTION
+ * Universal ArcGIS FeatureServer Scraper
+ * --------------------------------------
+ * ✔ Accepts ANY ArcGIS item data URL
+ * ✔ Auto‑discovers FeatureServer + Layer ID
+ * ✔ Dynamically fetches available fields
+ * ✔ Writes all attributes to Google Sheets
+ * ✔ Batches writes to avoid cell limits
+ * ✔ Retries failed fetches with backoff
  */
 
 import fetch from "node-fetch";
 import { google } from "googleapis";
 
-const SHEET_ID = "1Pqcu63nBmAjP1SOCWKHA1ZJFTnS808PuEYxnxQv9Xjk";
+// --------------------------------------
+// CONFIG
+// --------------------------------------
+const SHEET_ID = "1woBGXySPNxQavq_3FMsNK4WnqhJ4w_Oh5Ui_05rzzL0";
 const SHEET_NAME = "Sheet1";
 
-const SERVICE_ROOT =
-  "https://services2.arcgis.com/s1wgJQKbKJihhhaT/arcgis/rest/services/Milwaukee_County_Parcels_Property_Information_view/FeatureServer";
+const ITEM_DATA_URL =
+  "https://www.arcgis.com/sharing/rest/content/items/240d1eab8fa44e5e8baf244fb1a15365/data";
 
-const LAYER_ID = 58;
-
-const ENDPOINT = `${SERVICE_ROOT}/${LAYER_ID}/query`;
-const METADATA_URL = `${SERVICE_ROOT}/${LAYER_ID}?f=pjson`;
+let SERVICE_ROOT = "";
+let LAYER_ID = 0;
+let ENDPOINT = "";
+let METADATA_URL = "";
 
 const TEST_SIZE = 10;
 const PAGE_SIZE = 500;
@@ -31,13 +34,18 @@ const BATCH_SIZE = 500;
 
 const ARCGIS_TOKEN = process.env.ARCGIS_TOKEN || "";
 
+// --------------------------------------
+// GOOGLE AUTH
+// --------------------------------------
 const auth = new google.auth.GoogleAuth({
   keyFile: "./service-account.json",
   scopes: ["https://www.googleapis.com/auth/spreadsheets"]
 });
 const sheets = google.sheets({ version: "v4", auth });
 
-// Retry wrapper
+// --------------------------------------
+// RETRY WRAPPER
+// --------------------------------------
 async function fetchWithRetry(url, options = {}, retries = MAX_RETRIES) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
@@ -52,20 +60,55 @@ async function fetchWithRetry(url, options = {}, retries = MAX_RETRIES) {
   }
 }
 
-// Get fields
+// --------------------------------------
+// DISCOVER FEATURESERVER FROM ITEM DATA
+// --------------------------------------
+async function resolveFeatureServer() {
+  const data = await fetchWithRetry(`${ITEM_DATA_URL}?f=json`);
+
+  // Case 1: Feature Collection
+  if (data.layers?.length && data.layers[0].url) {
+    SERVICE_ROOT = data.layers[0].url.replace(/\/\d+$/, "");
+    LAYER_ID = parseInt(data.layers[0].url.split("/").pop(), 10);
+  }
+
+  // Case 2: WebMap referencing external services
+  else if (data.operationalLayers?.length && data.operationalLayers[0].url) {
+    SERVICE_ROOT = data.operationalLayers[0].url.replace(/\/\d+$/, "");
+    LAYER_ID = parseInt(data.operationalLayers[0].url.split("/").pop(), 10);
+  }
+
+  else {
+    throw new Error("❌ Could not locate FeatureServer URL inside item data.");
+  }
+
+  ENDPOINT = `${SERVICE_ROOT}/${LAYER_ID}/query`;
+  METADATA_URL = `${SERVICE_ROOT}/${LAYER_ID}?f=pjson`;
+
+  console.log("🔗 Resolved FeatureServer:", SERVICE_ROOT);
+  console.log("🔢 Layer ID:", LAYER_ID);
+}
+
+// --------------------------------------
+// GET AVAILABLE FIELDS
+// --------------------------------------
 async function getAvailableFields() {
   const url = ARCGIS_TOKEN ? `${METADATA_URL}&token=${ARCGIS_TOKEN}` : METADATA_URL;
   const meta = await fetchWithRetry(url);
+
   if (!meta.fields) {
     console.error("⚠️ No fields array found in metadata. Raw metadata:", meta);
     return [];
   }
+
   const fields = meta.fields.map(f => f.name);
   console.log("📑 Available fields:", fields);
   return fields;
 }
 
-// Fetch page
+// --------------------------------------
+// FETCH PAGE
+// --------------------------------------
 async function fetchPage(offset, outFields, size) {
   const params = new URLSearchParams({
     where: "1=1",
@@ -75,11 +118,15 @@ async function fetchPage(offset, outFields, size) {
     resultOffset: offset,
     resultRecordCount: size
   });
+
   if (ARCGIS_TOKEN) params.append("token", ARCGIS_TOKEN);
+
   return await fetchWithRetry(`${ENDPOINT}?${params}`);
 }
 
-// Sheet helpers
+// --------------------------------------
+// SHEET HELPERS
+// --------------------------------------
 async function clearSheet() {
   await sheets.spreadsheets.values.clear({
     spreadsheetId: SHEET_ID,
@@ -106,31 +153,18 @@ async function appendRowsBatch(rows) {
   });
 }
 
-// Filter helpers
-function isBusinessOwner(name) {
-  if (!name) return false;
-  const upper = name.toUpperCase();
-  return (
-    upper.includes("LLC") ||
-    upper.includes("INC") ||
-    upper.includes("CORP") ||
-    upper.includes("COMPANY") ||
-    upper.includes("CO.") ||
-    upper.includes("LTD")
-  );
-}
-
-function isResidential(description) {
-  if (!description) return false;
-  return description.toUpperCase().startsWith("RESIDENTIAL");
-}
-
-// Main
+// --------------------------------------
+// MAIN
+// --------------------------------------
 async function run() {
+  console.log("🔎 Resolving FeatureServer from ArcGIS item...");
+  await resolveFeatureServer();
+
   const fields = await getAvailableFields();
 
   console.log("🔎 Testing ArcGIS with 10 records...");
   const testData = await fetchPage(0, fields, TEST_SIZE);
+
   if (!testData.features?.length) {
     console.log("⚠️ Test query returned no features.");
     return;
@@ -141,39 +175,35 @@ async function run() {
 
   let offset = 0;
   let hasMore = true;
-  let parcels = [];
+  let rowsRaw = [];
 
   console.log("🔎 Fetching parcels from ArcGIS (bulk)...");
 
-  while (hasMore && parcels.length < MAX_ROWS) {
+  while (hasMore && rowsRaw.length < MAX_ROWS) {
     const data = await fetchPage(offset, fields, PAGE_SIZE);
+
     if (!data.features?.length) {
       console.log("⚠️ No features returned at offset", offset);
       break;
     }
-    parcels.push(...data.features.map(f => f.attributes));
+
+    rowsRaw.push(...data.features.map(f => f.attributes));
+
     offset += PAGE_SIZE;
     hasMore = data.exceededTransferLimit === true;
   }
 
-  if (parcels.length > MAX_ROWS) {
-    parcels = parcels.slice(0, MAX_ROWS);
+  if (rowsRaw.length > MAX_ROWS) {
+    rowsRaw = rowsRaw.slice(0, MAX_ROWS);
   }
 
-  // 🚫 Apply filters
-  const beforeFilterCount = parcels.length;
-  parcels = parcels.filter(
-    p => !isBusinessOwner(p.OWNERNAME1) && isResidential(p.DESCRIPTION)
-  );
-
-  console.log(`📦 Parcels before filter: ${beforeFilterCount}`);
-  console.log(`📦 Parcels after filter: ${parcels.length}`);
-  console.log(`📊 Total cells to write: ${parcels.length * fields.length}`);
+  console.log(`📦 Total records: ${rowsRaw.length}`);
+  console.log(`📊 Total cells to write: ${rowsRaw.length * fields.length}`);
 
   await clearSheet();
   await writeHeaders(fields);
 
-  const rows = parcels.map(p => fields.map(field => p[field] ?? ""));
+  const rows = rowsRaw.map(p => fields.map(field => p[field] ?? ""));
 
   if (!rows.length) {
     console.log("✅ No rows to write");
@@ -189,6 +219,7 @@ async function run() {
   console.log(`✅ Wrote ${rows.length} rows to Google Sheets in batches`);
 }
 
+// --------------------------------------
 run().catch(err => {
   console.error("❌ Error:", err);
   process.exit(1);
