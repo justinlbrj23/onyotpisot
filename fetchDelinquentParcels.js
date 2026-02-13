@@ -4,10 +4,10 @@ import xlsx from "xlsx";
 // --------------------------------------
 // HELPERS
 // --------------------------------------
-function cleanValues(values) {
+function cleanColumnA(values) {
   return values
-    .flat(Infinity)                // flatten nested(v => (v || "").toString().trim())
-    .filter(v => v.length > 0);    // remove blanks
+    .map(row => (row[0] || "").toString().trim()) // only Column A
+    .filter(v => v.length > 0);                   // exclude blanks
 }
 
 function uniqueCount(values) {
@@ -25,17 +25,18 @@ function countExcel(filePath) {
 
   const wb = xlsx.readFile(filePath);
   let allValues = [];
+
   wb.SheetNames.forEach(name => {
     const ws = wb.Sheets[name];
     const data = xlsx.utils.sheet_to_json(ws, { header: 1 });
-    allValues.push(...cleanValues(data));
+    allValues.push(...cleanColumnA(data));
   });
 
   const rawCount = allValues.length;
   const unique = uniqueCount(allValues);
 
   console.log(
-    `📊 Excel ${filePath} → Raw: ${rawCount}, Unique: ${unique}, Duplicates removed: ${rawCount - unique}`
+    `📊 Excel ${filePath} → Raw Column A: ${rawCount}, Unique: ${unique}, Duplicates removed: ${rawCount - unique}`
   );
 
   return { file: filePath, raw: rawCount, unique };
@@ -55,7 +56,7 @@ async function run() {
     grandTotal += unique;
   }
 
-  console.log(`🎯 Grand Total Unique Count: ${grandTotal}`);
+  console.log(`🎯 Grand Total Unique Count (Column A): ${grandTotal}`);
 }
 
 run().catch(err => console.error("❌ Fatal Error:", err));
