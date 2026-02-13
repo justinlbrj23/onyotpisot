@@ -1,12 +1,11 @@
 /**
- * Universal ArcGIS Item Scraper
- * --------------------------------------
- * ✔ Accepts ANY ArcGIS item data URL
- * ✔ Auto‑discovers FeatureServer + Layer ID OR handles FeatureCollection
- * ✔ Dynamically fetches available fields
- * ✔ Writes all attributes to Google Sheets
- * ✔ Batches writes to avoid cell limits
- * ✔ Retries failed fetches with backoff
+ * Zillow Listing Scraper → Google Sheets
+ * ----------------------------------------
+ * ✔ Uses Zillow search API
+ * ✔ Handles pagination
+ * ✔ Extracts listing + agent + broker
+ * ✔ Deduplicates by zpid
+ * ✔ Prevents Google 10M overflow
  */
 
 import fetch from "node-fetch";
@@ -18,21 +17,12 @@ import { google } from "googleapis";
 const SHEET_ID = "1woBGXySPNxQavq_3FMsNK4WnqhJ4w_Oh5Ui_05rzzL0";
 const SHEET_NAME = "Sheet1";
 
-const ITEM_DATA_URL =
-  "https://www.arcgis.com/sharing/rest/content/items/240d1eab8fa44e5e8baf244fb1a15365/data";
+const STATE = "Florida"; // Change per run
+const MAX_PAGES = 20;
+const BATCH_SIZE = 200;
 
-let SERVICE_ROOT = "";
-let LAYER_ID = 0;
-let ENDPOINT = "";
-let METADATA_URL = "";
-
-const TEST_SIZE = 10;
-const PAGE_SIZE = 500;
-const MAX_ROWS = 5000;
-const MAX_RETRIES = 3;
-const BATCH_SIZE = 500;
-
-const ARCGIS_TOKEN = process.env.ARCGIS_TOKEN || "";
+const GOOGLE_CELL_LIMIT = 10000000;
+const SAFETY_BUFFER = 5000;
 
 // --------------------------------------
 // GOOGLE AUTH
@@ -44,85 +34,43 @@ const auth = new google.auth.GoogleAuth({
 const sheets = google.sheets({ version: "v4", auth });
 
 // --------------------------------------
-// RETRY WRAPPER
+// HEADERS (Mimic Real Browser)
 // --------------------------------------
-async function fetchWithRetry(url, options = {}, retries = MAX_RETRIES) {
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      const res = await fetch(url, options);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return await res.json();
-    } catch (err) {
-      console.warn(`⚠️ Fetch attempt ${attempt} failed: ${err.message}`);
-      if (attempt === retries) throw err;
-      await new Promise(r => setTimeout(r, 1000 * attempt));
-    }
-  }
+const HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+  "Accept": "application/json",
+  "Content-Type": "application/json"
+};
+
+// --------------------------------------
+// FETCH ZILLOW SEARCH PAGE
+// --------------------------------------
+async function fetchZillowPage(page = 1) {
+  const searchQueryState = {
+    pagination: { currentPage: page },
+    mapBounds: {},
+    regionSelection: [
+      {
+        regionName: STATE,
+        regionType: 2
+      }
+    ],
+    filterState: {},
+    isListVisible: true
+  };
+
+  const url = `https://www.zillow.com/search/GetSearchPageState.htm?searchQueryState=${encodeURIComponent(
+    JSON.stringify(searchQueryState)
+  )}&wants={"cat1":["listResults"]}&requestId=${page}`;
+
+  const res = await fetch(url, { headers: HEADERS });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return await res.json();
 }
 
 // --------------------------------------
-// DISCOVER FEATURESERVER OR FEATURECOLLECTION
-// --------------------------------------
-async function resolveArcGISItem() {
-  const data = await fetchWithRetry(`${ITEM_DATA_URL}?f=json`);
-
-  // Case 1: Feature Collection (embedded data, no external URL)
-  if (data.featureCollection?.layers?.length) {
-    console.log("📦 Item is a Feature Collection (embedded data).");
-    return { type: "featureCollection", layers: data.featureCollection.layers };
-  }
-
-  // Case 2: WebMap referencing external services
-  if (data.operationalLayers?.length && data.operationalLayers[0].url) {
-    SERVICE_ROOT = data.operationalLayers[0].url.replace(/\/\d+$/, "");
-    LAYER_ID = parseInt(data.operationalLayers[0].url.split("/").pop(), 10);
-    ENDPOINT = `${SERVICE_ROOT}/${LAYER_ID}/query`;
-    METADATA_URL = `${SERVICE_ROOT}/${LAYER_ID}?f=pjson`;
-    console.log("🔗 Resolved FeatureServer:", SERVICE_ROOT);
-    console.log("🔢 Layer ID:", LAYER_ID);
-    return { type: "featureServer" };
-  }
-
-  throw new Error("❌ Could not locate FeatureServer or FeatureCollection in item data.");
-}
-
-// --------------------------------------
-// GET AVAILABLE FIELDS (FeatureServer only)
-// --------------------------------------
-async function getAvailableFields() {
-  const url = ARCGIS_TOKEN ? `${METADATA_URL}&token=${ARCGIS_TOKEN}` : METADATA_URL;
-  const meta = await fetchWithRetry(url);
-
-  if (!meta.fields) {
-    console.error("⚠️ No fields array found in metadata. Raw metadata:", meta);
-    return [];
-  }
-
-  const fields = meta.fields.map(f => f.name);
-  console.log("📑 Available fields:", fields);
-  return fields;
-}
-
-// --------------------------------------
-// FETCH PAGE (FeatureServer only)
-// --------------------------------------
-async function fetchPage(offset, outFields, size) {
-  const params = new URLSearchParams({
-    where: "1=1",
-    outFields: outFields.length ? outFields.join(",") : "*",
-    returnGeometry: "false",
-    f: "json",
-    resultOffset: offset,
-    resultRecordCount: size
-  });
-
-  if (ARCGIS_TOKEN) params.append("token", ARCGIS_TOKEN);
-
-  return await fetchWithRetry(`${ENDPOINT}?${params}`);
-}
-
-// --------------------------------------
-// SHEET HELPERS
+// GOOGLE SHEET HELPERS
 // --------------------------------------
 async function clearSheet() {
   await sheets.spreadsheets.values.clear({
@@ -154,86 +102,76 @@ async function appendRowsBatch(rows) {
 // MAIN
 // --------------------------------------
 async function run() {
-  console.log("🔎 Resolving ArcGIS item...");
-  const info = await resolveArcGISItem();
+  console.log(`🔎 Scraping Zillow for ${STATE}`);
 
-  let fields = [];
-  let rowsRaw = [];
+  const listingsMap = new Map();
 
-  if (info.type === "featureServer") {
-    fields = await getAvailableFields();
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    console.log(`📄 Page ${page}`);
 
-    console.log("🔎 Testing ArcGIS with 10 records...");
-    const testData = await fetchPage(0, fields, TEST_SIZE);
+    const data = await fetchZillowPage(page);
 
-    if (!testData.features?.length) {
-      console.log("⚠️ Test query returned no features.");
-      return;
-    }
+    const results =
+      data?.cat1?.searchResults?.listResults || [];
 
-    console.log("🔍 Sample record keys:", Object.keys(testData.features[0].attributes));
-    console.log("🔍 Sample record values:", testData.features[0].attributes);
+    if (!results.length) break;
 
-    let offset = 0;
-    let hasMore = true;
+    for (const item of results) {
+      if (!item.zpid) continue;
 
-    console.log("🔎 Fetching features from ArcGIS (bulk)...");
-
-    while (hasMore && rowsRaw.length < MAX_ROWS) {
-      const data = await fetchPage(offset, fields, PAGE_SIZE);
-
-      if (!data.features?.length) {
-        console.log("⚠️ No features returned at offset", offset);
-        break;
-      }
-
-      rowsRaw.push(...data.features.map(f => f.attributes));
-
-      offset += PAGE_SIZE;
-      hasMore = data.exceededTransferLimit === true;
-    }
-
-    if (rowsRaw.length > MAX_ROWS) {
-      rowsRaw = rowsRaw.slice(0, MAX_ROWS);
+      listingsMap.set(item.zpid, {
+        zpid: item.zpid,
+        address: item.address,
+        city: item.city,
+        state: item.state,
+        price: item.price,
+        beds: item.beds,
+        baths: item.baths,
+        area: item.area,
+        detailUrl: `https://www.zillow.com${item.detailUrl}`,
+        brokerName: item.brokerName || "",
+        agentName: item.agentName || ""
+      });
     }
   }
 
-  else if (info.type === "featureCollection") {
-    const layer = info.layers[0];
-    if (!layer.featureSet?.features?.length) {
-      console.log("⚠️ No features found in FeatureCollection.");
-      return;
-    }
-    fields = Object.keys(layer.featureSet.features[0].attributes);
-    rowsRaw = layer.featureSet.features.map(f => f.attributes);
-    if (rowsRaw.length > MAX_ROWS) {
-      rowsRaw = rowsRaw.slice(0, MAX_ROWS);
-    }
-  }
+  const listings = Array.from(listingsMap.values());
 
-  console.log(`📦 Total records: ${rowsRaw.length}`);
-  console.log(`📊 Total cells to write: ${rowsRaw.length * fields.length}`);
-
-  await clearSheet();
-  await writeHeaders(fields);
-
-  const rows = rowsRaw.map(p => fields.map(field => p[field] ?? ""));
-
-  if (!rows.length) {
-    console.log("✅ No rows to write");
+  if (!listings.length) {
+    console.log("No listings found.");
     return;
   }
+
+  const headers = Object.keys(listings[0]);
+
+  // Prevent sheet overflow
+  const maxRowsAllowed = Math.floor(
+    (GOOGLE_CELL_LIMIT - SAFETY_BUFFER) / headers.length
+  );
+
+  const trimmed =
+    listings.length > maxRowsAllowed
+      ? listings.slice(0, maxRowsAllowed)
+      : listings;
+
+  console.log(`📦 Writing ${trimmed.length} listings`);
+
+  await clearSheet();
+  await writeHeaders(headers);
+
+  const rows = trimmed.map(obj =>
+    headers.map(h => obj[h] ?? "")
+  );
 
   for (let i = 0; i < rows.length; i += BATCH_SIZE) {
     const batch = rows.slice(i, i + BATCH_SIZE);
     await appendRowsBatch(batch);
-    console.log(`✅ Appended batch ${i / BATCH_SIZE + 1} (${batch.length} rows)`);
+    console.log(`✅ Batch ${i / BATCH_SIZE + 1}`);
   }
 
-  console.log(`✅ Wrote ${rows.length} rows to Google Sheets in batches`);
+  console.log("🎉 Done");
 }
 
-// --------------------------------------
 run().catch(err => {
   console.error("❌ Error:", err);
   process.exit(1);
