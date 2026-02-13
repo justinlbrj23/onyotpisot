@@ -1,8 +1,8 @@
 /**
- * Universal ArcGIS FeatureServer Scraper
+ * Universal ArcGIS Item Scraper
  * --------------------------------------
  * ✔ Accepts ANY ArcGIS item data URL
- * ✔ Auto‑discovers FeatureServer + Layer ID
+ * ✔ Auto‑discovers FeatureServer + Layer ID OR handles FeatureCollection
  * ✔ Dynamically fetches available fields
  * ✔ Writes all attributes to Google Sheets
  * ✔ Batches writes to avoid cell limits
@@ -61,36 +61,33 @@ async function fetchWithRetry(url, options = {}, retries = MAX_RETRIES) {
 }
 
 // --------------------------------------
-// DISCOVER FEATURESERVER FROM ITEM DATA
+// DISCOVER FEATURESERVER OR FEATURECOLLECTION
 // --------------------------------------
-async function resolveFeatureServer() {
+async function resolveArcGISItem() {
   const data = await fetchWithRetry(`${ITEM_DATA_URL}?f=json`);
 
-  // Case 1: Feature Collection
-  if (data.layers?.length && data.layers[0].url) {
-    SERVICE_ROOT = data.layers[0].url.replace(/\/\d+$/, "");
-    LAYER_ID = parseInt(data.layers[0].url.split("/").pop(), 10);
+  // Case 1: Feature Collection (embedded data, no external URL)
+  if (data.featureCollection?.layers?.length) {
+    console.log("📦 Item is a Feature Collection (embedded data).");
+    return { type: "featureCollection", layers: data.featureCollection.layers };
   }
 
   // Case 2: WebMap referencing external services
-  else if (data.operationalLayers?.length && data.operationalLayers[0].url) {
+  if (data.operationalLayers?.length && data.operationalLayers[0].url) {
     SERVICE_ROOT = data.operationalLayers[0].url.replace(/\/\d+$/, "");
     LAYER_ID = parseInt(data.operationalLayers[0].url.split("/").pop(), 10);
+    ENDPOINT = `${SERVICE_ROOT}/${LAYER_ID}/query`;
+    METADATA_URL = `${SERVICE_ROOT}/${LAYER_ID}?f=pjson`;
+    console.log("🔗 Resolved FeatureServer:", SERVICE_ROOT);
+    console.log("🔢 Layer ID:", LAYER_ID);
+    return { type: "featureServer" };
   }
 
-  else {
-    throw new Error("❌ Could not locate FeatureServer URL inside item data.");
-  }
-
-  ENDPOINT = `${SERVICE_ROOT}/${LAYER_ID}/query`;
-  METADATA_URL = `${SERVICE_ROOT}/${LAYER_ID}?f=pjson`;
-
-  console.log("🔗 Resolved FeatureServer:", SERVICE_ROOT);
-  console.log("🔢 Layer ID:", LAYER_ID);
+  throw new Error("❌ Could not locate FeatureServer or FeatureCollection in item data.");
 }
 
 // --------------------------------------
-// GET AVAILABLE FIELDS
+// GET AVAILABLE FIELDS (FeatureServer only)
 // --------------------------------------
 async function getAvailableFields() {
   const url = ARCGIS_TOKEN ? `${METADATA_URL}&token=${ARCGIS_TOKEN}` : METADATA_URL;
@@ -107,7 +104,7 @@ async function getAvailableFields() {
 }
 
 // --------------------------------------
-// FETCH PAGE
+// FETCH PAGE (FeatureServer only)
 // --------------------------------------
 async function fetchPage(offset, outFields, size) {
   const params = new URLSearchParams({
@@ -157,44 +154,61 @@ async function appendRowsBatch(rows) {
 // MAIN
 // --------------------------------------
 async function run() {
-  console.log("🔎 Resolving FeatureServer from ArcGIS item...");
-  await resolveFeatureServer();
+  console.log("🔎 Resolving ArcGIS item...");
+  const info = await resolveArcGISItem();
 
-  const fields = await getAvailableFields();
-
-  console.log("🔎 Testing ArcGIS with 10 records...");
-  const testData = await fetchPage(0, fields, TEST_SIZE);
-
-  if (!testData.features?.length) {
-    console.log("⚠️ Test query returned no features.");
-    return;
-  }
-
-  console.log("🔍 Sample record keys:", Object.keys(testData.features[0].attributes));
-  console.log("🔍 Sample record values:", testData.features[0].attributes);
-
-  let offset = 0;
-  let hasMore = true;
+  let fields = [];
   let rowsRaw = [];
 
-  console.log("🔎 Fetching parcels from ArcGIS (bulk)...");
+  if (info.type === "featureServer") {
+    fields = await getAvailableFields();
 
-  while (hasMore && rowsRaw.length < MAX_ROWS) {
-    const data = await fetchPage(offset, fields, PAGE_SIZE);
+    console.log("🔎 Testing ArcGIS with 10 records...");
+    const testData = await fetchPage(0, fields, TEST_SIZE);
 
-    if (!data.features?.length) {
-      console.log("⚠️ No features returned at offset", offset);
-      break;
+    if (!testData.features?.length) {
+      console.log("⚠️ Test query returned no features.");
+      return;
     }
 
-    rowsRaw.push(...data.features.map(f => f.attributes));
+    console.log("🔍 Sample record keys:", Object.keys(testData.features[0].attributes));
+    console.log("🔍 Sample record values:", testData.features[0].attributes);
 
-    offset += PAGE_SIZE;
-    hasMore = data.exceededTransferLimit === true;
+    let offset = 0;
+    let hasMore = true;
+
+    console.log("🔎 Fetching features from ArcGIS (bulk)...");
+
+    while (hasMore && rowsRaw.length < MAX_ROWS) {
+      const data = await fetchPage(offset, fields, PAGE_SIZE);
+
+      if (!data.features?.length) {
+        console.log("⚠️ No features returned at offset", offset);
+        break;
+      }
+
+      rowsRaw.push(...data.features.map(f => f.attributes));
+
+      offset += PAGE_SIZE;
+      hasMore = data.exceededTransferLimit === true;
+    }
+
+    if (rowsRaw.length > MAX_ROWS) {
+      rowsRaw = rowsRaw.slice(0, MAX_ROWS);
+    }
   }
 
-  if (rowsRaw.length > MAX_ROWS) {
-    rowsRaw = rowsRaw.slice(0, MAX_ROWS);
+  else if (info.type === "featureCollection") {
+    const layer = info.layers[0];
+    if (!layer.featureSet?.features?.length) {
+      console.log("⚠️ No features found in FeatureCollection.");
+      return;
+    }
+    fields = Object.keys(layer.featureSet.features[0].attributes);
+    rowsRaw = layer.featureSet.features.map(f => f.attributes);
+    if (rowsRaw.length > MAX_ROWS) {
+      rowsRaw = rowsRaw.slice(0, MAX_ROWS);
+    }
   }
 
   console.log(`📦 Total records: ${rowsRaw.length}`);
