@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "node organizer_headers_tssf.js",
-    "fetch:milwaukee": "node fetchDelinquentParcels.js",
+    "fetch:cashBuyers": "node fetchDelinquentParcels.js",
     "ocr": "node ocr_tesseract.cjs",
     "ocr:pdf": "node ocr_tesseract.cjs sample.pdf",
     "ocr:image": "node ocr_tesseract.cjs sample.png",
