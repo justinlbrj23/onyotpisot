@@ -166,66 +166,83 @@ async function searchPage(url, zipcode) {
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
 
     // =========================
-    // FETCH + ANALYZE INPUTS
+    // FETCH + ANALYZE STAGE
     // =========================
     console.log("📥 Fetching DOM to analyze inputs...");
     const html = await page.content();
     const $ = cheerio.load(html);
 
-    let targetSelector = null;
+    // Collect candidate inputs
+    const inputs = [];
     $('input').each((_, el) => {
-      const attrs = el.attribs || {};
+      inputs.push(el.attribs || {});
+    });
+    console.log("🔎 Candidate inputs:", inputs);
+
+    // Heuristic: pick the text input with id/name containing "search"
+    let targetSelector = null;
+    for (const attrs of inputs) {
       if (
         attrs.type === 'text' &&
         (attrs.id?.toLowerCase().includes('search') ||
          attrs.name?.toLowerCase().includes('search'))
       ) {
         targetSelector = attrs.id ? `#${attrs.id}` : `[name="${attrs.name}"]`;
+        break;
       }
-    });
+    }
 
     if (!targetSelector) {
       throw new Error("Could not auto-detect search input field");
     }
+
     console.log(`🎯 Using input selector: ${targetSelector}`);
 
+    // =========================
+    // INTERACTION STAGE
+    // =========================
     await page.waitForSelector(targetSelector, { timeout: 15000 });
 
-    // Clear and type ZIP
+    // Clear any existing text
     await page.evaluate(sel => {
       const input = document.querySelector(sel);
       if (input) input.value = '';
     }, targetSelector);
 
+    // Type ZIP code and press Enter
     await page.type(targetSelector, zipcode);
-
-    // Submit search and wait for navigation
-    await Promise.all([
-      page.keyboard.press('Enter'),
-      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 60000 })
-    ]);
+    await page.keyboard.press('Enter');
 
     // =========================
     // DETECT RESULTS CONTAINER
     // =========================
     console.log("📥 Fetching DOM to analyze results containers...");
-    const updatedHtml = await page.content();
-    const $$ = cheerio.load(updatedHtml);
+    const afterSearchHtml = await page.content();
+    const $$ = cheerio.load(afterSearchHtml);
 
-    let resultsSelector = null;
+    const divs = [];
     $$('div').each((_, el) => {
       const attrs = el.attribs || {};
+      if (attrs.id || attrs.class) divs.push(attrs);
+    });
+    console.log("🔎 Candidate result containers:", divs);
+
+    // Heuristic: pick a div with id/class containing "results"
+    let resultsSelector = null;
+    for (const attrs of divs) {
       if (
         (attrs.id && attrs.id.toLowerCase().includes('result')) ||
         (attrs.class && attrs.class.toLowerCase().includes('result'))
       ) {
         resultsSelector = attrs.id ? `#${attrs.id}` : `.${attrs.class.split(' ').join('.')}`;
+        break;
       }
-    });
+    }
 
     if (!resultsSelector) {
       throw new Error("Could not auto-detect results container");
     }
+
     console.log(`🎯 Using results selector: ${resultsSelector}`);
 
     await page.waitForSelector(resultsSelector, { timeout: 20000 });
@@ -233,8 +250,8 @@ async function searchPage(url, zipcode) {
     // =========================
     // PARSE RESULTS
     // =========================
-    const finalHtml = await page.content();
-    const $$$ = cheerio.load(finalHtml);
+    const updatedHtml = await page.content();
+    const $$$ = cheerio.load(updatedHtml);
 
     const results = [];
     $$(resultsSelector).find('.resultRow').each((_, el) => {
@@ -242,12 +259,6 @@ async function searchPage(url, zipcode) {
       const details = $$$($(el)).find('.resultDetails').text().trim();
       results.push({ name, details });
     });
-
-    // Debug fallback: if no rows found, log container HTML
-    if (results.length === 0) {
-      const containerHtml = $$(resultsSelector).html();
-      console.log("⚠️ No .resultRow elements found. Container HTML:", containerHtml?.slice(0, 500));
-    }
 
     console.log(`📦 Found ${results.length} results for ZIP ${zipcode}`);
     console.log('🧪 Sample:', results.slice(0, 5));
