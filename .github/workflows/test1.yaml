@@ -54,7 +54,9 @@ jobs:
             libnss3 \
             libxss1 \
             libappindicator3-1 \
-            libu2f-udev
+            libu2f-udev \
+            chromium-browser \
+            curl
 
 
       # --------------------------------------------------
@@ -122,6 +124,72 @@ jobs:
 
 
       # --------------------------------------------------
+      # Capture debug snapshot (headless Chrome + parse inputs)
+      # --------------------------------------------------
+
+      - name: Capture debug snapshot (headless)
+        env:
+          TARGET_URL: 'https://www.nmlsconsumeraccess.org/'
+        run: |
+          set -e
+
+          TS=$(date +%s)
+          HTML_FILE="debug-${TS}.html"
+          JSON_FILE="debug-${TS}-inputs.json"
+          META_FILE="debug-${TS}-meta.json"
+
+          echo "🔎 Capturing rendered DOM to ${HTML_FILE} using headless Chrome..."
+          # Use headless Chrome to render the page and dump the DOM
+          google-chrome-stable \
+            --headless \
+            --disable-gpu \
+            --no-sandbox \
+            --disable-dev-shm-usage \
+            --virtual-time-budget=15000 \
+            --run-all-compositor-stages-before-draw \
+            --dump-dom "$TARGET_URL" > "$HTML_FILE" || true
+
+          # If chrome failed or produced empty output, try chromium-browser as fallback
+          if [ ! -s "$HTML_FILE" ]; then
+            echo "⚠️ chrome dump failed or empty; trying chromium-browser..."
+            chromium-browser --headless --disable-gpu --no-sandbox --disable-dev-shm-usage --dump-dom "$TARGET_URL" > "$HTML_FILE" || true
+          fi
+
+          # Save a small metadata file
+          echo "{ \"captured_at\": $(date +%s), \"url\": \"$TARGET_URL\", \"html_file\": \"$HTML_FILE\" }" > "$META_FILE"
+
+          # Parse candidate inputs from the saved HTML using Node + cheerio
+          echo "🧩 Extracting input candidates to ${JSON_FILE}..."
+          node -e "
+            const fs = require('fs');
+            const cheerio = require('cheerio');
+            try {
+              const html = fs.readFileSync('$HTML_FILE','utf8');
+              const $ = cheerio.load(html);
+              const inputs = Array.from($('input')).map(i => {
+                const attribs = i.attribs || {};
+                return {
+                  id: attribs.id || null,
+                  name: attribs.name || null,
+                  type: attribs.type || null,
+                  placeholder: attribs.placeholder || null,
+                  class: attribs.class || null,
+                  value: attribs.value || null
+                };
+              });
+              const out = { url: '$TARGET_URL', captured_at: Date.now(), inputs };
+              fs.writeFileSync('$JSON_FILE', JSON.stringify(out, null, 2), 'utf8');
+              console.log('✅ wrote', '$JSON_FILE');
+            } catch (e) {
+              console.error('❌ parse failed', e && e.message);
+              fs.writeFileSync('$JSON_FILE', JSON.stringify({ error: String(e) }, null, 2), 'utf8');
+            }
+          "
+
+          echo "📦 Debug files: $HTML_FILE, $JSON_FILE, $META_FILE"
+
+
+      # --------------------------------------------------
       # Upload artifacts
       # --------------------------------------------------
 
@@ -136,6 +204,9 @@ jobs:
             raw-elements.json
             parsed-auctions.json
             errors.json
+            debug-*.html
+            debug-*-inputs.json
+            debug-*-meta.json
 
         continue-on-error: true
 
