@@ -57,10 +57,10 @@ jobs:
           "
 
       # --------------------------------------------------
-      # STEP 2 — Run webInspector.cjs (Sold-only)
+      # STEP 2 — Run nmls_elements.cjs
       # --------------------------------------------------
-      - name: Run webInspector.cjs
-        run: node webInspector.cjs
+      - name: Run nmls_elements.cjs
+        run: node nmls_elements.cjs
 
       # Save artifacts from webInspector
       - name: Upload inspector artifacts
