@@ -310,6 +310,7 @@ async function searchPage(url, zipcode) {
       await browser.close();
     }
   }
+}
 
 // =========================
 // FUNCTION: Append to Google Sheets (generic)
