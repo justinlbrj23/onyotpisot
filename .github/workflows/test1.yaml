@@ -196,18 +196,15 @@ jobs:
       - name: Upload inspector artifacts
         uses: actions/upload-artifact@v4
         with:
-
           name: inspector-artifacts
-
           path: |
-
             raw-elements.json
             parsed-auctions.json
             errors.json
             debug-*.html
             debug-*-inputs.json
             debug-*-meta.json
-
+            debug-*.jpg
         continue-on-error: true
 
 
