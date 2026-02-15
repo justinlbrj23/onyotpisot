@@ -22,7 +22,7 @@
     "googleapis": "^159.0.0",
     "puppeteer": "^22.0.0",
     "selenium-webdriver": "^4.23.0",
-    "undetected-chromedriver": "^1.0.0",
+    "undetected-chromedriver",
     "xlsx": "^0.18.5",
     "uuidv4": "^6.2.13",
     "node-fetch": "^2.7.0",
