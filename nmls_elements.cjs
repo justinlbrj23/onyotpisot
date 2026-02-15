@@ -1,7 +1,7 @@
 // Requires:
 // npm install selenium-webdriver undetected-chromedriver cheerio googleapis
 
-const { Builder, By } = require('selenium-webdriver');
+const { By } = require('selenium-webdriver');
 const chrome = require('selenium-webdriver/chrome');
 const uc = require('undetected-chromedriver');
 const cheerio = require('cheerio');
@@ -32,7 +32,7 @@ async function inspectPage(url) {
   let driver;
 
   try {
-    // Launch undetected Chrome
+    // Configure Chrome options
     const options = new chrome.Options();
     options.addArguments('--no-sandbox');
     options.addArguments('--disable-dev-shm-usage');
@@ -40,14 +40,15 @@ async function inspectPage(url) {
     options.addArguments('--disable-setuid-sandbox');
     options.addArguments('--window-size=1366,768');
 
-    driver = await uc.Builder()
+    // Launch undetected Chrome
+    driver = await new uc.Builder()
       .forBrowser('chrome')
       .setChromeOptions(options)
       .build();
 
     await driver.get(url);
 
-    // Wait for body element
+    // Wait for body element to ensure page is loaded
     await driver.findElement(By.css('body'));
 
     const html = await driver.getPageSource();
