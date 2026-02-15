@@ -23,7 +23,28 @@ jobs:
           node-version: 20
 
       # --------------------------------------------------
-      # Install dependencies
+      # Install Chrome & ChromeDriver
+      # --------------------------------------------------
+      - name: Install Chrome and ChromeDriver
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget unzip curl
+          # Install latest stable Google Chrome
+          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
+          # Verify Chrome installation
+          google-chrome --version
+          # Install matching ChromeDriver
+          CHROME_VERSION=$(google-chrome --version | awk '{print $3}')
+          MAJOR_VERSION=$(echo $CHROME_VERSION | cut -d. -f1)
+          DRIVER_VERSION=$(curl -s "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${MAJOR_VERSION}")
+          wget -q "https://chromedriver.storage.googleapis.com/${DRIVER_VERSION}/chromedriver_linux64.zip"
+          unzip chromedriver_linux64.zip
+          sudo mv chromedriver /usr/local/bin/
+          chromedriver --version
+
+      # --------------------------------------------------
+      # Install Node.js dependencies
       # --------------------------------------------------
       - name: Install dependencies
         run: |
@@ -32,8 +53,8 @@ jobs:
           else
             npm install
           fi
-          # Ensure stealth packages are present
-          npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis
+          # Explicitly install required packages
+          npm install selenium-webdriver undetected-chromedriver cheerio googleapis
 
       # --------------------------------------------------
       # Write RAW Service Account JSON
@@ -62,7 +83,9 @@ jobs:
       - name: Run nmls_elements.cjs
         run: node nmls_elements.cjs
 
+      # --------------------------------------------------
       # Save artifacts from webInspector
+      # --------------------------------------------------
       - name: Upload inspector artifacts
         uses: actions/upload-artifact@v4
         with:
