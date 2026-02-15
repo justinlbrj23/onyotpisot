@@ -162,9 +162,9 @@ async function getConnection() {
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
-      '--enable-javascript'
+      '--enable-javascript',
       '--disable-dev-shm-usage',
-      '--disable-blink-features=AutomationControlled'
+'--disable-blink-features=AutomationControlled'
     ],
     defaultViewport: null
   });
