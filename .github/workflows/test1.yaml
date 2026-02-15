@@ -1,4 +1,4 @@
-name: TDA Scraping Pipeline (Artifact Mode)
+name: Docket Scraping Pipeline (Artifact Mode)
 
 on:
   workflow_dispatch:
@@ -32,6 +32,8 @@ jobs:
           else
             npm install
           fi
+          # Ensure stealth packages are present
+          npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis
 
       # --------------------------------------------------
       # Write RAW Service Account JSON
@@ -57,11 +59,11 @@ jobs:
       # --------------------------------------------------
       # STEP 1 — Create TSSF Headers
       # --------------------------------------------------
-      - name: Run sheetHeaders.cjs
-        run: node sheetHeaders.cjs
+      - name: Run organizer_headers_tssf.cjs
+        run: node organizer_headers_tssf.cjs
 
       # --------------------------------------------------
-      # STEP 2 — Run webInspector.cjs (Page Intelligence)
+      # STEP 2 — Run webInspector.cjs (Sold-only)
       # --------------------------------------------------
       - name: Run webInspector.cjs
         run: node webInspector.cjs
@@ -77,13 +79,23 @@ jobs:
             errors.json
 
       # --------------------------------------------------
-      # STEP 3 — Run inspectWebpage.cjs (Recon Writer)
+      # STEP 3 — Run inspectWebpage.cjs (Recon only, not mapped)
       # --------------------------------------------------
       - name: Run inspectWebpage.cjs
         run: node inspectWebpage.cjs
 
+      # Save recon artifacts separately
+      - name: Upload recon artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: recon-artifacts
+          path: |
+            raw-elements.json
+            parsed-auctions.json
+            errors.json
+
       # --------------------------------------------------
-      # STEP 4 — Run mappingScraper.cjs (Final Mapping)
+      # STEP 4 — Run mappingScraper.cjs (Final Mapping, Sold-only)
       # --------------------------------------------------
       - name: Run mappingScraper.cjs
         run: node mappingScraper.cjs parsed-auctions.json
