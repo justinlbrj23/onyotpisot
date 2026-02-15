@@ -1,8 +1,9 @@
 // Requires:
-// npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis
+// npm install selenium-webdriver undetected-chromedriver cheerio googleapis
 
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const { Builder, By } = require('selenium-webdriver');
+const chrome = require('selenium-webdriver/chrome');
+const uc = require('undetected-chromedriver');
 const cheerio = require('cheerio');
 const { google } = require('googleapis');
 
@@ -28,40 +29,28 @@ const sheets = google.sheets({ version: 'v4', auth });
 // FUNCTION: Inspect Web Page
 // =========================
 async function inspectPage(url) {
-  let browser;
+  let driver;
 
   try {
-    puppeteer.use(StealthPlugin()); // mask automation fingerprints
+    // Launch undetected Chrome
+    const options = new chrome.Options();
+    options.addArguments('--no-sandbox');
+    options.addArguments('--disable-dev-shm-usage');
+    options.addArguments('--disable-blink-features=AutomationControlled');
+    options.addArguments('--disable-setuid-sandbox');
+    options.addArguments('--window-size=1366,768');
 
-    browser = await puppeteer.launch({
-      headless: 'new',
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled',
-      ],
-    });
+    driver = await uc.Builder()
+      .forBrowser('chrome')
+      .setChromeOptions(options)
+      .build();
 
-    const page = await browser.newPage();
-    page.setDefaultNavigationTimeout(120000);
+    await driver.get(url);
 
-    // Set realistic environment
-    await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
-      'AppleWebKit/537.36 (KHTML, like Gecko) ' +
-      'Chrome/122.0.0.0 Safari/537.36'
-    );
-    await page.setViewport({ width: 1366, height: 768 });
-    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+    // Wait for body element
+    await driver.findElement(By.css('body'));
 
-    // Navigate and let Cloudflare JS challenge resolve
-    await page.goto(url, { waitUntil: 'networkidle0', timeout: 120000 });
-
-    // Wait for body content after challenge
-    await page.waitForSelector('body', { timeout: 60000 });
-
-    const html = await page.content();
+    const html = await driver.getPageSource();
     const $ = cheerio.load(html);
 
     const elements = [];
@@ -81,8 +70,8 @@ async function inspectPage(url) {
     console.error('❌ Error during page inspection:', err);
     return [];
   } finally {
-    if (browser) {
-      await browser.close();
+    if (driver) {
+      await driver.quit();
     }
   }
 }
