@@ -1,5 +1,5 @@
 // Requires:
-// npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis
+// npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis
 
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
@@ -31,7 +31,7 @@ async function inspectPage(url) {
   let browser;
 
   try {
-    puppeteer.use(StealthPlugin()); // helps bypass Cloudflare bot detection
+    puppeteer.use(StealthPlugin()); // mask automation fingerprints
 
     browser = await puppeteer.launch({
       headless: 'new',
@@ -46,18 +46,19 @@ async function inspectPage(url) {
     const page = await browser.newPage();
     page.setDefaultNavigationTimeout(120000);
 
-    // Set a realistic user agent
+    // Set realistic environment
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
       'AppleWebKit/537.36 (KHTML, like Gecko) ' +
       'Chrome/122.0.0.0 Safari/537.36'
     );
+    await page.setViewport({ width: 1366, height: 768 });
+    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
 
-    await page.goto(url, {
-      waitUntil: 'domcontentloaded',
-      timeout: 120000,
-    });
+    // Navigate and let Cloudflare JS challenge resolve
+    await page.goto(url, { waitUntil: 'networkidle0', timeout: 120000 });
 
+    // Wait for body content after challenge
     await page.waitForSelector('body', { timeout: 60000 });
 
     const html = await page.content();
@@ -71,11 +72,7 @@ async function inspectPage(url) {
       const attrs = el.attribs || {};
 
       if (text) {
-        elements.push({
-          tag,
-          text,
-          attrs,
-        });
+        elements.push({ tag, text, attrs });
       }
     });
 
@@ -105,7 +102,6 @@ async function appendToSheet(results) {
     const attrString = Object.entries(r.attrs)
       .map(([k, v]) => `${k}=${v}`)
       .join('; ');
-
     return [timestamp, r.tag, r.text, attrString];
   });
 
