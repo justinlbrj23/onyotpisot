@@ -1,9 +1,12 @@
 // =========================
 // Requires:
-// npm install puppeteer-real-browser cheerio googleapis
+// npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis
 // =========================
 
-const { connect } = require('puppeteer-real-browser');
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+puppeteer.use(StealthPlugin());
+
 const cheerio = require('cheerio');
 const { google } = require('googleapis');
 const fs = require('fs').promises;
@@ -150,23 +153,40 @@ async function captureDebugSnapshot(page, tag = 'debug', opts = {}) {
 }
 
 // =========================
-// FUNCTION: Inspect Web Page
+// Browser Connection Helper
+// =========================
+
+async function getConnection() {
+  const browser = await puppeteer.launch({
+    headless: false,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-blink-features=AutomationControlled'
+    ],
+    defaultViewport: null
+  });
+  const page = await browser.newPage();
+
+  await page.setUserAgent(
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+    '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+  );
+  await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+
+  return { browser, page };
+}
+
+// =========================
+// Inspect Page
 // =========================
 
 async function inspectPage(url) {
   let browser;
   try {
-    const connection = await connect({
-      headless: false,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-      customConfig: {},
-      turnstile: true,
-      connectOption: {},
-      disableXvfb: false,
-    });
-
-    browser = connection.browser;
-    const page = connection.page;
+    const { browser: b, page } = await getConnection();
+    browser = b;
 
     console.log("🌐 Navigating...");
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
@@ -190,9 +210,7 @@ async function inspectPage(url) {
     console.error('❌ Error during page inspection:', err);
     return [];
   } finally {
-    if (browser) {
-      await browser.close();
-    }
+    if (browser) await browser.close();
   }
 }
 
