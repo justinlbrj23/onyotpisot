@@ -141,9 +141,8 @@ async function inspectPage(url) {
 }
 
 // =========================
-// FUNCTION: Perform Search (added)
+// FUNCTION: Perform Search (auto-detect input)
 // =========================
-
 async function searchPage(url, zipcode) {
   let browser;
   try {
@@ -166,24 +165,64 @@ async function searchPage(url, zipcode) {
     console.log("🌐 Navigating...");
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
 
-    // Wait for the search input field (adjust selector if needed)
-    await page.waitForSelector('#searchText', { timeout: 15000 });
-
-    // Type ZIP code and press Enter
-    await page.type('#searchText', zipcode);
-    await page.keyboard.press('Enter');
-
-    // Wait for results container to appear (adjust selector if needed)
-    await page.waitForSelector('#searchResults', { timeout: 20000 });
-
-    // Extract results HTML
+    // =========================
+    // FETCH + ANALYZE STAGE
+    // =========================
+    console.log("📥 Fetching DOM to analyze inputs...");
     const html = await page.content();
     const $ = cheerio.load(html);
 
+    // Find candidate input fields
+    const inputs = [];
+    $('input').each((_, el) => {
+      const attrs = el.attribs || {};
+      inputs.push(attrs);
+    });
+
+    console.log("🔎 Candidate inputs:", inputs);
+
+    // Heuristic: pick the input with placeholder mentioning search terms
+    let targetSelector = null;
+    for (const attrs of inputs) {
+      if (attrs.placeholder && attrs.placeholder.toLowerCase().includes('search')) {
+        if (attrs.id) targetSelector = `#${attrs.id}`;
+        else if (attrs.name) targetSelector = `[name="${attrs.name}"]`;
+        break;
+      }
+    }
+
+    if (!targetSelector) {
+      throw new Error("Could not auto-detect search input field");
+    }
+
+    console.log(`🎯 Using selector: ${targetSelector}`);
+
+    // =========================
+    // INTERACTION STAGE
+    // =========================
+    await page.waitForSelector(targetSelector, { timeout: 15000 });
+
+    // Clear any existing text
+    await page.evaluate(sel => {
+      const input = document.querySelector(sel);
+      if (input) input.value = '';
+    }, targetSelector);
+
+    // Type ZIP code and press Enter
+    await page.type(targetSelector, zipcode);
+    await page.keyboard.press('Enter');
+
+    // Wait for results container (adjust heuristics if needed)
+    await page.waitForSelector('#searchResults, #searchResultsContainer, .searchResults', { timeout: 20000 });
+
+    console.log("📥 Fetching updated page content...");
+    const updatedHtml = await page.content();
+    const $$ = cheerio.load(updatedHtml);
+
     const results = [];
-    $('#searchResults .resultRow').each((_, el) => {
-      const name = $(el).find('.resultName').text().trim();
-      const details = $(el).find('.resultDetails').text().trim();
+    $$('#searchResults .resultRow, #searchResultsContainer .resultRow, .searchResults .resultRow').each((_, el) => {
+      const name = $$(el).find('.resultName').text().trim();
+      const details = $$(el).find('.resultDetails').text().trim();
       results.push({ name, details });
     });
 
