@@ -1,161 +1,272 @@
-const fetch = require("node-fetch");
-const { google } = require("googleapis");
+// Requires:
+// npm install puppeteer-real-browser cheerio googleapis
 
+const { connect } = require('puppeteer-real-browser');
+const cheerio = require('cheerio');
+const { google } = require('googleapis');
+
+// =========================
 // CONFIG
-const SERVICE_ACCOUNT_FILE = "./service-account.json";
+// =========================
 
-const SPREADSHEET_ID =
-  "1CAEdjXisPmgAHmv3qo3y1LBYktQftLKHk-LK04_oKes";
+const SERVICE_ACCOUNT_FILE = './service-account.json';
 
-const SHEET_RANGE = "Sheet1!A:E";
+const SPREADSHEET_ID = '1CAEdjXisPmgAHmv3qo3y1LBYktQftLKHk-LK04_oKes';
+
+const SHEET_RANGE = 'Sheet1!A:D';
+
+const TARGET_URL = 'https://www.nmlsconsumeraccess.org/home';
 
 
+// =========================
 // GOOGLE AUTH
+// =========================
 
 const auth = new google.auth.GoogleAuth({
-
   keyFile: SERVICE_ACCOUNT_FILE,
-
-  scopes: [
-
-    "https://www.googleapis.com/auth/spreadsheets",
-
-  ],
-
+  scopes: ['https://www.googleapis.com/auth/spreadsheets'],
 });
 
 const sheets = google.sheets({
-
-  version: "v4",
-
+  version: 'v4',
   auth,
-
 });
 
 
-// FETCH NMLS DATA
+// =========================
+// FUNCTION: Inspect Web Page
+// =========================
 
-async function fetchNMLS() {
+async function inspectPage(url) {
 
-  const url =
-    "https://www.nmlsconsumeraccess.org/Home.aspx/SubSearch";
+  let browser;
 
-  const res = await fetch(url, {
+  try {
 
-    method: "POST",
+    const connection = await connect({
 
-    headers: {
+      headless: false,
 
-      "Content-Type":
-        "application/json; charset=UTF-8",
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+      ],
 
-      "X-Requested-With":
-        "XMLHttpRequest",
+      customConfig: {},
 
-    },
+      turnstile: true,
 
-    body: JSON.stringify({
+      connectOption: {},
 
-      searchText: "",
+      disableXvfb: false,
 
-      entityType: "INDIVIDUAL",
+    });
 
-      pageIndex: 1,
+    browser = connection.browser;
 
-      pageSize: 100,
+    const page = connection.page;
 
-    }),
 
-  });
+    console.log("🌐 Navigating...");
 
-  const json = await res.json();
+    await page.goto(url, {
 
-  return json.Results || [];
+      waitUntil: 'networkidle2',
+      timeout: 60000,
+
+    });
+
+
+    await page.waitForSelector('body');
+
+
+    const html = await page.content();
+
+
+    const $ = cheerio.load(html);
+
+
+    const elements = [];
+
+
+    $('*').each((_, el) => {
+
+      const tag = el.tagName;
+
+      const text = $(el).text().replace(/\s+/g, ' ').trim();
+
+      const attrs = el.attribs || {};
+
+
+      if (text) {
+
+        elements.push({
+
+          tag,
+
+          text,
+
+          attrs,
+
+        });
+
+      }
+
+    });
+
+
+    return elements;
+
+  }
+
+  catch (err) {
+
+    console.error('❌ Error during page inspection:', err);
+
+    return [];
+
+  }
+
+  finally {
+
+    if (browser) {
+
+      await browser.close();
+
+    }
+
+  }
 
 }
 
 
-// WRITE TO SHEETS
+// =========================
+// FUNCTION: Append to Google Sheets
+// =========================
 
-async function writeSheet(data) {
+async function appendToSheet(results) {
 
-  if (!data.length) {
+  if (!results.length) {
 
-    console.log("No results");
+    console.warn('⚠️ No data to write.');
 
     return;
 
   }
 
-  const timestamp =
-    new Date().toISOString();
 
-  const values = data.map(r => [
+  const timestamp = new Date().toISOString();
 
-    timestamp,
 
-    r.Name,
+  const values = results.map(r => {
 
-    r.NMLSNumber,
+    const attrString = Object.entries(r.attrs)
 
-    r.City,
+      .map(([k, v]) => `${k}=${v}`)
 
-    r.State,
+      .join('; ');
 
-  ]);
 
-  values.unshift([
+    return [
 
-    "Timestamp",
+      timestamp,
 
-    "Name",
+      r.tag,
 
-    "NMLS",
+      r.text,
 
-    "City",
+      attrString,
 
-    "State",
-
-  ]);
-
-  await sheets.spreadsheets.values.append({
-
-    spreadsheetId:
-      SPREADSHEET_ID,
-
-    range: SHEET_RANGE,
-
-    valueInputOption: "RAW",
-
-    requestBody: {
-
-      values,
-
-    },
+    ];
 
   });
 
-  console.log(
-    `✅ Wrote ${data.length} records`
-  );
+
+  try {
+
+    const existing = await sheets.spreadsheets.values.get({
+
+      spreadsheetId: SPREADSHEET_ID,
+
+      range: SHEET_RANGE,
+
+    });
+
+
+    if (!existing.data.values || existing.data.values.length === 0) {
+
+      values.unshift([
+
+        'Timestamp',
+
+        'Tag',
+
+        'Text',
+
+        'Attributes',
+
+      ]);
+
+    }
+
+
+    await sheets.spreadsheets.values.append({
+
+      spreadsheetId: SPREADSHEET_ID,
+
+      range: SHEET_RANGE,
+
+      valueInputOption: 'RAW',
+
+      insertDataOption: 'INSERT_ROWS',
+
+      requestBody: {
+
+        values,
+
+      },
+
+    });
+
+
+    console.log(`✅ Appended ${values.length} rows.`);
+
+  }
+
+  catch (err) {
+
+    console.error('❌ Sheets error:', err);
+
+  }
 
 }
 
 
+// =========================
 // MAIN
+// =========================
 
 (async () => {
 
-  console.log("Fetching NMLS...");
+  console.log('🔍 Inspecting webpage...');
 
-  const data =
-    await fetchNMLS();
 
-  console.log(
-    "Records:",
-    data.length
-  );
+  const results = await inspectPage(TARGET_URL);
 
-  await writeSheet(data);
+
+  console.log(`📦 Parsed: ${results.length}`);
+
+
+  console.log('🧪 Sample:', results.slice(0, 5));
+
+
+  console.log('📤 Writing to Sheets...');
+
+
+  await appendToSheet(results);
+
+
+  console.log('🏁 Done.');
 
 })();
