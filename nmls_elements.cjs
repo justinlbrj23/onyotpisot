@@ -48,7 +48,7 @@ async function searchPage(url, zipcode) {
     console.log("🌐 Navigating...");
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
 
-    // Wait for the search input field (adjust selector if needed)
+    // Wait for the search input field
     await page.waitForSelector('#searchText', { timeout: 15000 });
 
     // Type ZIP code and press Enter
@@ -56,14 +56,14 @@ async function searchPage(url, zipcode) {
     await page.keyboard.press('Enter');
 
     // Wait for results container to appear
-    await page.waitForSelector('.searchResults', { timeout: 20000 });
+    await page.waitForSelector('#searchResults', { timeout: 20000 });
 
     // Extract results HTML
     const html = await page.content();
     const $ = cheerio.load(html);
 
     const results = [];
-    $('.searchResults .resultRow').each((_, el) => {
+    $('#searchResults .resultRow').each((_, el) => {
       const name = $(el).find('.resultName').text().trim();
       const details = $(el).find('.resultDetails').text().trim();
       results.push({ name, details });
