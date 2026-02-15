@@ -1,4 +1,4 @@
-name: Docket Scraping Pipeline (Artifact Mode)
+name: NMLS Test Flow
 
 on:
   workflow_dispatch:
