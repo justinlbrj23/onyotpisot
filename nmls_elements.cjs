@@ -162,6 +162,7 @@ async function getConnection() {
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
+      '--enable-javascript'
       '--disable-dev-shm-usage',
       '--disable-blink-features=AutomationControlled'
     ],
