@@ -141,7 +141,7 @@ async function inspectPage(url) {
 }
 
 // =========================
-// FUNCTION: Perform Search (auto-detect input)
+// FUNCTION: Perform Search (auto-detect input & results)
 // =========================
 async function searchPage(url, zipcode) {
   let browser;
@@ -172,21 +172,22 @@ async function searchPage(url, zipcode) {
     const html = await page.content();
     const $ = cheerio.load(html);
 
-    // Find candidate input fields
+    // Collect candidate inputs
     const inputs = [];
     $('input').each((_, el) => {
-      const attrs = el.attribs || {};
-      inputs.push(attrs);
+      inputs.push(el.attribs || {});
     });
-
     console.log("🔎 Candidate inputs:", inputs);
 
-    // Heuristic: pick the input with placeholder mentioning search terms
+    // Heuristic: pick the text input with id/name containing "search"
     let targetSelector = null;
     for (const attrs of inputs) {
-      if (attrs.placeholder && attrs.placeholder.toLowerCase().includes('search')) {
-        if (attrs.id) targetSelector = `#${attrs.id}`;
-        else if (attrs.name) targetSelector = `[name="${attrs.name}"]`;
+      if (
+        attrs.type === 'text' &&
+        (attrs.id?.toLowerCase().includes('search') ||
+         attrs.name?.toLowerCase().includes('search'))
+      ) {
+        targetSelector = attrs.id ? `#${attrs.id}` : `[name="${attrs.name}"]`;
         break;
       }
     }
@@ -195,7 +196,7 @@ async function searchPage(url, zipcode) {
       throw new Error("Could not auto-detect search input field");
     }
 
-    console.log(`🎯 Using selector: ${targetSelector}`);
+    console.log(`🎯 Using input selector: ${targetSelector}`);
 
     // =========================
     // INTERACTION STAGE
@@ -212,17 +213,50 @@ async function searchPage(url, zipcode) {
     await page.type(targetSelector, zipcode);
     await page.keyboard.press('Enter');
 
-    // Wait for results container (adjust heuristics if needed)
-    await page.waitForSelector('#searchResults, #searchResultsContainer, .searchResults', { timeout: 20000 });
+    // =========================
+    // DETECT RESULTS CONTAINER
+    // =========================
+    console.log("📥 Fetching DOM to analyze results containers...");
+    const afterSearchHtml = await page.content();
+    const $$ = cheerio.load(afterSearchHtml);
 
-    console.log("📥 Fetching updated page content...");
+    const divs = [];
+    $$('div').each((_, el) => {
+      const attrs = el.attribs || {};
+      if (attrs.id || attrs.class) divs.push(attrs);
+    });
+    console.log("🔎 Candidate result containers:", divs);
+
+    // Heuristic: pick a div with id/class containing "results"
+    let resultsSelector = null;
+    for (const attrs of divs) {
+      if (
+        (attrs.id && attrs.id.toLowerCase().includes('result')) ||
+        (attrs.class && attrs.class.toLowerCase().includes('result'))
+      ) {
+        resultsSelector = attrs.id ? `#${attrs.id}` : `.${attrs.class.split(' ').join('.')}`;
+        break;
+      }
+    }
+
+    if (!resultsSelector) {
+      throw new Error("Could not auto-detect results container");
+    }
+
+    console.log(`🎯 Using results selector: ${resultsSelector}`);
+
+    await page.waitForSelector(resultsSelector, { timeout: 20000 });
+
+    // =========================
+    // PARSE RESULTS
+    // =========================
     const updatedHtml = await page.content();
-    const $$ = cheerio.load(updatedHtml);
+    const $$$ = cheerio.load(updatedHtml);
 
     const results = [];
-    $$('#searchResults .resultRow, #searchResultsContainer .resultRow, .searchResults .resultRow').each((_, el) => {
-      const name = $$(el).find('.resultName').text().trim();
-      const details = $$(el).find('.resultDetails').text().trim();
+    $$(resultsSelector).find('.resultRow').each((_, el) => {
+      const name = $$$($(el)).find('.resultName').text().trim();
+      const details = $$$($(el)).find('.resultDetails').text().trim();
       results.push({ name, details });
     });
 
