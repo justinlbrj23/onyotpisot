@@ -15,7 +15,7 @@ const SPREADSHEET_ID = '1CAEdjXisPmgAHmv3qo3y1LBYktQftLKHk-LK04_oKes';
 
 const SHEET_RANGE = 'Sheet1!A:D';
 
-const TARGET_URL = 'https://www.nmlsconsumeraccess.org/home';
+const TARGET_URL = 'https://www.nmlsconsumeraccess.org/';
 
 
 // =========================
