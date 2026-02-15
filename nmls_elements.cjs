@@ -1,7 +1,8 @@
 // Requires:
-// npm install puppeteer cheerio googleapis
+// npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis
 
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const cheerio = require('cheerio');
 const { google } = require('googleapis');
 
@@ -10,7 +11,7 @@ const { google } = require('googleapis');
 // =========================
 const SERVICE_ACCOUNT_FILE = './service-account.json';
 const SPREADSHEET_ID = '1CAEdjXisPmgAHmv3qo3y1LBYktQftLKHk-LK04_oKes';
-const SHEET_RANGE = 'Sheet1!A:D'; 
+const SHEET_RANGE = 'Sheet1!A:D';
 const TARGET_URL = 'https://www.nmlsconsumeraccess.org/';
 
 // =========================
@@ -30,17 +31,27 @@ async function inspectPage(url) {
   let browser;
 
   try {
+    puppeteer.use(StealthPlugin()); // helps bypass Cloudflare bot detection
+
     browser = await puppeteer.launch({
       headless: 'new',
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
+        '--disable-blink-features=AutomationControlled',
       ],
     });
 
     const page = await browser.newPage();
     page.setDefaultNavigationTimeout(120000);
+
+    // Set a realistic user agent
+    await page.setUserAgent(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
+      'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+      'Chrome/122.0.0.0 Safari/537.36'
+    );
 
     await page.goto(url, {
       waitUntil: 'domcontentloaded',
@@ -99,13 +110,11 @@ async function appendToSheet(results) {
   });
 
   try {
-    // Check if the sheet already has data
     const existing = await sheets.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
       range: SHEET_RANGE,
     });
 
-    // Add header row if sheet is empty
     if (!existing.data.values || existing.data.values.length === 0) {
       values.unshift(['Timestamp', 'Tag', 'Text', 'Attributes']);
     }
