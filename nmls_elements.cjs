@@ -152,6 +152,27 @@ async function captureDebugSnapshot(page, tag = 'debug', opts = {}) {
   }
 }
 
+async function detectCaptchaGate(page) {
+  const captchaBox = await page.$('input[type="text"]');
+  const termsCheckbox = await page.$('input[type="checkbox"]');
+  const continueBtn = await page.$('button, input[type="submit"]');
+
+  if (captchaBox && termsCheckbox && continueBtn) {
+    console.log("⚠️ CAPTCHA/Terms gate detected.");
+    await captureDebugSnapshot(page, 'captcha-gate', { fullPage: true });
+
+    console.log("⏸ Pausing for manual CAPTCHA solve...");
+    await page.waitForFunction(() => {
+      const btn = document.querySelector('button, input[type="submit"]');
+      return btn && btn.disabled === false;
+    }, { timeout: 300000 }); // wait up to 5 minutes
+
+    console.log("✅ CAPTCHA solved, continuing...");
+    return true;
+  }
+  return false;
+}
+
 // =========================
 // Browser Connection Helper
 // =========================
@@ -230,6 +251,24 @@ async function searchPage(url, zipcode) {
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
     await page.waitForSelector('body', { timeout: 15000 });
     await sleep(5);
+
+    // --- NEW: Detect CAPTCHA/Terms Gate ---
+    const captchaBox = await page.$('input[type="text"]');
+    const termsCheckbox = await page.$('input[type="checkbox"]');
+    const continueBtn = await page.$('button, input[type="submit"]');
+
+    if (captchaBox && termsCheckbox && continueBtn) {
+      console.log("⚠️ CAPTCHA/Terms gate detected.");
+      await captureDebugSnapshot(page, 'captcha-gate', { fullPage: true });
+
+      console.log("⏸ Pausing for manual CAPTCHA solve...");
+      await page.waitForFunction(() => {
+        const btn = document.querySelector('button, input[type="submit"]');
+        return btn && !btn.disabled;
+      }, { timeout: 300000 }); // wait up to 5 minutes
+
+      console.log("✅ CAPTCHA solved, continuing...");
+    }
 
     console.log("📥 Collecting input candidates...");
     const inputs = await page.evaluate(() => {
