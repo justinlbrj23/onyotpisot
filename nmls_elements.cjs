@@ -183,9 +183,8 @@ async function searchPage(url, zipcode) {
     await pressPromise;
 
     // Wait for either navigation or results container
-    let resultsAppeared = null;
     if (likelyResultsSelector) {
-      resultsAppeared = await page.waitForSelector(likelyResultsSelector, { timeout: 15000 }).catch(() => null);
+      await page.waitForSelector(likelyResultsSelector, { timeout: 15000 }).catch(() => null);
     } else {
       // fallback: wait a short time for dynamic content to render
       await Promise.race([navPromise, new Promise(res => setTimeout(res, 1200))]);
@@ -214,7 +213,8 @@ async function searchPage(url, zipcode) {
       if (containers.length > 0) {
         // parse first container with rows
         for (const c of containers) {
-          const rows = ArrayAll('.resultRow, li, tr, .row, .item'));
+          // FIXED: use Array.from on querySelectorAll (previously had a typo)
+          const rows = Array.from(c.querySelectorAll('.resultRow, li, tr, .row, .item'));
           if (rows.length === 0) {
             const text = c.innerText.trim();
             if (text) out.push({ name: text.split('\n')[0].trim(), details: text });
