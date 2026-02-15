@@ -37,6 +37,60 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Debug helpers: write HTML snapshot and metadata JSON
+const path = require('path');
+async function writeFileSafe(name, content) {
+  try {
+    await fs.writeFile(name, content, 'utf8');
+    console.log('📝 Wrote debug file:', name);
+  } catch (err) {
+    console.warn('⚠️ Failed to write debug file:', name, err);
+  }
+}
+
+async function captureDebugSnapshot(page, tag = 'debug') {
+  try {
+    const ts = Date.now();
+    // page.content may fail if context destroyed; guard with try/catch
+    let html = null;
+    try { html = await page.content(); } catch (e) { html = null; }
+
+    // collect candidate inputs and some page metadata inside the page context
+    let inputs = null;
+    try {
+      inputs = await page.evaluate(() => {
+        const arr = Array.from(document.querySelectorAll('input')).map(i => ({
+          id: i.id || null,
+          name: i.name || null,
+          type: i.type || null,
+          placeholder: i.placeholder || null,
+          class: i.className || null,
+          visible: i.offsetParent !== null,
+        }));
+        return {
+          url: location.href,
+          title: document.title,
+          inputs: arr,
+          timestamp: Date.now()
+        };
+      });
+    } catch (e) {
+      inputs = { error: 'evaluate failed', message: String(e) };
+    }
+
+    const htmlName = `${tag}-snapshot-${ts}.html`;
+    const jsonName = `${tag}-meta-${ts}.json`;
+
+    if (html) await writeFileSafe(htmlName, html);
+    await writeFileSafe(jsonName, JSON.stringify(inputs, null, 2));
+
+    return { htmlName: html ? htmlName : null, jsonName };
+  } catch (err) {
+    console.warn('⚠️ captureDebugSnapshot failed:', err);
+    return null;
+  }
+}
+
 // =========================
 // FUNCTION: Inspect Web Page
 // =========================
@@ -242,13 +296,20 @@ async function searchPage(url, zipcode) {
     return results;
   } catch (err) {
     console.error('❌ Error during search:', err);
+    try {
+      if (browser && browser.page) {
+        // connection.page is the live page object in your code
+        await captureDebugSnapshot(browser.page, 'search-error');
+      }
+    } catch (snapErr) {
+      console.warn('⚠️ Failed to capture debug snapshot:', snapErr);
+    }
     return [];
   } finally {
     if (browser) {
       await browser.close();
     }
   }
-}
 
 // =========================
 // FUNCTION: Append to Google Sheets (generic)
