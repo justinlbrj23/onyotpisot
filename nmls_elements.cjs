@@ -29,6 +29,65 @@ const sheets = google.sheets({
   auth,
 });
 
+// Fibonacci generator for delays
+function fibonacciDelays(n, base = 5) {
+  const seq = [base, base];
+  for (let i = 2; i < n; i++) {
+    seq[i] = seq[i - 1] + seq[i - 2];
+  }
+  return seq;
+}
+
+// Sleep helper
+function sleep(ms) {
+  return new Promise(res => setTimeout(res, ms));
+}
+
+async function humanLikeMoveAndClick(page, selector) {
+  const el = await page.$(selector);
+  if (!el) throw new Error("Target element not found");
+
+  const box = await el.boundingBox();
+  if (!box) throw new Error("Bounding box not available");
+
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height / 2;
+
+  // Move in small steps with jitter
+  for (let i = 0; i < 10; i++) {
+    const jitterX = x + (Math.random() - 0.5) * 5;
+    const jitterY = y + (Math.random() - 0.5) * 5;
+    await page.mouse.move(jitterX, jitterY, { steps: 3 });
+    await sleep(30 + Math.random() * 40);
+  }
+
+  await page.mouse.click(x, y, { delay: 100 + Math.random() * 50 });
+}
+
+async function humanLikeType(page, selector, text) {
+  const delays = fibonacciDelays(text.length, 7); // base delay ~7ms
+  for (let i = 0; i < text.length; i++) {
+    await page.type(selector, text[i], { delay: delays[i] || 34 });
+    await sleep(delays[i] || 34);
+  }
+}
+
+// Example usage inside your searchPage function
+console.log("🎯 Using input selector:", targetSelector);
+await page.waitForSelector(targetSelector, { timeout: 15000 });
+
+// Move cursor and click input
+await humanLikeMoveAndClick(page, targetSelector);
+await sleep(21); // Fibonacci interval
+
+console.log("⌨️ Typing ZIP with human-like delays...");
+await humanLikeType(page, targetSelector, zipcode);
+await sleep(34); // Fibonacci interval
+
+// Press Enter with a slight delay
+await sleep(55); // Fibonacci interval
+await page.keyboard.press('Enter', { delay: 120 });
+
 // =========================
 // Helper: sleep (replacement for page.waitForTimeout)
 // =========================
@@ -173,8 +232,53 @@ async function inspectPage(url) {
 }
 
 // =========================
-// FUNCTION: Perform Search (robust, race-free)
+// FUNCTION: Perform Search (robust, race-free, human-like)
 // =========================
+
+// Sleep helper
+function sleep(ms) {
+  return new Promise(res => setTimeout(res, ms));
+}
+
+// Fibonacci generator for delays
+function fibonacciDelays(n, base = 7) {
+  const seq = [base, base];
+  for (let i = 2; i < n; i++) {
+    seq[i] = seq[i - 1] + seq[i - 2];
+  }
+  return seq;
+}
+
+// Human-like mouse move and click
+async function humanLikeMoveAndClick(page, selector) {
+  const el = await page.$(selector);
+  if (!el) throw new Error("Target element not found");
+
+  const box = await el.boundingBox();
+  if (!box) throw new Error("Bounding box not available");
+
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height / 2;
+
+  // Move in small steps with jitter
+  for (let i = 0; i < 10; i++) {
+    const jitterX = x + (Math.random() - 0.5) * 5;
+    const jitterY = y + (Math.random() - 0.5) * 5;
+    await page.mouse.move(jitterX, jitterY, { steps: 3 });
+    await sleep(30 + Math.random() * 40);
+  }
+
+  await page.mouse.click(x, y, { delay: 100 + Math.random() * 50 });
+}
+
+// Human-like typing with Fibonacci delays
+async function humanLikeType(page, selector, text) {
+  const delays = fibonacciDelays(text.length, 7); // base delay ~7ms
+  for (let i = 0; i < text.length; i++) {
+    await page.type(selector, text[i], { delay: delays[i] || 34 });
+    await sleep(delays[i] || 34);
+  }
+}
 
 async function searchPage(url, zipcode) {
   let browser;
@@ -194,6 +298,7 @@ async function searchPage(url, zipcode) {
     console.log("🌐 Navigating...");
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
     await page.waitForSelector('body', { timeout: 15000 });
+    await sleep(5); // Fibonacci base interval
 
     console.log("📥 Collecting input candidates from live DOM...");
     const inputs = await page.evaluate(() => {
@@ -242,14 +347,19 @@ async function searchPage(url, zipcode) {
     console.log(`🎯 Using input selector: ${targetSelector}`);
     await page.waitForSelector(targetSelector, { timeout: 15000 });
 
-    // Clear and type the ZIP
+    // Clear and focus input
     await page.evaluate(sel => {
       const el = document.querySelector(sel);
       if (el) { el.value = ''; el.focus(); }
     }, targetSelector);
 
-    console.log("⌨️ Typing ZIP and submitting...");
-    await page.type(targetSelector, zipcode);
+    // Human-like move and click
+    await humanLikeMoveAndClick(page, targetSelector);
+    await sleep(8); // Fibonacci interval
+
+    console.log("⌨️ Typing ZIP with human-like delays...");
+    await humanLikeType(page, targetSelector, zipcode);
+    await sleep(13); // Fibonacci interval
 
     // Determine a likely results container selector (best-effort)
     const likelyResultsSelector = await page.evaluate(() => {
@@ -267,24 +377,21 @@ async function searchPage(url, zipcode) {
 
     // Submit and wait for either navigation or the results container to appear/refresh
     const navPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => null);
-    const pressPromise = page.keyboard.press('Enter');
-    await pressPromise;
+    await sleep(21); // Fibonacci interval
+    await page.keyboard.press('Enter', { delay: 120 });
 
     // Wait for either navigation or results container
     if (likelyResultsSelector) {
       await page.waitForSelector(likelyResultsSelector, { timeout: 15000 }).catch(() => null);
     } else {
-      // fallback: wait a short time for dynamic content to render
       await Promise.race([navPromise, new Promise(res => setTimeout(res, 1200))]);
     }
 
-    // Give the page a short moment to finish rendering dynamic results
-    await sleep(800);
+    await sleep(34); // Fibonacci interval
 
     // Extract results inside the page to avoid content() race conditions
     const results = await page.evaluate(() => {
       const out = [];
-      // Prefer containers that look like results
       const containers = Array.from(document.querySelectorAll('div, section, ul, table')).filter(c => {
         const id = (c.id || '').toLowerCase();
         const cls = (c.className || '').toLowerCase();
@@ -299,9 +406,7 @@ async function searchPage(url, zipcode) {
       };
 
       if (containers.length > 0) {
-        // parse first container with rows
         for (const c of containers) {
-          // FIXED: use Array.from on querySelectorAll (previously had a typo)
           const rows = Array.from(c.querySelectorAll('.resultRow, li, tr, .row, .item'));
           if (rows.length === 0) {
             const text = c.innerText.trim();
@@ -315,7 +420,6 @@ async function searchPage(url, zipcode) {
           if (out.length > 0) break;
         }
       } else {
-        // fallback: try to find list items that look like results
         const items = Array.from(document.querySelectorAll('li, .row, .item, tr')).slice(0, 200);
         for (const it of items) {
           const parsed = parseRow(it);
@@ -332,19 +436,11 @@ async function searchPage(url, zipcode) {
     console.error('❌ Error during search:', err);
     try {
       if (browser && browser.page) {
-        // connection.page is the live page object in your code
         await captureDebugSnapshot(browser.page, 'search-error');
       }
     } catch (snapErr) {
       console.warn('⚠️ Failed to capture debug snapshot:', snapErr);
     }
-    return [];
-  } finally {
-    if (browser) {
-      await browser.close();
-    }
-  }
-}
 
 // =========================
 // FUNCTION: Append to Google Sheets (generic)
