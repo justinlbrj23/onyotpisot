@@ -23,45 +23,17 @@ jobs:
           node-version: 20
 
       # --------------------------------------------------
-      # Install Chrome & ChromeDriver (with fallback)
-      # --------------------------------------------------
-      - name: Install Chrome and ChromeDriver
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y wget unzip curl
-          
-          # Install latest stable Google Chrome
-          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
-          google-chrome --version
-          
-          # Get Chrome major version
-          CHROME_VERSION=$(google-chrome --version | awk '{print $3}')
-          MAJOR_VERSION=$(echo $CHROME_VERSION | cut -d. -f1)
-          
-          # Try to fetch matching ChromeDriver version
-          DRIVER_VERSION=$(curl -s "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${MAJOR_VERSION}")
-          
-          if [[ "$DRIVER_VERSION" == *"<Error>"* || -z "$DRIVER_VERSION" ]]; then
-            echo "⚠️ No exact ChromeDriver release found for Chrome $CHROME_VERSION (major $MAJOR_VERSION). Falling back to latest available driver."
-            DRIVER_VERSION=$(curl -s "https://chromedriver.storage.googleapis.com/LATEST_RELEASE")
-          fi
-          
-          echo "Installing ChromeDriver version $DRIVER_VERSION for Chrome $CHROME_VERSION"
-          
-          wget -q "https://chromedriver.storage.googleapis.com/${DRIVER_VERSION}/chromedriver_linux64.zip"
-          unzip -o chromedriver_linux64.zip
-          sudo mv -f chromedriver /usr/local/bin/
-          sudo chmod +x /usr/local/bin/chromedriver
-          chromedriver --version
-
-      # --------------------------------------------------
-      # Install Node.js dependencies
+      # Install dependencies
       # --------------------------------------------------
       - name: Install dependencies
         run: |
-          # Always install required packages explicitly
-          npm install selenium-webdriver@^4.23.0 undetected-chromedriver@^0.4.0 cheerio@^1.0.0 googleapis@^131.0.0
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+          # Ensure stealth packages are present
+          npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis
 
       # --------------------------------------------------
       # Write RAW Service Account JSON
@@ -90,9 +62,7 @@ jobs:
       - name: Run nmls_elements.cjs
         run: node nmls_elements.cjs
 
-      # --------------------------------------------------
       # Save artifacts from webInspector
-      # --------------------------------------------------
       - name: Upload inspector artifacts
         uses: actions/upload-artifact@v4
         with:
