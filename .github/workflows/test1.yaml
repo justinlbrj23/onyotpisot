@@ -60,13 +60,8 @@ jobs:
       # --------------------------------------------------
       - name: Install dependencies
         run: |
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            npm install
-          fi
-          # Explicitly install required packages
-          npm install selenium-webdriver undetected-chromedriver cheerio googleapis
+          # Always install required packages explicitly
+          npm install selenium-webdriver@^4.23.0 undetected-chromedriver@^0.4.0 cheerio@^1.0.0 googleapis@^131.0.0
 
       # --------------------------------------------------
       # Write RAW Service Account JSON
