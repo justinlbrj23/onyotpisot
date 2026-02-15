@@ -72,21 +72,6 @@ async function humanLikeType(page, selector, text) {
   }
 }
 
-// Example usage inside your searchPage function
-console.log("🎯 Using input selector:", targetSelector);
-await page.waitForSelector(targetSelector, { timeout: 15000 });
-
-// Move cursor and click input
-await humanLikeMoveAndClick(page, targetSelector);
-await sleep(21); // Fibonacci interval
-
-console.log("⌨️ Typing ZIP with human-like delays...");
-await humanLikeType(page, targetSelector, zipcode);
-await sleep(34); // Fibonacci interval
-
-// Press Enter with a slight delay
-await sleep(55); // Fibonacci interval
-await page.keyboard.press('Enter', { delay: 120 });
 
 // =========================
 // Helper: sleep (replacement for page.waitForTimeout)
