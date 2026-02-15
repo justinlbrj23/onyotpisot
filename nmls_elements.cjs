@@ -24,7 +24,57 @@ const auth = new google.auth.GoogleAuth({
 const sheets = google.sheets({ version: 'v4', auth });
 
 // =========================
-// FUNCTION: Perform Search
+// FUNCTION: Inspect Web Page (original)
+// =========================
+async function inspectPage(url) {
+  let browser;
+  try {
+    const connection = await connect({
+      headless: false,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+      ],
+      customConfig: {},
+      turnstile: true,
+      connectOption: {},
+      disableXvfb: false,
+    });
+
+    browser = connection.browser;
+    const page = connection.page;
+
+    console.log("🌐 Navigating...");
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+    await page.waitForSelector('body');
+
+    const html = await page.content();
+    const $ = cheerio.load(html);
+
+    const elements = [];
+    $('*').each((_, el) => {
+      const tag = el.tagName;
+      const text = $(el).text().replace(/\s+/g, ' ').trim();
+      const attrs = el.attribs || {};
+      if (text) {
+        elements.push({ tag, text, attrs });
+      }
+    });
+
+    return elements;
+  } catch (err) {
+    console.error('❌ Error during page inspection:', err);
+    return [];
+  } finally {
+    if (browser) {
+      await browser.close();
+    }
+  }
+}
+
+// =========================
+// FUNCTION: Perform Search (new)
 // =========================
 async function searchPage(url, zipcode) {
   let browser;
@@ -93,7 +143,7 @@ async function appendToSheet(results) {
   }
 
   const timestamp = new Date().toISOString();
-  const values = results.map(r => [timestamp, r.name, r.details, '']);
+  const values = results.map(r => [timestamp, r.name || r.tag, r.details || r.text, r.attrs ? JSON.stringify(r.attrs) : '']);
 
   try {
     const existing = await sheets.spreadsheets.values.get({
@@ -102,7 +152,7 @@ async function appendToSheet(results) {
     });
 
     if (!existing.data.values || existing.data.values.length === 0) {
-      values.unshift(['Timestamp', 'Name', 'Details', 'Attributes']);
+      values.unshift(['Timestamp', 'Name/Tag', 'Details/Text', 'Attributes']);
     }
 
     await sheets.spreadsheets.values.append({
