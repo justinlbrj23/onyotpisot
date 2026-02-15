@@ -507,4 +507,5 @@ async function appendToSheet(results) {
   } catch (err) {
     console.error('❌ Fatal error in main:', err);
   }
+ }
 })();
