@@ -29,31 +29,30 @@ jobs:
 
 
       # --------------------------------------------------
-      # Install Chrome dependencies (REQUIRED for puppeteer-real-browser)
-      # --------------------------------------------------
+# Install Chrome dependencies
+# --------------------------------------------------
 
-      - name: Install Chrome dependencies
-        run: |
-          sudo apt-get update
+- name: Install Chrome dependencies
+  run: |
+    sudo apt-get update
 
-          sudo apt-get install -y \
-            google-chrome-stable \
-            xvfb \
-            fonts-liberation \
-            libatk-bridge2.0-0 \
-            libatk1.0-0 \
-            libgtk-3-0 \
-            libx11-xcb1 \
-            libxcomposite1 \
-            libxdamage1 \
-            libxrandr2 \
-            libgbm1 \
-            libasound2 \
-            libnss3 \
-            libxss1 \
-            libappindicator3-1 \
-            libu2f-udev
-
+    sudo apt-get install -y \
+      google-chrome-stable \
+      xvfb \
+      fonts-liberation \
+      libatk-bridge2.0-0 \
+      libatk1.0-0 \
+      libgtk-3-0 \
+      libx11-xcb1 \
+      libxcomposite1 \
+      libxdamage1 \
+      libxrandr2 \
+      libgbm1 \
+      libasound2t64 \
+      libnss3 \
+      libxss1 \
+      libappindicator3-1 \
+      libu2f-udev
 
       # --------------------------------------------------
       # Install Node dependencies
