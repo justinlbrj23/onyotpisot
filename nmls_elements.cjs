@@ -30,6 +30,14 @@ const sheets = google.sheets({
 });
 
 // =========================
+// Helper: sleep (replacement for page.waitForTimeout)
+// =========================
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// =========================
 // FUNCTION: Inspect Web Page
 // =========================
 
@@ -184,7 +192,7 @@ async function searchPage(url, zipcode) {
     }
 
     // Give the page a short moment to finish rendering dynamic results
-    await page.waitForTimeout(800);
+    await sleep(800);
 
     // Extract results inside the page to avoid content() race conditions
     const results = await page.evaluate(() => {
@@ -206,7 +214,7 @@ async function searchPage(url, zipcode) {
       if (containers.length > 0) {
         // parse first container with rows
         for (const c of containers) {
-          const rows = Array.from(c.querySelectorAll('.resultRow, li, tr, .row, .item'));
+          const rows = ArrayAll('.resultRow, li, tr, .row, .item'));
           if (rows.length === 0) {
             const text = c.innerText.trim();
             if (text) out.push({ name: text.split('\n')[0].trim(), details: text });
