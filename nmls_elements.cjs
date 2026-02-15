@@ -1,10 +1,13 @@
+// =========================
 // Requires:
 // npm install puppeteer-real-browser cheerio googleapis
+// =========================
 
 const { connect } = require('puppeteer-real-browser');
 const cheerio = require('cheerio');
 const { google } = require('googleapis');
 const fs = require('fs').promises;
+const path = require('path');
 
 // =========================
 // CONFIG
@@ -24,23 +27,22 @@ const auth = new google.auth.GoogleAuth({
   scopes: ['https://www.googleapis.com/auth/spreadsheets'],
 });
 
-const sheets = google.sheets({
-  version: 'v4',
-  auth,
-});
+const sheets = google.sheets({ version: 'v4', auth });
 
-// Fibonacci generator for delays
-function fibonacciDelays(n, base = 5) {
+// =========================
+// Helpers
+// =========================
+
+function sleep(ms) {
+  return new Promise(res => setTimeout(res, ms));
+}
+
+function fibonacciDelays(n, base = 7) {
   const seq = [base, base];
   for (let i = 2; i < n; i++) {
     seq[i] = seq[i - 1] + seq[i - 2];
   }
   return seq;
-}
-
-// Sleep helper
-function sleep(ms) {
-  return new Promise(res => setTimeout(res, ms));
 }
 
 async function humanLikeMoveAndClick(page, selector) {
@@ -53,7 +55,6 @@ async function humanLikeMoveAndClick(page, selector) {
   const x = box.x + box.width / 2;
   const y = box.y + box.height / 2;
 
-  // Move in small steps with jitter
   for (let i = 0; i < 10; i++) {
     const jitterX = x + (Math.random() - 0.5) * 5;
     const jitterY = y + (Math.random() - 0.5) * 5;
@@ -65,24 +66,12 @@ async function humanLikeMoveAndClick(page, selector) {
 }
 
 async function humanLikeType(page, selector, text) {
-  const delays = fibonacciDelays(text.length, 7); // base delay ~7ms
+  const delays = fibonacciDelays(text.length, 7);
   for (let i = 0; i < text.length; i++) {
     await page.type(selector, text[i], { delay: delays[i] || 34 });
     await sleep(delays[i] || 34);
   }
 }
-
-
-// =========================
-// Helper: sleep (replacement for page.waitForTimeout)
-// =========================
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-// Debug helpers: write HTML snapshot, metadata JSON, and JPEG screenshot
-const path = require('path');
 
 async function writeFileSafe(name, content, encoding = 'utf8') {
   try {
@@ -94,19 +83,16 @@ async function writeFileSafe(name, content, encoding = 'utf8') {
 }
 
 async function captureDebugSnapshot(page, tag = 'debug', opts = {}) {
-  // opts: { fullPage: boolean, quality: number, viewport: {width,height} }
   const ts = Date.now();
   const htmlName = `${tag}-snapshot-${ts}.html`;
   const jsonName = `${tag}-meta-${ts}.json`;
   const jpgName = `${tag}-screenshot-${ts}.jpg`;
 
   try {
-    // Optional: set viewport if provided
     if (opts.viewport && typeof page.setViewport === 'function') {
       await page.setViewport(opts.viewport).catch(() => null);
     }
 
-    // Try screenshot (jpeg)
     if (typeof page.screenshot === 'function') {
       const screenshotOptions = {
         path: jpgName,
@@ -118,15 +104,11 @@ async function captureDebugSnapshot(page, tag = 'debug', opts = {}) {
         console.warn('⚠️ Screenshot failed:', err && err.message);
         try { fs.unlinkSync(jpgName); } catch (e) { /* ignore */ }
       });
-    } else {
-      console.warn('⚠️ page.screenshot is not available on this page object');
     }
 
-    // Capture HTML if possible
     let html = null;
     try { html = await page.content(); } catch (e) { html = null; }
 
-    // Collect inputs and metadata
     let inputs = null;
     try {
       inputs = await page.evaluate(() => {
@@ -145,11 +127,9 @@ async function captureDebugSnapshot(page, tag = 'debug', opts = {}) {
       inputs = { error: 'evaluate failed', message: String(e) };
     }
 
-    // Write files
     if (html) await writeFileSafe(htmlName, html);
     await writeFileSafe(jsonName, JSON.stringify(inputs, null, 2));
 
-    // Confirm screenshot exists
     let jpgExists = false;
     try {
       const stat = await fs.stat(jpgName).catch(() => null);
@@ -220,51 +200,6 @@ async function inspectPage(url) {
 // FUNCTION: Perform Search (robust, race-free, human-like)
 // =========================
 
-// Sleep helper
-function sleep(ms) {
-  return new Promise(res => setTimeout(res, ms));
-}
-
-// Fibonacci generator for delays
-function fibonacciDelays(n, base = 7) {
-  const seq = [base, base];
-  for (let i = 2; i < n; i++) {
-    seq[i] = seq[i - 1] + seq[i - 2];
-  }
-  return seq;
-}
-
-// Human-like mouse move and click
-async function humanLikeMoveAndClick(page, selector) {
-  const el = await page.$(selector);
-  if (!el) throw new Error("Target element not found");
-
-  const box = await el.boundingBox();
-  if (!box) throw new Error("Bounding box not available");
-
-  const x = box.x + box.width / 2;
-  const y = box.y + box.height / 2;
-
-  // Move in small steps with jitter
-  for (let i = 0; i < 10; i++) {
-    const jitterX = x + (Math.random() - 0.5) * 5;
-    const jitterY = y + (Math.random() - 0.5) * 5;
-    await page.mouse.move(jitterX, jitterY, { steps: 3 });
-    await sleep(30 + Math.random() * 40);
-  }
-
-  await page.mouse.click(x, y, { delay: 100 + Math.random() * 50 });
-}
-
-// Human-like typing with Fibonacci delays
-async function humanLikeType(page, selector, text) {
-  const delays = fibonacciDelays(text.length, 7); // base delay ~7ms
-  for (let i = 0; i < text.length; i++) {
-    await page.type(selector, text[i], { delay: delays[i] || 34 });
-    await sleep(delays[i] || 34);
-  }
-}
-
 async function searchPage(url, zipcode) {
   let browser;
   try {
@@ -283,9 +218,9 @@ async function searchPage(url, zipcode) {
     console.log("🌐 Navigating...");
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
     await page.waitForSelector('body', { timeout: 15000 });
-    await sleep(5); // Fibonacci base interval
+    await sleep(5);
 
-    console.log("📥 Collecting input candidates from live DOM...");
+    console.log("📥 Collecting input candidates...");
     const inputs = await page.evaluate(() => {
       return Array.from(document.querySelectorAll('input')).map(i => ({
         id: i.id || null,
@@ -295,9 +230,7 @@ async function searchPage(url, zipcode) {
         class: i.className || null,
       }));
     });
-    console.log("🔎 Candidate inputs:", inputs);
 
-    // Heuristic: choose a text input with search/zip/postal in id/name/placeholder/class
     let targetSelector = null;
     for (const attrs of inputs) {
       const combined = `${attrs.id || ''} ${attrs.name || ''} ${attrs.placeholder || ''} ${attrs.class || ''}`.toLowerCase();
@@ -312,9 +245,10 @@ async function searchPage(url, zipcode) {
     }
 
     if (!targetSelector) {
-      // fallback: pick the first visible text input
       const fallback = await page.evaluate(() => {
-        const el = Array.from(document.querySelectorAll('input')).find(i => (i.type === 'text' || i.type === 'search' || !i.type) && i.offsetParent !== null);
+        const el = Array.from(document.querySelectorAll('input')).find(i =>
+          (i.type === 'text' || i.type === 'search' || !i.type) && i.offsetParent !== null
+        );
         if (!el) return null;
         if (el.id) return `#${el.id}`;
         if (el.name) return `[name="${el.name}"]`;
@@ -325,28 +259,23 @@ async function searchPage(url, zipcode) {
       targetSelector = fallback;
     }
 
-    if (!targetSelector) {
-      throw new Error("Could not auto-detect search input field");
-    }
+    if (!targetSelector) throw new Error("Could not auto-detect search input field");
 
     console.log(`🎯 Using input selector: ${targetSelector}`);
     await page.waitForSelector(targetSelector, { timeout: 15000 });
 
-    // Clear and focus input
     await page.evaluate(sel => {
       const el = document.querySelector(sel);
       if (el) { el.value = ''; el.focus(); }
     }, targetSelector);
 
-    // Human-like move and click
     await humanLikeMoveAndClick(page, targetSelector);
-    await sleep(8); // Fibonacci interval
+    await sleep(8);
 
     console.log("⌨️ Typing ZIP with human-like delays...");
     await humanLikeType(page, targetSelector, zipcode);
-    await sleep(13); // Fibonacci interval
+    await sleep(13);
 
-    // Determine a likely results container selector (best-effort)
     const likelyResultsSelector = await page.evaluate(() => {
       const candidates = Array.from(document.querySelectorAll('div, section, ul, table'));
       for (const c of candidates) {
@@ -360,21 +289,18 @@ async function searchPage(url, zipcode) {
       return null;
     });
 
-    // Submit and wait for either navigation or the results container to appear/refresh
     const navPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => null);
-    await sleep(21); // Fibonacci interval
+    await sleep(21);
     await page.keyboard.press('Enter', { delay: 120 });
 
-    // Wait for either navigation or results container
     if (likelyResultsSelector) {
       await page.waitForSelector(likelyResultsSelector, { timeout: 15000 }).catch(() => null);
     } else {
       await Promise.race([navPromise, new Promise(res => setTimeout(res, 1200))]);
     }
 
-    await sleep(34); // Fibonacci interval
+    await sleep(34);
 
-    // Extract results inside the page to avoid content() race conditions
     const results = await page.evaluate(() => {
       const out = [];
       const containers = Array.from(document.querySelectorAll('div, section, ul, table')).filter(c => {
@@ -426,9 +352,16 @@ async function searchPage(url, zipcode) {
     } catch (snapErr) {
       console.warn('⚠️ Failed to capture debug snapshot:', snapErr);
     }
+    return [];
+  } finally {
+    if (browser) {
+      await browser.close();
+    }
+  }
+}
 
 // =========================
-// FUNCTION: Append to Google Sheets (generic)
+// FUNCTION: Append to Google Sheets
 // =========================
 
 async function appendToSheet(results) {
@@ -438,10 +371,9 @@ async function appendToSheet(results) {
   }
 
   const timestamp = new Date().toISOString();
-
-  // Detect shape: if objects have attrs/tag/text use that; otherwise treat as name/details
   const first = results[0];
   let values;
+
   if (first && first.attrs && first.tag && first.text) {
     values = results.map(r => {
       const attrString = Object.entries(r.attrs).map(([k, v]) => `${k}=${v}`).join('; ');
@@ -450,7 +382,6 @@ async function appendToSheet(results) {
   } else if (first && (first.name || first.details)) {
     values = results.map(r => [timestamp, r.name || '', r.details || '']);
   } else {
-    // fallback: stringify
     values = results.map(r => [timestamp, JSON.stringify(r)]);
   }
 
@@ -461,7 +392,6 @@ async function appendToSheet(results) {
     });
 
     if (!existing.data.values || existing.data.values.length === 0) {
-      // Determine header based on shape
       const header = (first && first.attrs && first.tag && first.text)
         ? ['Timestamp', 'Tag', 'Text', 'Attributes']
         : (first && (first.name || first.details))
@@ -483,11 +413,11 @@ async function appendToSheet(results) {
     console.error('❌ Sheets error:', err);
   }
 }
-}
 
 // =========================
 // MAIN
 // =========================
+
 (async () => {
   try {
     console.log('🔍 Inspecting webpage...');
