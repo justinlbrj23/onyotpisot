@@ -32,8 +32,10 @@ jobs:
           else
             npm install
           fi
-          # Ensure stealth packages are present
+          # Ensure stealth and scraping packages are present
           npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis
+          # Explicitly install undetected-chromedriver at a valid version
+          npm install undetected-chromedriver@0.4.0 selenium-webdriver@^4.23.0
 
       # --------------------------------------------------
       # Write RAW Service Account JSON
@@ -62,7 +64,9 @@ jobs:
       - name: Run nmls_elements.cjs
         run: node nmls_elements.cjs
 
+      # --------------------------------------------------
       # Save artifacts from webInspector
+      # --------------------------------------------------
       - name: Upload inspector artifacts
         uses: actions/upload-artifact@v4
         with:
