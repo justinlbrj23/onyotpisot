@@ -37,25 +37,52 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Debug helpers: write HTML snapshot and metadata JSON
+// Debug helpers: write HTML snapshot, metadata JSON, and JPEG screenshot
 const path = require('path');
-async function writeFileSafe(name, content) {
+
+async function writeFileSafe(name, content, encoding = 'utf8') {
   try {
-    await fs.writeFile(name, content, 'utf8');
+    await fs.writeFile(name, content, encoding);
     console.log('📝 Wrote debug file:', name);
   } catch (err) {
     console.warn('⚠️ Failed to write debug file:', name, err);
   }
 }
 
-async function captureDebugSnapshot(page, tag = 'debug') {
+async function captureDebugSnapshot(page, tag = 'debug', opts = {}) {
+  // opts: { fullPage: boolean, quality: number, viewport: {width,height} }
+  const ts = Date.now();
+  const htmlName = `${tag}-snapshot-${ts}.html`;
+  const jsonName = `${tag}-meta-${ts}.json`;
+  const jpgName = `${tag}-screenshot-${ts}.jpg`;
+
   try {
-    const ts = Date.now();
-    // page.content may fail if context destroyed; guard with try/catch
+    // Optional: set viewport if provided
+    if (opts.viewport && typeof page.setViewport === 'function') {
+      await page.setViewport(opts.viewport).catch(() => null);
+    }
+
+    // Try screenshot (jpeg)
+    if (typeof page.screenshot === 'function') {
+      const screenshotOptions = {
+        path: jpgName,
+        type: 'jpeg',
+        quality: typeof opts.quality === 'number' ? Math.max(10, Math.min(100, opts.quality)) : 80,
+        fullPage: !!opts.fullPage,
+      };
+      await page.screenshot(screenshotOptions).catch(err => {
+        console.warn('⚠️ Screenshot failed:', err && err.message);
+        try { fs.unlinkSync(jpgName); } catch (e) { /* ignore */ }
+      });
+    } else {
+      console.warn('⚠️ page.screenshot is not available on this page object');
+    }
+
+    // Capture HTML if possible
     let html = null;
     try { html = await page.content(); } catch (e) { html = null; }
 
-    // collect candidate inputs and some page metadata inside the page context
+    // Collect inputs and metadata
     let inputs = null;
     try {
       inputs = await page.evaluate(() => {
@@ -66,28 +93,35 @@ async function captureDebugSnapshot(page, tag = 'debug') {
           placeholder: i.placeholder || null,
           class: i.className || null,
           visible: i.offsetParent !== null,
+          value: i.value || null
         }));
-        return {
-          url: location.href,
-          title: document.title,
-          inputs: arr,
-          timestamp: Date.now()
-        };
+        return { url: location.href, title: document.title, inputs: arr, timestamp: Date.now() };
       });
     } catch (e) {
       inputs = { error: 'evaluate failed', message: String(e) };
     }
 
-    const htmlName = `${tag}-snapshot-${ts}.html`;
-    const jsonName = `${tag}-meta-${ts}.json`;
-
+    // Write files
     if (html) await writeFileSafe(htmlName, html);
     await writeFileSafe(jsonName, JSON.stringify(inputs, null, 2));
 
-    return { htmlName: html ? htmlName : null, jsonName };
+    // Confirm screenshot exists
+    let jpgExists = false;
+    try {
+      const stat = await fs.stat(jpgName).catch(() => null);
+      jpgExists = !!stat && stat.size > 0;
+    } catch (e) { jpgExists = false; }
+
+    if (jpgExists) {
+      console.log('📸 Wrote screenshot:', jpgName);
+      return { htmlName: html ? htmlName : null, jsonName, jpgName };
+    } else {
+      console.warn('⚠️ No screenshot produced for', jpgName);
+      return { htmlName: html ? htmlName : null, jsonName, jpgName: null };
+    }
   } catch (err) {
     console.warn('⚠️ captureDebugSnapshot failed:', err);
-    return null;
+    return { htmlName: null, jsonName: null, jpgName: null };
   }
 }
 
