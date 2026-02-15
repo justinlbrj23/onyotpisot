@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
 
 jobs:
+
   tda_pipeline:
 
     runs-on: ubuntu-latest
@@ -29,30 +30,32 @@ jobs:
 
 
       # --------------------------------------------------
-# Install Chrome dependencies
-# --------------------------------------------------
+      # Install Chrome + dependencies (Ubuntu 24.04 compatible)
+      # --------------------------------------------------
 
-- name: Install Chrome dependencies
-  run: |
-    sudo apt-get update
+      - name: Install Chrome dependencies
+        run: |
 
-    sudo apt-get install -y \
-      google-chrome-stable \
-      xvfb \
-      fonts-liberation \
-      libatk-bridge2.0-0 \
-      libatk1.0-0 \
-      libgtk-3-0 \
-      libx11-xcb1 \
-      libxcomposite1 \
-      libxdamage1 \
-      libxrandr2 \
-      libgbm1 \
-      libasound2t64 \
-      libnss3 \
-      libxss1 \
-      libappindicator3-1 \
-      libu2f-udev
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            google-chrome-stable \
+            xvfb \
+            fonts-liberation \
+            libatk-bridge2.0-0 \
+            libatk1.0-0 \
+            libgtk-3-0 \
+            libx11-xcb1 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxrandr2 \
+            libgbm1 \
+            libasound2t64 \
+            libnss3 \
+            libxss1 \
+            libappindicator3-1 \
+            libu2f-udev
+
 
       # --------------------------------------------------
       # Install Node dependencies
@@ -60,6 +63,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+
           if [ -f package-lock.json ]; then
             npm ci
           else
@@ -73,6 +77,7 @@ jobs:
 
       - name: Write Service Account JSON
         run: |
+
           echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
 
 
@@ -82,25 +87,38 @@ jobs:
 
       - name: Validate service account JSON
         run: |
+
           node -e "
-            const fs = require('fs');
-            const j = JSON.parse(fs.readFileSync('service-account.json','utf8'));
+          const fs = require('fs');
 
-            if (!j.private_key || !j.client_email) {
-              throw new Error('Invalid service account JSON');
-            }
+          const j = JSON.parse(
+            fs.readFileSync('service-account.json','utf8')
+          );
 
-            console.log('Service account OK:', j.client_email);
+          if (!j.private_key || !j.client_email) {
+
+            throw new Error('Invalid service account JSON');
+
+          }
+
+          console.log(
+            'Service account OK:',
+            j.client_email
+          );
           "
 
 
       # --------------------------------------------------
-      # Run scraper
+      # Run scraper (virtual display required)
       # --------------------------------------------------
 
       - name: Run nmls_elements.cjs
         run: |
-          xvfb-run --auto-servernum node nmls_elements.cjs
+
+          xvfb-run \
+          --auto-servernum \
+          --server-args='-screen 0 1920x1080x24' \
+          node nmls_elements.cjs
 
 
       # --------------------------------------------------
@@ -110,11 +128,15 @@ jobs:
       - name: Upload inspector artifacts
         uses: actions/upload-artifact@v4
         with:
+
           name: inspector-artifacts
+
           path: |
+
             raw-elements.json
             parsed-auctions.json
             errors.json
+
         continue-on-error: true
 
 
@@ -124,4 +146,6 @@ jobs:
 
       - name: Cleanup secrets
         if: always()
-        run: rm -f service-account.json
+        run: |
+
+          rm -f service-account.json
