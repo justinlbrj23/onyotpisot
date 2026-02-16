@@ -11,95 +11,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js (with npm cache)
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
 
-      - name: Show Node / NPM versions and repo root
+      - name: Install dependencies
         run: |
-          node -v
-          npm -v
-          pwd
-          ls -la
-
-      - name: Restore npm cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-node-
-
-      - name: Ensure lockfile and install dependencies reproducibly
-        run: |
-          if [ ! -f package-lock.json ]; then
-            echo "No package-lock.json found — generating one (npm i --package-lock-only)"
-            npm i --package-lock-only --no-audit --no-fund
-          fi
-          echo "Installing dependencies with npm ci"
-          npm ci --no-audit --no-fund
-          # Ensure pdfjs-dist pinned version exists (idempotent)
-          if ! npm ls pdfjs-dist >/dev/null 2>&1; then
-            echo "Installing pinned pdfjs-dist@4.0.269"
-            npm install pdfjs-dist@4.0.269 --no-audit --no-fund
-          fi
-          # Ensure pdf-lib and pdf-parse are present
+          npm ci || npm install
           npm install pdf-lib pdf-parse --no-audit --no-fund
 
-      - name: List installed pdfjs-dist files (diagnostic)
-        run: |
-          echo "pdfjs-dist listing (if present):"
-          npm ls pdfjs-dist || true
-          if [ -d node_modules/pdfjs-dist ]; then
-            ls -la node_modules/pdfjs-dist | sed -n '1,200p'
-            ls -la node_modules/pdfjs-dist/legacy/build || true
-            ls -la node_modules/pdfjs-dist/build || true
-          else
-            echo "node_modules/pdfjs-dist not found"
-          fi
-
-      - name: Add diag script to workspace (if missing)
-        run: |
-          cat > diag-pdfjs.js <<'EOF'
-          const fs = require('fs');
-          const paths = [
-            'node_modules/pdfjs-dist/legacy/build/pdf.js',
-            'node_modules/pdfjs-dist/build/pdf.js',
-            'node_modules/pdfjs-dist/legacy/build/pdf.node.js',
-            'node_modules/pdfjs-dist/build/pdf'
-          ];
-          console.log('Checking file existence under node_modules/pdfjs-dist:');
-          paths.forEach(p => console.log(p, fs.existsSync(p) ? 'FOUND' : 'MISSING'));
-          console.log('\\nTrying require.resolve for common entries:');
-          ['pdfjs-dist/legacy/build/pdf.js','pdfjs-dist/build/pdf.js','pdfjs-dist/build/pdf'].forEach(p => {
-            try { console.log(p, '->', require.resolve(p)); } catch (e) { console.log(p, '-> not resolvable:', e.message); }
-          });
-          EOF
-          ls -la diag-pdfjs.js
-
-      - name: Run pdfjs diagnostics
-        run: |
-          node diag-pdfjs.js
-
-      - name: Try resolving common pdfjs-dist entry paths (diagnostic)
-        shell: bash
-        run: |
-          node -e "try{console.log('resolve legacy/build/pdf.js ->', require.resolve('pdfjs-dist/legacy/build/pdf.js'))}catch(e){console.error('legacy/build/pdf.js not resolvable:', e.message)}"
-          node -e "try{console.log('resolve build/pdf.js ->', require.resolve('pdfjs-dist/build/pdf.js'))}catch(e){console.error('build/pdf.js not resolvable:', e.message)}"
-          node -e "try{console.log('resolve build/pdf ->', require.resolve('pdfjs-dist/build/pdf'))}catch(e){console.error('build/pdf not resolvable:', e.message)}"
-
       - name: Run fillWorksheet.cjs
-        env:
-          NODE_OPTIONS: "--no-warnings"
         run: |
-          pwd
-          ls -la
           node fillWorksheet.cjs
 
-      - name: Upload artifacts (always)
-        if: always()
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: tssf-artifacts
@@ -107,5 +33,3 @@ jobs:
             filled_worksheet.pdf
             parsed-summary.txt
             parsed-summary.json
-            anchors-debug.json
-            diag-pdfjs.js
