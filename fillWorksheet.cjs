@@ -8,94 +8,46 @@
 const fs = require('fs');
 const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
 
-/**
- * Load pdf-parse via dynamic import so this file can remain CommonJS (.cjs).
- * Returns the callable pdfParse function (mod.default || mod).
- */
 async function loadPdfParse() {
-  try {
-    const mod = await import('pdf-parse');
-    return mod && (mod.default || mod);
-  } catch (err) {
-    // Re-throw with a clearer message for upstream handling
-    throw new Error(`dynamic import of pdf-parse failed: ${err && err.message ? err.message : err}`);
-  }
+  const mod = await import('pdf-parse');
+  return mod.default || mod;
 }
 
 function safeTrim(s) {
   return s ? String(s).trim() : '';
 }
 
-// Regex-based extraction tuned to your Summary / manual example
 function extractFromText(text) {
   const t = text || '';
-
   const find = (re) => {
     const m = t.match(re);
     return m ? safeTrim(m[1]) : '';
   };
 
   return {
-    deedHolders:
-      find(/DEED HOLDER(?:\(S\))?[\s\S]*?\n\s*([A-Z0-9 ,.\-]+(?:\n\s*[A-Z0-9 ,.\-]+)?)/i) ||
-      find(/DEED HOLDER(?:\(S\))?:\s*([^\n]+)/i),
-    deedBook:
-      find(/OR Book\s*([0-9A-Za-z\-]+)/i) ||
-      find(/BOOK AND PAGE#\s*\n\s*([A-Za-z0-9 \-]+)/i),
-    deedPage:
-      find(/Page(?: No\.|#|:)?\s*([0-9A-Za-z\-]+)/i) ||
-      find(/BOOK AND PAGE#\s*\n\s*[A-Za-z0-9 \-]+\s*([0-9]{3,})/i),
-    deedDate:
-      find(/DEED RECORDATION DATE\s*\n\s*([0-9\/\-]{6,20})/i) ||
-      find(/DEED RECORDATION DATE[:\s]*([0-9\/\-]{6,20})/i),
-    caseNo:
-      find(/FILE OR CASE NUMBER[^\n]*\n\s*([A-Z0-9\-]+)/i) ||
-      find(/CASE NUMBER[:\s]*([A-Z0-9\-]+)/i),
-    estimatedSurplus:
-      find(/ESTIMATED SURPLUS AMOUNT\s*\n\s*\$?\s*([0-9,\.]+)/i) ||
-      find(/ESTIMATED SURPLUS AMOUNT[:\s]*\$?\s*([0-9,\.]+)/i),
-    county:
-      find(/COUNTY\s*\n\s*([A-Za-z\-\s]+)/i) ||
-      find(/COUNTY[:\s]*([A-Za-z\-\s]+)/i),
-    state:
-      find(/STATE\s*\n\s*([A-Za-z\-\s]+)/i) ||
-      find(/STATE[:\s]*([A-Za-z\-\s]+)/i),
-    auctionDate:
-      find(/AUCTION DATE\s*\n\s*([A-Za-z0-9 ,]+)/i) ||
-      find(/AUCTION DATE[:\s]*([A-Za-z0-9 ,]+)/i),
-    salesPrice:
-      find(/SALES PRICE AT AUCTION\s*\n\s*\$?\s*([0-9,\.]+)/i) ||
-      find(/SALES PRICE AT AUCTION[:\s]*\$?\s*([0-9,\.]+)/i),
-    openingBid:
-      find(/FORECLOSING DEBT AMOUNT\s*\(OPENING BID\)\s*\n\s*\$?\s*([0-9,\.]+)/i) ||
-      find(/OPENING BID[:\s]*\$?\s*([0-9,\.]+)/i),
-    bidSource:
-      find(/WHERE DID YOU GET YOUR OPENING BID LIST FROM\?[^\n]*\n\s*([A-Za-z0-9\.\-]+)/i) ||
-      find(/WHERE DID YOU GET YOUR OPENING BID LIST FROM\?[:\s]*([^\n]+)/i),
-    foreclosingEntity:
-      find(/FORECLOSING ENTITY\s*\n\s*([A-Za-z0-9 ,\-]+)/i) ||
-      find(/FORECLOSING ENTITY[:\s]*([^\n]+)/i),
-    propertyAddressLine1:
-      find(/FORECLOSED PROPERTY ADDRESS:\s*\n\s*([0-9A-Za-z\-\.\s]+)/i) ||
-      find(/FORECLOSED PROPERTY ADDRESS[:\s]*([^\n]+)/i),
-    propertyAddressLine2:
-      find(/\n\s*(UNIT\s*[0-9A-Za-z\-]+)/i) ||
-      find(/UNIT\s*[0-9A-Za-z\-]+/i),
-    propertyCityStateZip:
-      find(/([A-Za-z ]+,\s*[A-Za-z]{2}\s*[0-9\-]{5,10})/i),
-    dateFileReviewed:
-      find(/DATE FILE REVIEWED\s*\n\s*([0-9\/\-]{6,20})/i) ||
-      find(/DATE FILE REVIEWED[:\s]*([0-9\/\-]{6,20})/i),
-    researcher:
-      find(/RESEARCHER\s*\n\s*([A-Za-z0-9\.\s]+)/i) ||
-      find(/RESEARCHER[:\s]*([^\n]+)/i)
+    deedHolders: find(/DEED HOLDER.*?\n\s*([^\n]+)/i),
+    deedBook: find(/OR Book\s*([0-9A-Za-z\-]+)/i),
+    deedPage: find(/Page.*?\s*([0-9]+)/i),
+    deedDate: find(/DEED RECORDATION DATE.*?\n\s*([0-9\/\-]+)/i),
+    caseNo: find(/Case No.*?\n\s*([A-Z0-9\-]+)/i),
+    estimatedSurplus: find(/ESTIMATED SURPLUS AMOUNT.*?\n\s*\$?([0-9,\.]+)/i),
+    county: find(/COUNTY.*?\n\s*([A-Za-z\- ]+)/i),
+    state: find(/STATE.*?\n\s*([A-Za-z\- ]+)/i),
+    auctionDate: find(/AUCTION DATE.*?\n\s*([A-Za-z0-9 ,]+)/i),
+    salesPrice: find(/SALES PRICE AT AUCTION.*?\n\s*\$?([0-9,\.]+)/i),
+    openingBid: find(/OPENING BID.*?\n\s*\$?([0-9,\.]+)/i),
+    bidSource: find(/WHERE DID YOU GET YOUR OPENING BID LIST FROM.*?\n\s*([^\n]+)/i),
+    foreclosingEntity: find(/FORECLOSING ENTITY.*?\n\s*([^\n]+)/i),
+    propertyAddressLine1: find(/FORECLOSED PROPERTY ADDRESS.*?\n\s*([^\n]+)/i),
+    propertyAddressLine2: find(/\n\s*(UNIT\s*[0-9A-Za-z\-]+)/i),
+    propertyCityStateZip: find(/([A-Za-z ]+,\s*[A-Z]{2}\s*[0-9\-]+)/i),
+    dateFileReviewed: find(/DATE FILE REVIEWED.*?\n\s*([0-9\/\-]+)/i),
+    researcher: find(/RESEARCHER.*?\n\s*([^\n]+)/i)
   };
 }
 
 async function parseSummaryPdf() {
-  // dynamic import ensures compatibility with CommonJS runtime
   const pdfParse = await loadPdfParse();
-  if (!pdfParse) throw new Error('pdf-parse not available after dynamic import');
   const buf = fs.readFileSync('Summary.pdf');
   const parsed = await pdfParse(buf);
   const text = parsed.text || '';
@@ -106,7 +58,6 @@ async function parseSummaryPdf() {
 }
 
 function fallback() {
-  // Exact manual values you provided
   return {
     extracted: {
       deedHolders: 'SALOMON COHEN SALMUN and RUTH BLANCA SMEKE DE COHEN',
@@ -134,42 +85,39 @@ function fallback() {
 
 async function fillPdf(values) {
   const template = 'worksheet_template_tssf.pdf';
-  if (!fs.existsSync(template)) throw new Error('Template worksheet_template_tssf.pdf not found in repo root');
-
   const bytes = fs.readFileSync(template);
   const pdfDoc = await PDFDocument.load(bytes);
   const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
-  const pages = pdfDoc.getPages();
-  const page1 = pages[0];
+  const page1 = pdfDoc.getPages()[0];
 
   const color = rgb(0, 0, 0);
   const size = 11;
 
-  // Page 1 coordinates tuned to match your manual fill (values only)
-  page1.drawText(values.deedHolders || '', { x: 200, y: 720, size, color, font: helvetica });
-  page1.drawText(values.deedBook || '', { x: 200, y: 700, size, color, font: helvetica });
+  // Coordinate map for Page 1 (tuned to blanks)
+  page1.drawText(values.deedHolders || '', { x: 220, y: 740, size, color, font: helvetica });
+  page1.drawText(values.deedDate || '', { x: 220, y: 720, size, color, font: helvetica });
+  page1.drawText(values.deedBook || '', { x: 220, y: 700, size, color, font: helvetica });
   page1.drawText(values.deedPage || '', { x: 320, y: 700, size, color, font: helvetica });
-  page1.drawText(values.deedDate || '', { x: 200, y: 682, size, color, font: helvetica });
 
-  page1.drawText(values.caseNo || '', { x: 200, y: 646, size, color, font: helvetica });
-  page1.drawText(values.estimatedSurplus || '', { x: 200, y: 626, size, color, font: helvetica });
+  page1.drawText(values.caseNo || '', { x: 220, y: 670, size, color, font: helvetica });
+  page1.drawText(values.estimatedSurplus || '', { x: 220, y: 650, size, color, font: helvetica });
 
-  page1.drawText(values.county || '', { x: 200, y: 606, size, color, font: helvetica });
-  page1.drawText(values.state || '', { x: 200, y: 586, size, color, font: helvetica });
+  page1.drawText(values.county || '', { x: 220, y: 630, size, color, font: helvetica });
+  page1.drawText(values.state || '', { x: 320, y: 630, size, color, font: helvetica });
 
-  page1.drawText(values.auctionDate || '', { x: 200, y: 566, size, color, font: helvetica });
-  page1.drawText(values.salesPrice || '', { x: 200, y: 546, size, color, font: helvetica });
-  page1.drawText(values.openingBid || '', { x: 200, y: 526, size, color, font: helvetica });
+  page1.drawText(values.auctionDate || '', { x: 220, y: 610, size, color, font: helvetica });
+  page1.drawText(values.salesPrice || '', { x: 220, y: 590, size, color, font: helvetica });
+  page1.drawText(values.openingBid || '', { x: 220, y: 570, size, color, font: helvetica });
 
-  page1.drawText(values.bidSource || '', { x: 200, y: 506, size, color, font: helvetica });
-  page1.drawText(values.foreclosingEntity || '', { x: 200, y: 486, size, color, font: helvetica });
+  page1.drawText(values.bidSource || '', { x: 220, y: 550, size, color, font: helvetica });
+  page1.drawText(values.foreclosingEntity || '', { x: 220, y: 530, size, color, font: helvetica });
 
-  page1.drawText(values.propertyAddressLine1 || '', { x: 200, y: 466, size, color, font: helvetica });
-  page1.drawText(values.propertyAddressLine2 || '', { x: 200, y: 450, size, color, font: helvetica });
-  page1.drawText(values.propertyCityStateZip || '', { x: 200, y: 434, size, color, font: helvetica });
+  page1.drawText(values.propertyAddressLine1 || '', { x: 220, y: 510, size, color, font: helvetica });
+  page1.drawText(values.propertyAddressLine2 || '', { x: 220, y: 495, size, color, font: helvetica });
+  page1.drawText(values.propertyCityStateZip || '', { x: 220, y: 480, size, color, font: helvetica });
 
-  page1.drawText(values.dateFileReviewed || '', { x: 200, y: 414, size, color, font: helvetica });
-  page1.drawText(values.researcher || '', { x: 200, y: 398, size, color, font: helvetica });
+  page1.drawText(values.dateFileReviewed || '', { x: 220, y: 460, size, color, font: helvetica });
+  page1.drawText(values.researcher || '', { x: 220, y: 440, size, color, font: helvetica });
 
   const out = 'filled_worksheet.pdf';
   const pdfBytes = await pdfDoc.save();
@@ -181,31 +129,21 @@ async function fillPdf(values) {
   try {
     let parsed;
     try {
-      // Only attempt parsing if Summary.pdf exists
-      if (fs.existsSync('Summary.pdf')) {
-        parsed = await parseSummaryPdf();
-        // If parser returned too few fields, use fallback
-        const nonEmpty = Object.values(parsed.extracted).filter(Boolean).length;
-        if (nonEmpty < 6) {
-          console.warn('Parsed too few fields; switching to manual fallback values');
-          parsed = fallback();
-          fs.writeFileSync('parsed-summary.json', JSON.stringify(parsed.extracted, null, 2), 'utf8');
-        }
-      } else {
-        throw new Error('Summary.pdf not found');
+      parsed = await parseSummaryPdf();
+      const nonEmpty = Object.values(parsed.extracted).filter(Boolean).length;
+      if (nonEmpty < 6) {
+        console.warn('Parsed too few fields; using fallback values');
+        parsed = fallback();
       }
     } catch (err) {
-      console.warn('Parsing failed or Summary.pdf missing; using manual fallback values:', err && err.message ? err.message : err);
+      console.warn('Parsing failed; using fallback values:', err.message);
       parsed = fallback();
-      // Ensure artifacts exist for debugging even when fallback is used
-      if (!fs.existsSync('parsed-summary.txt')) fs.writeFileSync('parsed-summary.txt', '', 'utf8');
-      fs.writeFileSync('parsed-summary.json', JSON.stringify(parsed.extracted, null, 2), 'utf8');
     }
 
     const outPath = await fillPdf(parsed.extracted);
     console.log('✅ Worksheet filled successfully:', outPath);
   } catch (err) {
-    console.error('❌ Fatal error:', err && err.message ? err.message : err);
+    console.error('❌ Fatal error:', err.message);
     process.exitCode = 1;
   }
 })();
