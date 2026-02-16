@@ -1,0 +1,57 @@
+name: TSSF Worksheet Automation
+
+on:
+  workflow_dispatch:
+
+jobs:
+
+  tssf_pipeline:
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # --------------------------------------------------
+      # Checkout repository
+      # --------------------------------------------------
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # --------------------------------------------------
+      # Setup Node.js
+      # --------------------------------------------------
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # --------------------------------------------------
+      # Install Node dependencies
+      # --------------------------------------------------
+
+      - name: Install dependencies
+        run: |
+          npm install pdf-lib pdf-parse
+
+      # --------------------------------------------------
+      # Run PDF automation script
+      # --------------------------------------------------
+
+      - name: Run fillWorksheet.js
+        run: |
+          node fillWorksheet.js
+
+      # --------------------------------------------------
+      # Upload filled worksheet and debug artifacts
+      # --------------------------------------------------
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tssf-artifacts
+          path: |
+            filled_worksheet.pdf
+            parsed-summary.txt
+            parsed-summary.json
