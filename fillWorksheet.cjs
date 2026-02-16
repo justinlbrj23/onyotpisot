@@ -1,4 +1,4 @@
-// fillWorksheet.js
+// fillWorksheet.cjs
 // Requires: npm install pdf-lib pdf-parse fs
 
 const fs = require("fs");
