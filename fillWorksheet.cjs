@@ -1,5 +1,5 @@
 // fillWorksheet.cjs
-// Node.js CommonJS script
+// Node.js CommonJS script (keeps CommonJS, uses dynamic import for pdf-parse)
 // Install: npm install pdf-lib pdf-parse fs
 //
 // Inputs (repo root): Summary.pdf (optional), worksheet_template_tssf.pdf (required)
@@ -8,13 +8,18 @@
 const fs = require('fs');
 const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
 
-// Normalize pdf-parse import for CommonJS
-let pdfParse = null;
-try {
-  pdfParse = require('pdf-parse');
-  if (typeof pdfParse !== 'function' && pdfParse.default) pdfParse = pdfParse.default;
-} catch (e) {
-  pdfParse = null;
+/**
+ * Load pdf-parse via dynamic import so this file can remain CommonJS (.cjs).
+ * Returns the callable pdfParse function (mod.default || mod).
+ */
+async function loadPdfParse() {
+  try {
+    const mod = await import('pdf-parse');
+    return mod && (mod.default || mod);
+  } catch (err) {
+    // Re-throw with a clearer message for upstream handling
+    throw new Error(`dynamic import of pdf-parse failed: ${err && err.message ? err.message : err}`);
+  }
 }
 
 function safeTrim(s) {
@@ -31,29 +36,66 @@ function extractFromText(text) {
   };
 
   return {
-    deedHolders: find(/DEED HOLDER(?:\(S\))?[\s\S]*?\n\s*([A-Z0-9 ,.\-]+(?:\n\s*[A-Z0-9 ,.\-]+)?)/i) || find(/DEED HOLDER(?:\(S\))?:\s*([^\n]+)/i),
-    deedBook: find(/OR Book\s*([0-9A-Za-z\-]+)/i) || find(/BOOK AND PAGE#\s*\n\s*([A-Za-z0-9 \-]+)/i),
-    deedPage: find(/Page(?: No\.|#|:)?\s*([0-9A-Za-z\-]+)/i) || find(/BOOK AND PAGE#\s*\n\s*[A-Za-z0-9 \-]+\s*([0-9]{3,})/i),
-    deedDate: find(/DEED RECORDATION DATE\s*\n\s*([0-9\/\-]{6,20})/i) || find(/DEED RECORDATION DATE[:\s]*([0-9\/\-]{6,20})/i),
-    caseNo: find(/FILE OR CASE NUMBER[^\n]*\n\s*([A-Z0-9\-]+)/i) || find(/CASE NUMBER[:\s]*([A-Z0-9\-]+)/i),
-    estimatedSurplus: find(/ESTIMATED SURPLUS AMOUNT\s*\n\s*\$?\s*([0-9,\.]+)/i) || find(/ESTIMATED SURPLUS AMOUNT[:\s]*\$?\s*([0-9,\.]+)/i),
-    county: find(/COUNTY\s*\n\s*([A-Za-z\-\s]+)/i) || find(/COUNTY[:\s]*([A-Za-z\-\s]+)/i),
-    state: find(/STATE\s*\n\s*([A-Za-z\-\s]+)/i) || find(/STATE[:\s]*([A-Za-z\-\s]+)/i),
-    auctionDate: find(/AUCTION DATE\s*\n\s*([A-Za-z0-9 ,]+)/i) || find(/AUCTION DATE[:\s]*([A-Za-z0-9 ,]+)/i),
-    salesPrice: find(/SALES PRICE AT AUCTION\s*\n\s*\$?\s*([0-9,\.]+)/i) || find(/SALES PRICE AT AUCTION[:\s]*\$?\s*([0-9,\.]+)/i),
-    openingBid: find(/FORECLOSING DEBT AMOUNT\s*\(OPENING BID\)\s*\n\s*\$?\s*([0-9,\.]+)/i) || find(/OPENING BID[:\s]*\$?\s*([0-9,\.]+)/i),
-    bidSource: find(/WHERE DID YOU GET YOUR OPENING BID LIST FROM\?[^\n]*\n\s*([A-Za-z0-9\.\-]+)/i) || find(/WHERE DID YOU GET YOUR OPENING BID LIST FROM\?[:\s]*([^\n]+)/i),
-    foreclosingEntity: find(/FORECLOSING ENTITY\s*\n\s*([A-Za-z0-9 ,\-]+)/i) || find(/FORECLOSING ENTITY[:\s]*([^\n]+)/i),
-    propertyAddressLine1: find(/FORECLOSED PROPERTY ADDRESS:\s*\n\s*([0-9A-Za-z\-\.\s]+)/i) || find(/FORECLOSED PROPERTY ADDRESS[:\s]*([^\n]+)/i),
-    propertyAddressLine2: find(/\n\s*(UNIT\s*[0-9A-Za-z\-]+)/i) || find(/UNIT\s*[0-9A-Za-z\-]+/i),
-    propertyCityStateZip: find(/([A-Za-z ]+,\s*[A-Za-z]{2}\s*[0-9\-]{5,10})/i),
-    dateFileReviewed: find(/DATE FILE REVIEWED\s*\n\s*([0-9\/\-]{6,20})/i) || find(/DATE FILE REVIEWED[:\s]*([0-9\/\-]{6,20})/i),
-    researcher: find(/RESEARCHER\s*\n\s*([A-Za-z0-9\.\s]+)/i) || find(/RESEARCHER[:\s]*([^\n]+)/i)
+    deedHolders:
+      find(/DEED HOLDER(?:\(S\))?[\s\S]*?\n\s*([A-Z0-9 ,.\-]+(?:\n\s*[A-Z0-9 ,.\-]+)?)/i) ||
+      find(/DEED HOLDER(?:\(S\))?:\s*([^\n]+)/i),
+    deedBook:
+      find(/OR Book\s*([0-9A-Za-z\-]+)/i) ||
+      find(/BOOK AND PAGE#\s*\n\s*([A-Za-z0-9 \-]+)/i),
+    deedPage:
+      find(/Page(?: No\.|#|:)?\s*([0-9A-Za-z\-]+)/i) ||
+      find(/BOOK AND PAGE#\s*\n\s*[A-Za-z0-9 \-]+\s*([0-9]{3,})/i),
+    deedDate:
+      find(/DEED RECORDATION DATE\s*\n\s*([0-9\/\-]{6,20})/i) ||
+      find(/DEED RECORDATION DATE[:\s]*([0-9\/\-]{6,20})/i),
+    caseNo:
+      find(/FILE OR CASE NUMBER[^\n]*\n\s*([A-Z0-9\-]+)/i) ||
+      find(/CASE NUMBER[:\s]*([A-Z0-9\-]+)/i),
+    estimatedSurplus:
+      find(/ESTIMATED SURPLUS AMOUNT\s*\n\s*\$?\s*([0-9,\.]+)/i) ||
+      find(/ESTIMATED SURPLUS AMOUNT[:\s]*\$?\s*([0-9,\.]+)/i),
+    county:
+      find(/COUNTY\s*\n\s*([A-Za-z\-\s]+)/i) ||
+      find(/COUNTY[:\s]*([A-Za-z\-\s]+)/i),
+    state:
+      find(/STATE\s*\n\s*([A-Za-z\-\s]+)/i) ||
+      find(/STATE[:\s]*([A-Za-z\-\s]+)/i),
+    auctionDate:
+      find(/AUCTION DATE\s*\n\s*([A-Za-z0-9 ,]+)/i) ||
+      find(/AUCTION DATE[:\s]*([A-Za-z0-9 ,]+)/i),
+    salesPrice:
+      find(/SALES PRICE AT AUCTION\s*\n\s*\$?\s*([0-9,\.]+)/i) ||
+      find(/SALES PRICE AT AUCTION[:\s]*\$?\s*([0-9,\.]+)/i),
+    openingBid:
+      find(/FORECLOSING DEBT AMOUNT\s*\(OPENING BID\)\s*\n\s*\$?\s*([0-9,\.]+)/i) ||
+      find(/OPENING BID[:\s]*\$?\s*([0-9,\.]+)/i),
+    bidSource:
+      find(/WHERE DID YOU GET YOUR OPENING BID LIST FROM\?[^\n]*\n\s*([A-Za-z0-9\.\-]+)/i) ||
+      find(/WHERE DID YOU GET YOUR OPENING BID LIST FROM\?[:\s]*([^\n]+)/i),
+    foreclosingEntity:
+      find(/FORECLOSING ENTITY\s*\n\s*([A-Za-z0-9 ,\-]+)/i) ||
+      find(/FORECLOSING ENTITY[:\s]*([^\n]+)/i),
+    propertyAddressLine1:
+      find(/FORECLOSED PROPERTY ADDRESS:\s*\n\s*([0-9A-Za-z\-\.\s]+)/i) ||
+      find(/FORECLOSED PROPERTY ADDRESS[:\s]*([^\n]+)/i),
+    propertyAddressLine2:
+      find(/\n\s*(UNIT\s*[0-9A-Za-z\-]+)/i) ||
+      find(/UNIT\s*[0-9A-Za-z\-]+/i),
+    propertyCityStateZip:
+      find(/([A-Za-z ]+,\s*[A-Za-z]{2}\s*[0-9\-]{5,10})/i),
+    dateFileReviewed:
+      find(/DATE FILE REVIEWED\s*\n\s*([0-9\/\-]{6,20})/i) ||
+      find(/DATE FILE REVIEWED[:\s]*([0-9\/\-]{6,20})/i),
+    researcher:
+      find(/RESEARCHER\s*\n\s*([A-Za-z0-9\.\s]+)/i) ||
+      find(/RESEARCHER[:\s]*([^\n]+)/i)
   };
 }
 
 async function parseSummaryPdf() {
-  if (!pdfParse) throw new Error('pdf-parse not available');
+  // dynamic import ensures compatibility with CommonJS runtime
+  const pdfParse = await loadPdfParse();
+  if (!pdfParse) throw new Error('pdf-parse not available after dynamic import');
   const buf = fs.readFileSync('Summary.pdf');
   const parsed = await pdfParse(buf);
   const text = parsed.text || '';
@@ -139,18 +181,24 @@ async function fillPdf(values) {
   try {
     let parsed;
     try {
-      parsed = await parseSummaryPdf();
-      // If parser returned too few fields, use fallback
-      const nonEmpty = Object.values(parsed.extracted).filter(Boolean).length;
-      if (nonEmpty < 6) {
-        console.warn('Parsed too few fields; switching to manual fallback values');
-        parsed = fallback();
-        fs.writeFileSync('parsed-summary.json', JSON.stringify(parsed.extracted, null, 2), 'utf8');
+      // Only attempt parsing if Summary.pdf exists
+      if (fs.existsSync('Summary.pdf')) {
+        parsed = await parseSummaryPdf();
+        // If parser returned too few fields, use fallback
+        const nonEmpty = Object.values(parsed.extracted).filter(Boolean).length;
+        if (nonEmpty < 6) {
+          console.warn('Parsed too few fields; switching to manual fallback values');
+          parsed = fallback();
+          fs.writeFileSync('parsed-summary.json', JSON.stringify(parsed.extracted, null, 2), 'utf8');
+        }
+      } else {
+        throw new Error('Summary.pdf not found');
       }
     } catch (err) {
-      console.warn('Parsing failed or Summary.pdf missing; using manual fallback values:', err.message);
+      console.warn('Parsing failed or Summary.pdf missing; using manual fallback values:', err && err.message ? err.message : err);
       parsed = fallback();
-      fs.writeFileSync('parsed-summary.txt', '', 'utf8');
+      // Ensure artifacts exist for debugging even when fallback is used
+      if (!fs.existsSync('parsed-summary.txt')) fs.writeFileSync('parsed-summary.txt', '', 'utf8');
       fs.writeFileSync('parsed-summary.json', JSON.stringify(parsed.extracted, null, 2), 'utf8');
     }
 
