@@ -39,9 +39,9 @@ jobs:
       # Run PDF automation script
       # --------------------------------------------------
 
-      - name: Run fillWorksheet.js
+      - name: Run fillWorksheet.cjs
         run: |
-          node fillWorksheet.js
+          node fillWorksheet.cjs
 
       # --------------------------------------------------
       # Upload filled worksheet and debug artifacts
