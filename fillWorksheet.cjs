@@ -14,9 +14,46 @@ async function loadPdfParse() {
   const mod = await import('pdf-parse');
   return mod.default || mod;
 }
+// resilient loader for pdfjs-dist (CommonJS script)
 async function loadPdfJs() {
-  const mod = await import('pdfjs-dist/legacy/build/pdf.js');
-  return mod;
+  const tryImport = async (p) => {
+    try {
+      const mod = await import(p);
+      return mod.default || mod;
+    } catch (e) {
+      return null;
+    }
+  };
+
+  // Try common ESM import paths (some versions expose different paths)
+  const candidates = [
+    'pdfjs-dist/legacy/build/pdf.js',
+    'pdfjs-dist/build/pdf.js',
+    'pdfjs-dist/legacy/build/pdf.node.js',
+    'pdfjs-dist/build/pdf'
+  ];
+
+  for (const p of candidates) {
+    const lib = await tryImport(p);
+    if (lib) return lib;
+  }
+
+  // Try require (CJS) as a last resort (works in many CI/node setups)
+  try {
+    // eslint-disable-next-line global-require, import/no-dynamic-require
+    const req = require('pdfjs-dist/legacy/build/pdf.js');
+    return req;
+  } catch (e) {
+    // try alternate require path
+    try {
+      // eslint-disable-next-line global-require, import/no-dynamic-require
+      const req2 = require('pdfjs-dist/build/pdf.js');
+      return req2;
+    } catch (err) {
+      // final failure
+      throw new Error('pdfjs-dist not found. Install pdfjs-dist and ensure node_modules is present on the runner.');
+    }
+  }
 }
 
 function safeTrim(s) {
