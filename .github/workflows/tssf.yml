@@ -6,17 +6,18 @@ on:
 jobs:
   tssf_pipeline:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
+      - name: Set up Node.js (with npm cache)
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: 'npm'
 
-      - name: Show Node / NPM versions
+      - name: Show Node / NPM versions and repo root
         run: |
           node -v
           npm -v
@@ -34,25 +35,32 @@ jobs:
       - name: Install dependencies (ci if lockfile present)
         run: |
           if [ -f package-lock.json ]; then
+            echo "Lockfile found: using npm ci"
             npm ci --no-audit --no-fund
           else
+            echo "No lockfile: using npm install (consider committing package-lock.json)"
             npm install --no-audit --no-fund
           fi
-          # Ensure pdfjs-dist is present and pinned on the runner
-          npm install pdfjs-dist@^4.0.269 --no-audit --no-fund || npm install pdfjs-dist --no-audit --no-fund
-          # Ensure pdf-lib and pdf-parse are present (idempotent if already in package.json)
+          # Ensure a pinned pdfjs-dist is available (idempotent)
+          if ! npm ls pdfjs-dist >/dev/null 2>&1; then
+            echo "pdfjs-dist not found in installed deps — installing pinned version"
+            npm install pdfjs-dist@^4.0.269 --no-audit --no-fund
+          else
+            echo "pdfjs-dist already installed"
+          fi
+          # Ensure pdf-lib and pdf-parse are present (idempotent)
           npm install pdf-lib pdf-parse --no-audit --no-fund
 
       - name: List installed pdfjs-dist files (diagnostic)
         run: |
-          echo "pdfjs-dist version and top-level files:"
+          echo "pdfjs-dist listing (if present):"
           npm ls pdfjs-dist || true
           if [ -d node_modules/pdfjs-dist ]; then
-            echo "Listing node_modules/pdfjs-dist:"
+            echo "Top-level files in node_modules/pdfjs-dist:"
             ls -la node_modules/pdfjs-dist | sed -n '1,200p'
-            echo "Listing legacy/build (if present):"
+            echo "legacy/build (if present):"
             ls -la node_modules/pdfjs-dist/legacy/build || true
-            echo "Listing build (if present):"
+            echo "build (if present):"
             ls -la node_modules/pdfjs-dist/build || true
           else
             echo "node_modules/pdfjs-dist not found"
@@ -69,10 +77,8 @@ jobs:
         env:
           NODE_OPTIONS: "--no-warnings"
         run: |
-          # show working dir and files for debugging
           pwd
           ls -la
-          # run the script
           node fillWorksheet.cjs
 
       - name: Upload artifacts
@@ -84,4 +90,3 @@ jobs:
             parsed-summary.txt
             parsed-summary.json
             anchors-debug.json
-            parsed-summary.txt
