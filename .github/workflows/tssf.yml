@@ -21,7 +21,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          npm install pdf-lib pdf-parse
+          npm install pdf-lib
 
       - name: Run fillWorksheet.cjs
         run: |
@@ -33,5 +33,3 @@ jobs:
           name: tssf-artifacts
           path: |
             filled_worksheet.pdf
-            parsed-summary.txt
-            parsed-summary.json
