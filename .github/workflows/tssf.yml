@@ -60,6 +60,29 @@ jobs:
             echo "node_modules/pdfjs-dist not found"
           fi
 
+      - name: Add diag script to workspace (if missing)
+        run: |
+          cat > diag-pdfjs.js <<'EOF'
+          const fs = require('fs');
+          const paths = [
+            'node_modules/pdfjs-dist/legacy/build/pdf.js',
+            'node_modules/pdfjs-dist/build/pdf.js',
+            'node_modules/pdfjs-dist/legacy/build/pdf.node.js',
+            'node_modules/pdfjs-dist/build/pdf'
+          ];
+          console.log('Checking file existence under node_modules/pdfjs-dist:');
+          paths.forEach(p => console.log(p, fs.existsSync(p) ? 'FOUND' : 'MISSING'));
+          console.log('\\nTrying require.resolve for common entries:');
+          ['pdfjs-dist/legacy/build/pdf.js','pdfjs-dist/build/pdf.js','pdfjs-dist/build/pdf'].forEach(p => {
+            try { console.log(p, '->', require.resolve(p)); } catch (e) { console.log(p, '-> not resolvable:', e.message); }
+          });
+          EOF
+          ls -la diag-pdfjs.js
+
+      - name: Run pdfjs diagnostics
+        run: |
+          node diag-pdfjs.js
+
       - name: Try resolving common pdfjs-dist entry paths (diagnostic)
         shell: bash
         run: |
@@ -75,7 +98,8 @@ jobs:
           ls -la
           node fillWorksheet.cjs
 
-      - name: Upload artifacts
+      - name: Upload artifacts (always)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: tssf-artifacts
@@ -84,3 +108,4 @@ jobs:
             parsed-summary.txt
             parsed-summary.json
             anchors-debug.json
+            diag-pdfjs.js
