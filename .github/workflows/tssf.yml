@@ -32,23 +32,20 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-node-
 
-      - name: Install dependencies (ci if lockfile present)
+      - name: Ensure lockfile and install dependencies reproducibly
         run: |
-          if [ -f package-lock.json ]; then
-            echo "Lockfile found: using npm ci"
-            npm ci --no-audit --no-fund
-          else
-            echo "No lockfile: using npm install (consider committing package-lock.json)"
-            npm install --no-audit --no-fund
+          if [ ! -f package-lock.json ]; then
+            echo "No package-lock.json found — generating one (npm i --package-lock-only)"
+            npm i --package-lock-only --no-audit --no-fund
           fi
-          # Ensure a pinned pdfjs-dist is available (idempotent)
+          echo "Installing dependencies with npm ci"
+          npm ci --no-audit --no-fund
+          # Ensure pdfjs-dist pinned version exists (idempotent)
           if ! npm ls pdfjs-dist >/dev/null 2>&1; then
-            echo "pdfjs-dist not found in installed deps — installing pinned version"
-            npm install pdfjs-dist@^4.0.269 --no-audit --no-fund
-          else
-            echo "pdfjs-dist already installed"
+            echo "Installing pinned pdfjs-dist@4.0.269"
+            npm install pdfjs-dist@4.0.269 --no-audit --no-fund
           fi
-          # Ensure pdf-lib and pdf-parse are present (idempotent)
+          # Ensure pdf-lib and pdf-parse are present
           npm install pdf-lib pdf-parse --no-audit --no-fund
 
       - name: List installed pdfjs-dist files (diagnostic)
@@ -56,11 +53,8 @@ jobs:
           echo "pdfjs-dist listing (if present):"
           npm ls pdfjs-dist || true
           if [ -d node_modules/pdfjs-dist ]; then
-            echo "Top-level files in node_modules/pdfjs-dist:"
             ls -la node_modules/pdfjs-dist | sed -n '1,200p'
-            echo "legacy/build (if present):"
             ls -la node_modules/pdfjs-dist/legacy/build || true
-            echo "build (if present):"
             ls -la node_modules/pdfjs-dist/build || true
           else
             echo "node_modules/pdfjs-dist not found"
