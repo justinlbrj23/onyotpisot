@@ -1,6 +1,6 @@
 // fillWorksheet.cjs
-// Node.js CommonJS script (keeps CommonJS, uses dynamic import for pdf-parse)
-// Install: npm install pdf-lib pdf-parse fs
+// Node.js CommonJS script
+// Install: npm install pdf-lib pdf-parse pdfjs-dist fs
 //
 // Inputs (repo root): Summary.pdf (optional), worksheet_template_tssf.pdf (required)
 // Outputs: filled_worksheet.pdf, parsed-summary.txt, parsed-summary.json
@@ -8,9 +8,16 @@
 const fs = require('fs');
 const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
 
+// Dynamic import for pdf-parse
 async function loadPdfParse() {
   const mod = await import('pdf-parse');
   return mod.default || mod;
+}
+
+// Optional: pdfjs-dist for anchor-aware placement
+async function loadPdfJs() {
+  const mod = await import('pdfjs-dist/legacy/build/pdf.js');
+  return mod;
 }
 
 function safeTrim(s) {
@@ -93,7 +100,7 @@ async function fillPdf(values) {
   const color = rgb(0, 0, 0);
   const size = 11;
 
-  // Coordinate map for Page 1 (tuned to blanks)
+  // Coordinate map for Page 1 (baseline)
   page1.drawText(values.deedHolders || '', { x: 220, y: 740, size, color, font: helvetica });
   page1.drawText(values.deedDate || '', { x: 220, y: 720, size, color, font: helvetica });
   page1.drawText(values.deedBook || '', { x: 220, y: 700, size, color, font: helvetica });
