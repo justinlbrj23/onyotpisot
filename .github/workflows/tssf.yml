@@ -4,13 +4,10 @@ on:
   workflow_dispatch:
 
 jobs:
-
   tssf_pipeline:
-
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -21,7 +18,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          npm install pdf-lib
+          npm ci || npm install
+          npm install pdf-lib pdf-parse --no-audit --no-fund
 
       - name: Run fillWorksheet.cjs
         run: |
@@ -33,3 +31,5 @@ jobs:
           name: tssf-artifacts
           path: |
             filled_worksheet.pdf
+            parsed-summary.txt
+            parsed-summary.json
