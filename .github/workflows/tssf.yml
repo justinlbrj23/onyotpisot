@@ -14,14 +14,12 @@ jobs:
       # --------------------------------------------------
       # Checkout repository
       # --------------------------------------------------
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
       # --------------------------------------------------
       # Setup Node.js
       # --------------------------------------------------
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -30,7 +28,6 @@ jobs:
       # --------------------------------------------------
       # Install Node dependencies
       # --------------------------------------------------
-
       - name: Install dependencies
         run: |
           npm install pdf-lib pdf-parse
@@ -38,7 +35,6 @@ jobs:
       # --------------------------------------------------
       # Run PDF automation script
       # --------------------------------------------------
-
       - name: Run fillWorksheet.cjs
         run: |
           node fillWorksheet.cjs
@@ -46,7 +42,6 @@ jobs:
       # --------------------------------------------------
       # Upload filled worksheet and debug artifacts
       # --------------------------------------------------
-
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
