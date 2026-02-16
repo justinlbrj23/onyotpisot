@@ -3,14 +3,18 @@
 
 const fs = require("fs");
 const { PDFDocument } = require("pdf-lib");
-const pdfParse = require("pdf-parse");
+
+// pdf-parse sometimes exports as { default: fn } in CommonJS
+let pdfParse = require("pdf-parse");
+if (pdfParse.default) {
+  pdfParse = pdfParse.default;
+}
 
 async function extractSummaryData() {
   const dataBuffer = fs.readFileSync("Summary.pdf");
   const parsed = await pdfParse(dataBuffer);
   const text = parsed.text;
 
-  // Helper to extract values by label
   const getValue = (label) => {
     const regex = new RegExp(`${label}:\\s*(.+)`);
     const match = text.match(regex);
@@ -25,13 +29,14 @@ async function extractSummaryData() {
     siteAddress: getValue("Site Address"),
     deedType: getValue("Deed Type"),
     recordedDate: getValue("Recorded Date"),
-    deedBookPage: getValue("OR Book 25446 Page No\\. 0422"), // adjust regex if needed
+    deedBookPage: getValue("OR Book 25446 Page No\\. 0422"),
     lastOwner: getValue("Last Owner Name"),
     openingBid: getValue("Opening / Minimum Bid Amount"),
     auctionDate: getValue("Auction / Sale Date"),
     soldAmount: getValue("Sold Amount"),
     estimatedSurplus: getValue("Estimated Surplus"),
-    researcher: getValue("Researcher Name")
+    researcher: getValue("Researcher Name"),
+    rawText: text
   };
 }
 
@@ -40,11 +45,8 @@ async function fillWorksheet() {
 
   const templateBytes = fs.readFileSync("worksheet_template_tssf.pdf");
   const pdfDoc = await PDFDocument.load(templateBytes);
-
-  // If the PDF has AcroForm fields
   const form = pdfDoc.getForm();
 
-  // Fill fields (names must match actual AcroForm field names in template)
   form.getTextField("County").setText(summaryData.county);
   form.getTextField("State").setText(summaryData.state);
   form.getTextField("Case Number").setText(summaryData.caseNo);
@@ -63,8 +65,8 @@ async function fillWorksheet() {
   const pdfBytes = await pdfDoc.save();
   fs.writeFileSync("filled_worksheet.pdf", pdfBytes);
 
-  // Also save debug outputs
-  fs.writeFileSync("parsed-summary.txt", parsed.text);
+  // Debug artifacts
+  fs.writeFileSync("parsed-summary.txt", summaryData.rawText);
   fs.writeFileSync("parsed-summary.json", JSON.stringify(summaryData, null, 2));
 
   console.log("✅ Worksheet filled successfully: filled_worksheet.pdf");
