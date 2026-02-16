@@ -242,7 +242,6 @@ async function inspectPage(url) {
 async function searchPage(url, zipcode) {
   let browser;
   try {
-    // Use stealth-enabled connection
     const { browser: b, page } = await getConnection();
     browser = b;
 
@@ -251,25 +250,7 @@ async function searchPage(url, zipcode) {
     await page.waitForSelector('body', { timeout: 15000 });
     await sleep(5);
 
-    // --- NEW: Detect CAPTCHA/Terms Gate ---
-    const captchaBox = await page.$('input[type="text"]');
-    const termsCheckbox = await page.$('input[type="checkbox"]');
-    const continueBtn = await page.$('button, input[type="submit"]');
-
-    if (captchaBox && termsCheckbox && continueBtn) {
-      console.log("⚠️ CAPTCHA/Terms gate detected.");
-      await captureDebugSnapshot(page, 'captcha-gate', { fullPage: true });
-
-      console.log("⏸ Pausing for manual CAPTCHA solve...");
-      await page.waitForFunction(() => {
-        const btn = document.querySelector('button, input[type="submit"]');
-        return btn && !btn.disabled;
-      }, { timeout: 300000 }); // wait up to 5 minutes
-
-      console.log("✅ CAPTCHA solved, continuing...");
-    }
-
-    console.log("📥 Collecting input candidates...");
+    // Collect input candidates
     const inputs = await page.evaluate(() => {
       return Array.from(document.querySelectorAll('input')).map(i => ({
         id: i.id || null,
@@ -293,21 +274,6 @@ async function searchPage(url, zipcode) {
       }
     }
 
-    if (!targetSelector) {
-      const fallback = await page.evaluate(() => {
-        const el = Array.from(document.querySelectorAll('input')).find(i =>
-          (i.type === 'text' || i.type === 'search' || !i.type) && i.offsetParent !== null
-        );
-        if (!el) return null;
-        if (el.id) return `#${el.id}`;
-        if (el.name) return `[name="${el.name}"]`;
-        if (el.placeholder) return `input[placeholder="${el.placeholder}"]`;
-        if (el.className) return `input.${el.className.trim().split(/\s+/).join('.')}`;
-        return null;
-      });
-      targetSelector = fallback;
-    }
-
     if (!targetSelector) throw new Error("Could not auto-detect search input field");
 
     console.log(`🎯 Using input selector: ${targetSelector}`);
@@ -325,31 +291,43 @@ async function searchPage(url, zipcode) {
     await humanLikeType(page, targetSelector, zipcode);
     await sleep(13);
 
-    const likelyResultsSelector = await page.evaluate(() => {
-      const candidates = Array.from(document.querySelectorAll('div, section, ul, table'));
-      for (const c of candidates) {
-        const id = (c.id || '').toLowerCase();
-        const cls = (c.className || '').toLowerCase();
-        if (id.includes('result') || cls.includes('result') || id.includes('search') || cls.includes('search') || id.includes('list') || cls.includes('list')) {
-          if (c.id) return `#${c.id}`;
-          if (c.className) return '.' + c.className.trim().split(/\s+/).join('.');
-        }
-      }
-      return null;
+    // Submit search
+    const navPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => null);
+    await page.keyboard.press('Enter', { delay: 120 });
+    await Promise.race([navPromise, new Promise(res => setTimeout(res, 1200))]);
+
+    // --- NEW: Re-run inspectPage logic here ---
+    console.log("🔍 Re-inspecting page after submission...");
+    const html = await page.content();
+    const $ = cheerio.load(html);
+
+    const captchaInput = $('input[type="text"]').filter((_, el) => {
+      const name = el.attribs?.name?.toLowerCase() || '';
+      const id = el.attribs?.id?.toLowerCase() || '';
+      const placeholder = el.attribs?.placeholder?.toLowerCase() || '';
+      return name.includes('captcha') || id.includes('captcha') || placeholder.includes('captcha');
     });
 
-    const navPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => null);
-    await sleep(21);
-    await page.keyboard.press('Enter', { delay: 120 });
+    const consentCheckbox = $('input[type="checkbox"]').filter((_, el) => {
+      const labelText = $(el).parent().text().toLowerCase();
+      return labelText.includes('agree') || labelText.includes('terms');
+    });
 
-    if (likelyResultsSelector) {
-      await page.waitForSelector(likelyResultsSelector, { timeout: 15000 }).catch(() => null);
-    } else {
-      await Promise.race([navPromise, new Promise(res => setTimeout(res, 1200))]);
+    if (captchaInput.length > 0 || consentCheckbox.length > 0) {
+      console.log("⚠️ CAPTCHA/Terms gate detected after search.");
+      await captureDebugSnapshot(page, 'captcha-gate-post-search', { fullPage: true });
+
+      console.log("⏸ Pausing for manual solve...");
+      await page.waitForFunction(() => {
+        const btn = document.querySelector('button, input[type="submit"]');
+        return btn && !btn.disabled;
+      }, { timeout: 300000 });
+
+      console.log("✅ CAPTCHA solved, continuing...");
     }
 
+    // Now scrape results
     await sleep(34);
-
     const results = await page.evaluate(() => {
       const out = [];
       const containers = Array.from(document.querySelectorAll('div, section, ul, table')).filter(c => {
