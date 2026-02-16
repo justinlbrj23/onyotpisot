@@ -28,7 +28,15 @@
   "browser_specific_settings": {
     "gecko": {
       "id": "justinejohn.sale@gmail.com",
-      "strict_min_version": "109.0"
+      "strict_min_version": "109.0",
+      "data_collection_permissions": {
+        "required": [
+          "collect_page_content",
+          "transmit_data_externally"
+        ],
+        "optional": [],
+        "description": "This extension reads search result information from the NMLS Consumer Access website and may transmit selected results to a Google Sheets document when configured by the user."
+      }
     }
   }
 }
