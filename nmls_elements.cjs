@@ -180,7 +180,7 @@ async function getConnection() {
 }
 
 // =========================
-// Inspect Page
+// Inspect Page (with gate detection)
 // =========================
 
 async function inspectPage(url) {
@@ -205,6 +205,26 @@ async function inspectPage(url) {
         elements.push({ tag, text, attrs });
       }
     });
+
+    // --- NEW: Explicitly detect CAPTCHA and consent checkbox ---
+    const captchaInput = $('input[type="text"]').filter((_, el) => {
+      const name = el.attribs?.name?.toLowerCase() || '';
+      const id = el.attribs?.id?.toLowerCase() || '';
+      const placeholder = el.attribs?.placeholder?.toLowerCase() || '';
+      return name.includes('captcha') || id.includes('captcha') || placeholder.includes('captcha');
+    });
+
+    const consentCheckbox = $('input[type="checkbox"]').filter((_, el) => {
+      const labelText = $(el).parent().text().toLowerCase();
+      return labelText.includes('agree') || labelText.includes('terms');
+    });
+
+    if (captchaInput.length > 0) {
+      console.log("⚠️ CAPTCHA input detected:", captchaInput.attr('id') || captchaInput.attr('name'));
+    }
+    if (consentCheckbox.length > 0) {
+      console.log("⚠️ Consent checkbox detected:", consentCheckbox.attr('id') || consentCheckbox.attr('name'));
+    }
 
     return elements;
   } catch (err) {
