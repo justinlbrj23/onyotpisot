@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "name": "NMLS Search Extension",
   "version": "1.0",
-  "description": "Inspect and search NMLS Consumer Access site, then send results to Sheets.",
+  "description": "Inspect and search NMLS Consumer Access site, then send results to Google Sheets when configured by the user.",
 
   "permissions": [
     "storage",
@@ -28,14 +28,7 @@
   "browser_specific_settings": {
     "gecko": {
       "id": "justinejohn.sale@gmail.com",
-      "strict_min_version": "109.0",
-      "data_collection_permissions": {
-        "required": [
-          "website_content"
-        ],
-        "optional": [],
-        "description": "This extension reads website content from the NMLS Consumer Access site and may transmit selected results to a Google Sheets document when configured by the user."
-      }
+      "strict_min_version": "109.0"
     }
   }
 }
