@@ -1,14 +1,13 @@
 // inspectWebpage.cjs
 // Stage 2: evaluation + filtration with stealth hardening
+// Site-specific extractor added for dallas.texas.sheriffsaleauctions.com
 // Requires:
 // npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis
-// This version uses a built-in concurrency limiter and robust polyfills for compatibility.
 
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const cheerio = require('cheerio'); // fallback only
 const fs = require('fs');
-const path = require('path');
 const crypto = require('crypto');
 const { google } = require('googleapis');
 
@@ -46,7 +45,7 @@ function parseCurrency(str) {
   const s = String(str).replace(/\s+/g, '');
   const million = /([\d,.]+)M$/i.exec(s);
   if (million) return parseFloat(million[1].replace(/,/g, '')) * 1e6;
-  const n = parseFloat(s.replace(/[^0-9.-]/g, ''));
+  const n = parseFloat(String(str).replace(/[^0-9.-]/g, ''));
   return isNaN(n) ? null : n;
 }
 
@@ -62,7 +61,6 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Lightweight concurrency limiter (replacement for p-limit)
 function makeLimiter(concurrency) {
   let active = 0;
   const queue = [];
@@ -117,7 +115,7 @@ async function setupRequestInterception(page) {
       }
     });
   } catch (e) {
-    // some puppeteer versions may not support interception on certain contexts
+    // ignore if not supported
   }
 }
 
@@ -138,13 +136,49 @@ async function autoScroll(page) {
       });
     });
   } catch (e) {
-    // if evaluate fails, fallback to a short sleep
     await sleep(500);
   }
 }
 
 // =========================
-// IN-PAGE EXTRACTION
+// SITE-SPECIFIC TABLE EXTRACTOR (Dallas sheriff sale preview pages)
+const DALLAS_TABLE_EXTRACTOR = `
+(() => {
+  // Try common table selectors used on sheriff sale preview pages
+  const selectors = [
+    'table', // fallback to any table
+    'table.previewTable',
+    'table#tblPreview',
+    'div.preview table',
+    '.auctionPreview table'
+  ];
+  function normalize(s){ return (s||'').replace(/\\s+/g,' ').trim(); }
+  for (const sel of selectors) {
+    const t = document.querySelector(sel);
+    if (!t) continue;
+    const rows = Array.from(t.querySelectorAll('tr'));
+    if (!rows.length) continue;
+    const headerRow = rows.find(r => r.querySelectorAll('th').length > 0) || rows[0];
+    const headers = Array.from(headerRow.querySelectorAll('th,td')).map(h => normalize(h.innerText).toLowerCase());
+    const out = [];
+    for (const r of rows.slice(1)) {
+      const cols = Array.from(r.querySelectorAll('td')).map(c => normalize(c.innerText));
+      if (!cols.length) continue;
+      const obj = {};
+      for (let i = 0; i < cols.length; i++) {
+        const key = headers[i] || ('col' + i);
+        obj[key] = cols[i];
+      }
+      out.push(obj);
+    }
+    if (out.length) return out;
+  }
+  return [];
+})();
+`;
+
+// =========================
+// IN-PAGE GENERIC EXTRACTION (kept as fallback)
 const IN_PAGE_EXTRACTOR = `
 (() => {
   function cssPath(el) {
@@ -269,29 +303,70 @@ const IN_PAGE_EXTRACTOR = `
 `;
 
 // =========================
-// PARSING UTILITIES (lightweight fallback)
-// =========================
+// PARSING UTILITIES
 function normalizeText(s) {
   if (!s) return '';
   return String(s).replace(/\s+/g, ' ').replace(/\u00A0/g, ' ').trim();
 }
 
+// Map table-like row object (from DALLAS_TABLE_EXTRACTOR) to parsed row
+function mapDallasTableRow(obj, url) {
+  // obj keys are header text lowercased; values are cell text
+  const get = k => {
+    if (!obj) return '';
+    // try exact key, then partial matches
+    if (obj[k]) return obj[k];
+    const keys = Object.keys(obj);
+    for (const kk of keys) {
+      if (kk.includes(k)) return obj[kk];
+    }
+    return '';
+  };
+
+  // Common header keywords
+  const date = get('date') || get('auction date') || get('sale date') || '';
+  const apn = get('apn') || get('parcel') || get('parcel id') || get('parcel number') || '';
+  const address = get('address') || get('property address') || '';
+  const amount = get('amount') || get('sale price') || get('sold amount') || get('winning bid') || '';
+  const opening = get('opening') || get('opening bid') || get('minimum') || '';
+
+  const parsed = {
+    sourceUrl: url,
+    auctionStatus: /sold|finalized|sold for/i.test(amount || '') ? 'Sold' : 'Active',
+    auctionType: '',
+    caseNumber: get('case') || get('case number') || '',
+    parcelId: apn,
+    propertyAddress: address,
+    openingBid: opening,
+    assessedValue: '',
+    auctionDate: date,
+    salePrice: amount,
+    surplus: null,
+    meetsMinimumSurplus: 'No'
+  };
+
+  const sale = parseCurrency(parsed.salePrice);
+  const open = parseCurrency(parsed.openingBid);
+  if (sale !== null && open !== null) {
+    parsed.surplus = open !== null ? (open - sale) : null;
+    parsed.meetsMinimumSurplus = parsed.surplus !== null && parsed.surplus >= MIN_SURPLUS ? 'Yes' : 'No';
+  } else if (sale !== null) {
+    parsed.surplus = null;
+  }
+
+  return parsed;
+}
+
 // =========================
 // PAGE PARSING + HIGHER-LEVEL ROW EXTRACTION
 async function inspectAndParse(page, url) {
-  const pageResult = {
-    relevantElements: [],
-    parsedRows: [],
-    error: null
-  };
+  const pageResult = { relevantElements: [], parsedRows: [], error: null };
 
   try {
     console.log(`🌐 Visiting ${url}`);
-    // safe navigation with retry
     try {
       await page.goto(url, { waitUntil: 'networkidle2', timeout: PAGE_TIMEOUT });
     } catch (e) {
-      // fallback: try once more with a longer timeout
       try {
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT * 2 });
       } catch (e2) {
@@ -302,6 +377,45 @@ async function inspectAndParse(page, url) {
     await autoScroll(page);
     await sleep(1200);
 
+    // Site-specific extraction for Dallas sheriff sale preview pages
+    let dallasRows = [];
+    try {
+      if (url.includes('dallas.texas.sheriffsaleauctions.com')) {
+        dallasRows = await page.evaluate(DALLAS_TABLE_EXTRACTOR);
+      }
+    } catch (e) {
+      // ignore site-specific extraction errors
+      dallasRows = [];
+    }
+
+    if (Array.isArray(dallasRows) && dallasRows.length) {
+      // Map each table row into parsedRows
+      for (const r of dallasRows) {
+        const parsed = mapDallasTableRow(r, url);
+        pageResult.parsedRows.push(parsed);
+        // also append a minimal element record for traceability
+        const el = {
+          sourceUrl: url,
+          tag: 'table-row',
+          cssPath: '',
+          text: JSON.stringify(r).slice(0,2000),
+          innerHTML: '',
+          attrs: {},
+          dataset: {},
+          role: '',
+          aria: {},
+          visible: true,
+          rect: { x:0,y:0,w:0,h:0 },
+          frameUrl: ''
+        };
+        pageResult.relevantElements.push(el);
+        appendNdjson(OUTPUT_ELEMENTS_FILE, el);
+      }
+      console.log(`📦 Dallas table rows extracted: ${pageResult.parsedRows.length}`);
+      return pageResult;
+    }
+
+    // Fallback to generic extraction
     const nodes = await page.evaluate(IN_PAGE_EXTRACTOR);
 
     const auctionTextRegex = /(\$[0-9]{1,3}(?:,[0-9]{3})+)|\bAPN\b|\bParcel\b|\bAuction\b|\bCase\b/i;
@@ -345,22 +459,18 @@ async function inspectAndParse(page, url) {
       else containerCandidates.set(parentPath, containerCandidates.get(parentPath) + ' | ' + r.text);
     }
 
-    // For each container, attempt sold-specific parsing first, then generic extraction
     for (const [containerPath, sampleText] of containerCandidates.entries()) {
       const blockText = normalizeText(sampleText);
       if (!blockText) continue;
 
-      // SOLD-specific heuristics (coarse)
       const looksSold = /sold|auction sold|sale finalized|finalized/i.test(blockText);
       if (looksSold) {
-        // Try to extract common fields
         const openingBidMatch = blockText.match(/Opening Bid\s*:?\s*\$[0-9,]+(?:\.[0-9]{2})?/i);
         const openingBid = openingBidMatch ? openingBidMatch[0].replace(/Opening Bid\s*:?/i, '').trim() : '';
 
         const assessedValueMatch = blockText.match(/Assessed Value\s*:?\s*\$[0-9,]+(?:\.[0-9]{2})?/i);
         const assessedValue = assessedValueMatch ? assessedValueMatch[0].replace(/Assessed Value\s*:?/i, '').trim() : '';
 
-        // Sale price: try multiple labels
         const SALE_PRICE_LABELS = ['Amount','Sale Price','Sold Amount','Winning Bid','Final Bid','Sale Amount','Sold Price','Sold For'];
         let salePrice = '';
         for (const label of SALE_PRICE_LABELS) {
@@ -413,7 +523,7 @@ async function inspectAndParse(page, url) {
         }
       }
 
-      // Generic extraction fallback
+      // Generic fallback parsing (keeps previous behavior)
       const openingBidMatch = blockText.match(/Opening Bid\s*:?\s*\$[0-9,]+(?:\.[0-9]{2})?/i);
       const openingBid = openingBidMatch ? openingBidMatch[0].replace(/Opening Bid\s*:?/i, '').trim() : '';
 
