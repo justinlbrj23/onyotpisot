@@ -6,6 +6,13 @@ on:
 jobs:
   tda_pipeline:
     runs-on: ubuntu-latest
+    env:
+      # Tunable pipeline settings (override via workflow_dispatch inputs or repository secrets if desired)
+      MIN_SURPLUS: "25000"
+      BATCH_SIZE: "100"
+      RETRY_MAX: "5"
+      RETRY_BASE_MS: "500"
+      ENABLE_SHEET_IDEMPOTENCY: "true"
 
     steps:
       # --------------------------------------------------
@@ -32,8 +39,8 @@ jobs:
           else
             npm install
           fi
-          # Ensure stealth packages are present
-          npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis
+          # Ensure runtime packages required by the updated pipeline
+          npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis p-limit
 
       # --------------------------------------------------
       # Write RAW Service Account JSON
@@ -41,6 +48,7 @@ jobs:
       - name: Write Service Account JSON
         run: |
           echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
+          chmod 600 service-account.json
 
       # --------------------------------------------------
       # Validate Service Account JSON
@@ -63,49 +71,63 @@ jobs:
         run: node organizer_headers_tssf.cjs
 
       # --------------------------------------------------
-      # STEP 2 — Run webInspector.cjs (Sold-only)
-      # --------------------------------------------------
-      - name: Run webInspector.cjs
-        run: node webInspector.cjs
-
-      # Save artifacts from webInspector
-      - name: Upload inspector artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: inspector-artifacts
-          path: |
-            raw-elements.json
-            parsed-auctions.json
-            errors.json
-
-      # --------------------------------------------------
-      # STEP 3 — Run inspectWebpage.cjs (Recon only, not mapped)
+      # STEP 2 — Run inspectWebpage.cjs (primary DOM extractor)
+      # Produces: raw-elements.ndjson, parsed-auctions.json, errors.json, summary.json
       # --------------------------------------------------
       - name: Run inspectWebpage.cjs
-        run: node inspectWebpage.cjs
+        run: |
+          node inspectWebpage.cjs
 
-      # Save recon artifacts separately
+      # Save recon artifacts (NDJSON + parsed JSON + summary + errors)
       - name: Upload recon artifacts
         uses: actions/upload-artifact@v4
         with:
           name: recon-artifacts
           path: |
-            raw-elements.json
+            raw-elements.ndjson
             parsed-auctions.json
+            summary.json
             errors.json
 
       # --------------------------------------------------
-      # STEP 4 — Run mappingScraper.cjs (Final Mapping, Sold-only)
+      # STEP 3 — Run mappingScraper.cjs (Final Mapping, Sold-only)
+      # Pass parsed-auctions.json as input; mappingScraper reads env vars for config
       # --------------------------------------------------
       - name: Run mappingScraper.cjs
-        run: node mappingScraper.cjs parsed-auctions.json
+        env:
+          SERVICE_ACCOUNT_FILE: service-account.json
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID || '' }}
+          SHEET_NAME_URLS: "web_tda"
+          SHEET_NAME_RAW: "raw_main"
+          MIN_SURPLUS: ${{ env.MIN_SURPLUS }}
+          BATCH_SIZE: ${{ env.BATCH_SIZE }}
+          RETRY_MAX: ${{ env.RETRY_MAX }}
+          RETRY_BASE_MS: ${{ env.RETRY_BASE_MS }}
+          ENABLE_SHEET_IDEMPOTENCY: ${{ env.ENABLE_SHEET_IDEMPOTENCY }}
+        run: |
+          node mappingScraper.cjs parsed-auctions.json
 
-      # Save mapped output
+      # Save mapped output and anomalies
       - name: Upload mapped output
         uses: actions/upload-artifact@v4
         with:
           name: mapped-output
-          path: mapped-output.json
+          path: |
+            mapped-output.json
+            mapping-anomalies.json
+
+      # --------------------------------------------------
+      # Optional: Upload full logs and snapshots for debugging (if produced)
+      # --------------------------------------------------
+      - name: Upload debug artifacts (if present)
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-artifacts
+          path: |
+            page-snapshots/*.html
+            page-screenshots/*.png
+            raw-elements.ndjson
+        if: always()
 
       # --------------------------------------------------
       # Cleanup credentials
