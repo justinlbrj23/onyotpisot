@@ -1,11 +1,11 @@
 // inspectWebpage.cjs
 // Stage 2: evaluation + filtration with stealth hardening
 // Requires:
-// npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis p-limit object-hash
+// npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis p-limit
 
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-const cheerio = require('cheerio'); // kept for fallback parsing if needed
+const cheerio = require('cheerio'); // fallback only
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -43,7 +43,6 @@ const sheets = google.sheets({ version: 'v4', auth });
 // HELPERS
 function parseCurrency(str) {
   if (!str) return null;
-  // handle $1.2M, (1,200), $1,200.00
   const s = String(str).replace(/\s+/g, '');
   const million = /([\d,.]+)M$/i.exec(s);
   if (million) return parseFloat(million[1].replace(/,/g, '')) * 1e6;
@@ -75,21 +74,25 @@ async function loadTargetUrls() {
 // =========================
 // BROWSER UTILITIES
 async function setupRequestInterception(page) {
-  await page.setRequestInterception(true);
-  page.on('request', req => {
-    const r = req.resourceType();
-    const url = req.url();
-    if (
-      r === 'image' ||
-      r === 'font' ||
-      r === 'stylesheet' ||
-      /analytics|doubleclick|googlesyndication|google-analytics|ads|tracking/i.test(url)
-    ) {
-      req.abort();
-    } else {
-      req.continue();
-    }
-  });
+  try {
+    await page.setRequestInterception(true);
+    page.on('request', req => {
+      const r = req.resourceType();
+      const url = req.url();
+      if (
+        r === 'image' ||
+        r === 'font' ||
+        r === 'stylesheet' ||
+        /analytics|doubleclick|googlesyndication|google-analytics|ads|tracking/i.test(url)
+      ) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+  } catch (e) {
+    // some puppeteer versions may not support interception on certain contexts
+  }
 }
 
 async function autoScroll(page) {
@@ -111,7 +114,6 @@ async function autoScroll(page) {
 
 // =========================
 // IN-PAGE EXTRACTION
-// This runs inside the page context and returns a compact array of node metadata
 const IN_PAGE_EXTRACTOR = `
 (() => {
   function cssPath(el) {
@@ -177,11 +179,9 @@ const IN_PAGE_EXTRACTOR = `
     return out;
   }
 
-  // collect from document and shadow roots
   const cap = ${MAX_NODES_PER_PAGE};
   let results = collectFromRoot(document, cap);
 
-  // shadow roots
   const all = Array.from(document.querySelectorAll('*'));
   for (const el of all) {
     if (el.shadowRoot) {
@@ -192,7 +192,6 @@ const IN_PAGE_EXTRACTOR = `
     }
   }
 
-  // same-origin iframes: include a marker for iframe src and origin
   const iframes = Array.from(document.querySelectorAll('iframe'));
   for (const f of iframes) {
     try {
@@ -203,7 +202,6 @@ const IN_PAGE_EXTRACTOR = `
         results = results.concat(frameResults);
         if (results.length >= cap) break;
       } else {
-        // cross-origin iframe: add a placeholder node
         results.push({
           tag: 'iframe',
           cssPath: cssPath(f),
@@ -219,7 +217,6 @@ const IN_PAGE_EXTRACTOR = `
         });
       }
     } catch(e) {
-      // ignore cross-origin access errors
       results.push({
         tag: 'iframe',
         cssPath: cssPath(f),
@@ -241,40 +238,58 @@ const IN_PAGE_EXTRACTOR = `
 `;
 
 // =========================
+// PARSING UTILITIES (lightweight fallback)
+// =========================
+function normalizeText(s) {
+  if (!s) return '';
+  return String(s).replace(/\s+/g, ' ').replace(/\u00A0/g, ' ').trim();
+}
+
+// =========================
 // PAGE PARSING + HIGHER-LEVEL ROW EXTRACTION
-// inspectWebpage.cjs
-// Only the changed/integration parts are shown here. Replace your existing inspectAndParse function
-// and add the require for the parser at the top of the file.
-
-const { parseSoldContainer } = require('./lib/parseSold');
-
-// ... existing imports and setup remain unchanged ...
-
 async function inspectAndParse(page, url) {
-  const pageResult = { relevantElements: [], parsedRows: [], error: null };
+  const pageResult = {
+    relevantElements: [],
+    parsedRows: [],
+    error: null
+  };
+
   try {
-    console.log(Visiting ${url});
+    console.log(`🌐 Visiting ${url}`);
     await page.goto(url, { waitUntil: 'networkidle2', timeout: PAGE_TIMEOUT });
     await autoScroll(page);
     await page.waitForTimeout(1200);
 
-    // run in-page extractor (same as earlier provided INPAGEEXTRACTOR)
-    const nodes = await page.evaluate(INPAGEEXTRACTOR);
+    const nodes = await page.evaluate(IN_PAGE_EXTRACTOR);
 
-    // quick filter for auction-relevant nodes
     const auctionTextRegex = /(\$[0-9]{1,3}(?:,[0-9]{3})+)|\bAPN\b|\bParcel\b|\bAuction\b|\bCase\b/i;
     const relevant = [];
     const seen = new Set();
 
     for (const n of nodes) {
       const text = (n.text || '').replace(/\s+/g, ' ').trim();
-      const key = ${n.cssPath}|${text.slice(0,200)};
+      const attrsString = JSON.stringify(n.attrs || {});
+      const key = hashString(n.cssPath + '|' + text.slice(0,200));
       if (seen.has(key)) continue;
       seen.add(key);
-      if (auctionTextRegex.test(text) || /apn|parcel|auction|case/i.test(JSON.stringify(n.attrs || {}))) {
-        const out = { sourceUrl: url, tag: n.tag, cssPath: n.cssPath, text, innerHTML: n.innerHTML, attrs: n.attrs, visible: n.visible, rect: n.rect, frameUrl: n.frameUrl || '' };
+
+      if (auctionTextRegex.test(text) || /apn|parcel|auction|case/i.test(attrsString)) {
+        const out = {
+          sourceUrl: url,
+          tag: n.tag,
+          cssPath: n.cssPath,
+          text,
+          innerHTML: n.innerHTML,
+          attrs: n.attrs,
+          dataset: n.dataset,
+          role: n.role,
+          aria: n.aria,
+          visible: n.visible,
+          rect: n.rect,
+          frameUrl: n.frameUrl || ''
+        };
         relevant.push(out);
-        appendNdjson(OUTPUTELEMENTSFILE, out);
+        appendNdjson(OUTPUT_ELEMENTS_FILE, out);
       }
     }
 
@@ -288,43 +303,110 @@ async function inspectAndParse(page, url) {
       else containerCandidates.set(parentPath, containerCandidates.get(parentPath) + ' | ' + r.text);
     }
 
-    // For each container, first try the generic parser, then the sold-specific parser as fallback
+    // For each container, attempt sold-specific parsing first, then generic extraction
     for (const [containerPath, sampleText] of containerCandidates.entries()) {
-      const blockText = sampleText.replace(/\s+/g, ' ').trim();
+      const blockText = normalizeText(sampleText);
       if (!blockText) continue;
 
-      // Try sold-specific parser from lib/parseSold.js
-      const soldRow = parseSoldContainer(blockText);
-      if (soldRow) {
-        parsedRow = Object.assign({ sourceUrl: url, containerPath }, soldRow);
-        pageResult.parsedRows.push(parsedRow);
-        continue;
+      // SOLD-specific heuristics (coarse)
+      const looksSold = /sold|auction sold|sale finalized|finalized/i.test(blockText);
+      if (looksSold) {
+        // Try to extract common fields
+        const openingBidMatch = blockText.match(/Opening Bid\s*:?\\s*\\$[0-9,]+(?:\\.[0-9]{2})?/i);
+        const openingBid = openingBidMatch ? openingBidMatch[0].replace(/Opening Bid\s*:?/i, '').trim() : '';
+
+        const assessedValueMatch = blockText.match(/Assessed Value\s*:?\\s*\\$[0-9,]+(?:\\.[0-9]{2})?/i);
+        const assessedValue = assessedValueMatch ? assessedValueMatch[0].replace(/Assessed Value\s*:?/i, '').trim() : '';
+
+        // Sale price: try multiple labels
+        const SALE_PRICE_LABELS = ['Amount','Sale Price','Sold Amount','Winning Bid','Final Bid','Sale Amount','Sold Price','Sold For'];
+        let salePrice = '';
+        for (const label of SALE_PRICE_LABELS) {
+          const regex = new RegExp(label.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&') + '\\s*:?\\s*\\$[0-9,]+(?:\\.[0-9]{2})?', 'i');
+          const m = blockText.match(regex);
+          if (m) {
+            const raw = m[0];
+            const cleaned = raw.replace(new RegExp(label + '\\s*:?\\s*', 'i'), '').trim();
+            salePrice = cleaned;
+            break;
+          }
+        }
+        if (!salePrice) {
+          const moneyMatch = blockText.match(/\\$[0-9,]+(?:\\.[0-9]{2})?/g);
+          if (moneyMatch && moneyMatch.length) salePrice = moneyMatch[moneyMatch.length - 1];
+        }
+
+        const parcelMatch = blockText.match(/APN\\s*[:#]?\\s*([0-9A-Za-z-]+)/i) || blockText.match(/Parcel ID\\s*[:#]?\\s*([0-9A-Za-z-]+)/i);
+        const parcelId = parcelMatch ? parcelMatch[1].trim() : '';
+
+        if (!parcelId || !openingBid) {
+          // fallback to generic parsing below
+        } else {
+          const open = parseCurrency(openingBid);
+          const assess = parseCurrency(assessedValue);
+          const soldPrice = parseCurrency(salePrice);
+
+          let surplus = null;
+          if (assess !== null) {
+            if (soldPrice !== null) surplus = assess - soldPrice;
+            else if (open !== null) surplus = assess - open;
+          }
+
+          pageResult.parsedRows.push({
+            sourceUrl: url,
+            containerPath,
+            auctionStatus: 'Sold',
+            auctionType: (blockText.match(/Auction Type\s*:?\\s*([^|\\n]+)/i) || [])[1] || '',
+            caseNumber: (blockText.match(/Case\\s*#?\\s*[:#]?\\s*([^|\\n]+)/i) || [])[1] || '',
+            parcelId,
+            propertyAddress: (blockText.match(/Property Address\\s*:?\\s*([^|\\n]+)/i) || [])[1] || '',
+            openingBid,
+            assessedValue,
+            auctionDate: (blockText.match(/Date\\/?Time\\s*:?\\s*([^|\\n]+)/i) || [])[1] || '',
+            salePrice,
+            surplus,
+            meetsMinimumSurplus: surplus !== null && surplus >= MIN_SURPLUS ? 'Yes' : 'No'
+          });
+          continue;
+        }
       }
 
-      // Generic extraction fallback (your existing logic for openingBid, assessedValue, salePrice)
-      // Keep your existing regex-based extraction here if needed
-      // Example minimal fallback:
-      const openingBidMatch = blockText.match(/Opening Bid\s:?\\s\\$[0-9,]+(?:\\.[0-9]{2})?/i);
-      const openingBid = openingBidMatch ? openingBidMatch[0].replace(/Opening Bid\\s*:?/i, '').trim() : '';
-      const salePrice = (blockText.match(/\\$[0-9,]+(?:\\.[0-9]{2})?/) || [''])[0];
-      const parcelId = (blockText.match(/APN\\s[:#]?\\s([0-9A-Za-z-]+)/i) || [])[1] || '';
+      // Generic extraction fallback
+      const openingBidMatch = blockText.match(/Opening Bid\s*:?\\s*\\$[0-9,]+(?:\\.[0-9]{2})?/i);
+      const openingBid = openingBidMatch ? openingBidMatch[0].replace(/Opening Bid\s*:?/i, '').trim() : '';
+
+      const assessedValueMatch = blockText.match(/Assessed Value\s*:?\\s*\\$[0-9,]+(?:\\.[0-9]{2})?/i);
+      const assessedValue = assessedValueMatch ? assessedValueMatch[0].replace(/Assessed Value\s*:?/i, '').trim() : '';
+
+      const salePriceMatch = blockText.match(/\\$[0-9,]+(?:\\.[0-9]{2})?/g);
+      const salePrice = salePriceMatch ? salePriceMatch[salePriceMatch.length - 1] : '';
+
+      const parcelMatch = blockText.match(/APN\\s*[:#]?\\s*([0-9A-Za-z-]+)/i) || blockText.match(/Parcel ID\\s*[:#]?\\s*([0-9A-Za-z-]+)/i);
+      const parcelId = parcelMatch ? parcelMatch[1].trim() : '';
 
       if (!parcelId || !openingBid) continue;
 
       const open = parseCurrency(openingBid);
       const soldPrice = parseCurrency(salePrice);
-      const assessMatch = blockText.match(/Assessed Value\\s:?\\s\\$[0-9,]+(?:\\.[0-9]{2})?/i);
-      const assessedValue = assessMatch ? assessMatch[0].replace(/Assessed Value\\s*:?/i, '').trim() : '';
+      const assess = parseCurrency(assessedValue);
 
-      const surplus = (assessedValue && soldPrice) ? (parseCurrency(assessedValue) - soldPrice) : null;
+      let surplus = null;
+      if (assess !== null) {
+        if (soldPrice !== null) surplus = assess - soldPrice;
+        else if (open !== null) surplus = assess - open;
+      }
 
       pageResult.parsedRows.push({
         sourceUrl: url,
         containerPath,
         auctionStatus: /sold/i.test(blockText) ? 'Sold' : 'Active',
+        auctionType: (blockText.match(/Auction Type\s*:?\\s*([^|\\n]+)/i) || [])[1] || '',
+        caseNumber: (blockText.match(/Case\\s*#?\\s*[:#]?\\s*([^|\\n]+)/i) || [])[1] || '',
         parcelId,
+        propertyAddress: (blockText.match(/Property Address\s*:?\\s*([^|\\n]+)/i) || [])[1] || '',
         openingBid,
         assessedValue,
+        auctionDate: (blockText.match(/Date\\/?Time\s*:?\\s*([^|\\n]+)/i) || [])[1] || '',
         salePrice,
         surplus,
         meetsMinimumSurplus: surplus !== null && surplus >= MIN_SURPLUS ? 'Yes' : 'No'
@@ -332,11 +414,11 @@ async function inspectAndParse(page, url) {
     }
 
     pageResult.relevantElements = relevant;
-    console.log( Elements found: ${relevant.length} | Auctions parsed: ${pageResult.parsedRows.length});
+    console.log(`📦 Elements found: ${relevant.length} | Auctions parsed: ${pageResult.parsedRows.length}`);
     return pageResult;
   } catch (err) {
-    console.error(' Error on', url, err.message);
-    pageResult.error = { url, message: err.message };
+    console.error(`❌ Error on ${url}:`, err && err.message ? err.message : err);
+    pageResult.error = { url, message: err && err.message ? err.message : String(err) };
     return pageResult;
   }
 }
@@ -346,9 +428,7 @@ async function inspectAndParse(page, url) {
 async function scrapeAllPages(browser, startUrl) {
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 900 });
-  try {
-    await page.emulateTimezone('America/New_York');
-  } catch (e) {}
+  try { await page.emulateTimezone('America/New_York'); } catch (e) {}
   await setupRequestInterception(page);
 
   const allRows = [];
@@ -361,19 +441,17 @@ async function scrapeAllPages(browser, startUrl) {
     if (result.error) errors.push(result.error);
     allRows.push(...result.parsedRows);
 
-    // stop when no new elements or rows found
     if (!result.relevantElements.length && !result.parsedRows.length) {
-      console.log(' No more pages or no relevant content found');
+      console.log('⛔ No more pages or no relevant content found');
       break;
     }
 
     pageIndex++;
     if (pageIndex > 50) {
-      console.log('Reached page limit, stopping.');
+      console.log('⚠️ Reached page limit, stopping.');
       break;
     }
-    console.log(` Moving to page ${pageIndex}`);
-    // small randomized delay to reduce fingerprinting
+    console.log(`➡️ Moving to page ${pageIndex}`);
     await page.waitForTimeout(500 + Math.floor(Math.random() * 800));
   }
 
@@ -384,16 +462,16 @@ async function scrapeAllPages(browser, startUrl) {
 // =========================
 // MAIN
 (async () => {
-  console.log(' Loading URLs...');
+  console.log('📥 Loading URLs...');
   const urls = await loadTargetUrls();
   if (!urls.length) {
     console.log('No URLs found. Exiting.');
     process.exit(0);
   }
 
-  // ensure output files exist / are empty
   try { fs.unlinkSync(OUTPUT_ELEMENTS_FILE); } catch(e) {}
   fs.writeFileSync(OUTPUT_ELEMENTS_FILE, '');
+
   const limit = pLimit(CONCURRENCY);
 
   const browser = await puppeteer.launch({
@@ -410,14 +488,13 @@ async function scrapeAllPages(browser, startUrl) {
   const allRows = [];
   const allErrors = [];
 
-  // process URLs with limited concurrency
   const tasks = urls.map(url => limit(async () => {
     try {
       const res = await scrapeAllPages(browser, url);
       allRows.push(...res.allRows);
       allErrors.push(...res.errors);
     } catch (e) {
-      allErrors.push({ url, message: e.message });
+      allErrors.push({ url, message: e && e.message ? e.message : String(e) });
     }
   }));
 
@@ -428,14 +505,14 @@ async function scrapeAllPages(browser, startUrl) {
   fs.writeFileSync(OUTPUT_ROWS_FILE, JSON.stringify(allRows, null, 2));
   if (allErrors.length) {
     fs.writeFileSync(OUTPUT_ERRORS_FILE, JSON.stringify(allErrors, null, 2));
-    console.log(` Saved ${allErrors.length} errors → ${OUTPUT_ERRORS_FILE}`);
+    console.log(`⚠️ Saved ${allErrors.length} errors → ${OUTPUT_ERRORS_FILE}`);
   }
 
   const summary = {
     totalUrls: urls.length,
     totalElements: (() => {
       try {
-        const lines = fs.readFileSync(OUTPUT_ELEMENTS_FILE, 'utf8').trim().split('\\n').filter(Boolean);
+        const lines = fs.readFileSync(OUTPUT_ELEMENTS_FILE, 'utf8').trim().split('\n').filter(Boolean);
         return lines.length;
       } catch (e) { return 0; }
     })(),
@@ -447,8 +524,8 @@ async function scrapeAllPages(browser, startUrl) {
 
   fs.writeFileSync(OUTPUT_SUMMARY_FILE, JSON.stringify(summary, null, 2));
 
-  console.log(`Saved elements (ndjson) → ${OUTPUT_ELEMENTS_FILE}`);
-  console.log(` Saved ${allRows.length} auctions → ${OUTPUT_ROWS_FILE}`);
-  console.log(`Saved summary → ${OUTPUT_SUMMARY_FILE}`);
-  console.log(' Done');
+  console.log(`✅ Saved elements (ndjson) → ${OUTPUT_ELEMENTS_FILE}`);
+  console.log(`✅ Saved ${allRows.length} auctions → ${OUTPUT_ROWS_FILE}`);
+  console.log(`📊 Saved summary → ${OUTPUT_SUMMARY_FILE}`);
+  console.log('🏁 Done');
 })();
