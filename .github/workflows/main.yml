@@ -7,7 +7,6 @@ jobs:
   tda_pipeline:
     runs-on: ubuntu-latest
     env:
-      # Tunable pipeline settings (override via workflow_dispatch inputs or repository secrets if desired)
       MIN_SURPLUS: "25000"
       BATCH_SIZE: "100"
       RETRY_MAX: "5"
@@ -15,23 +14,14 @@ jobs:
       ENABLE_SHEET_IDEMPOTENCY: "true"
 
     steps:
-      # --------------------------------------------------
-      # Checkout repository
-      # --------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # --------------------------------------------------
-      # Setup Node.js
-      # --------------------------------------------------
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      # --------------------------------------------------
-      # Install dependencies
-      # --------------------------------------------------
       - name: Install dependencies
         run: |
           if [ -f package-lock.json ]; then
@@ -39,20 +29,20 @@ jobs:
           else
             npm install
           fi
-          # Ensure runtime packages required by the updated pipeline
-          npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis p-limit
+          # Ensure runtime deps used by scripts are present
+          npm install --no-save puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis puppeteer
 
-      # --------------------------------------------------
-      # Write RAW Service Account JSON
-      # --------------------------------------------------
       - name: Write Service Account JSON
+        env:
+          SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
         run: |
-          echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
+          if [ -z "${SERVICE_ACCOUNT_JSON}" ]; then
+            echo "Missing SERVICE_ACCOUNT_JSON secret" >&2
+            exit 1
+          fi
+          echo "${SERVICE_ACCOUNT_JSON}" > service-account.json
           chmod 600 service-account.json
 
-      # --------------------------------------------------
-      # Validate Service Account JSON
-      # --------------------------------------------------
       - name: Validate service account JSON
         run: |
           node -e "
@@ -64,21 +54,12 @@ jobs:
             console.log('Service account OK:', j.client_email);
           "
 
-      # --------------------------------------------------
-      # STEP 1 — Create TSSF Headers
-      # --------------------------------------------------
       - name: Run organizer_headers_tssf.cjs
         run: node organizer_headers_tssf.cjs
 
-      # --------------------------------------------------
-      # STEP 2 — Run inspectWebpage.cjs (primary DOM extractor)
-      # Produces: raw-elements.ndjson, parsed-auctions.json, errors.json, summary.json
-      # --------------------------------------------------
       - name: Run inspectWebpage.cjs
-        run: |
-          node inspectWebpage.cjs
+        run: node inspectWebpage.cjs
 
-      # Save recon artifacts (NDJSON + parsed JSON + summary + errors)
       - name: Upload recon artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -89,14 +70,19 @@ jobs:
             summary.json
             errors.json
 
-      # --------------------------------------------------
-      # STEP 3 — Run mappingScraper.cjs (Final Mapping, Sold-only)
-      # Pass parsed-auctions.json as input; mappingScraper reads env vars for config
-      # --------------------------------------------------
+      - name: Prepare mapping environment
+        if: always()
+        run: |
+          # sanity checks
+          echo "Parsed rows file size:"
+          ls -lh parsed-auctions.json || true
+          echo "Summary:"
+          cat summary.json || true
+
       - name: Run mappingScraper.cjs
         env:
           SERVICE_ACCOUNT_FILE: service-account.json
-          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID || '' }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           SHEET_NAME_URLS: "web_tda"
           SHEET_NAME_RAW: "raw_main"
           MIN_SURPLUS: ${{ env.MIN_SURPLUS }}
@@ -105,9 +91,11 @@ jobs:
           RETRY_BASE_MS: ${{ env.RETRY_BASE_MS }}
           ENABLE_SHEET_IDEMPOTENCY: ${{ env.ENABLE_SHEET_IDEMPOTENCY }}
         run: |
+          if [ -z "${SPREADSHEET_ID}" ]; then
+            echo "Warning: SPREADSHEET_ID is empty. Mapping will run locally but will not write to Google Sheets."
+          fi
           node mappingScraper.cjs parsed-auctions.json
 
-      # Save mapped output and anomalies
       - name: Upload mapped output
         uses: actions/upload-artifact@v4
         with:
@@ -116,9 +104,6 @@ jobs:
             mapped-output.json
             mapping-anomalies.json
 
-      # --------------------------------------------------
-      # Optional: Upload full logs and snapshots for debugging (if produced)
-      # --------------------------------------------------
       - name: Upload debug artifacts (if present)
         uses: actions/upload-artifact@v4
         with:
@@ -129,9 +114,6 @@ jobs:
             raw-elements.ndjson
         if: always()
 
-      # --------------------------------------------------
-      # Cleanup credentials
-      # --------------------------------------------------
       - name: Cleanup secrets
         if: always()
         run: rm -f service-account.json
