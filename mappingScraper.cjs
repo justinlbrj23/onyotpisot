@@ -5,15 +5,21 @@ const fs = require("fs");
 const { google } = require("googleapis");
 
 // =========================
-// CONFIG
+// CONFIG (env-driven)
 // =========================
-const SERVICE_ACCOUNT_FILE = "./service-account.json";
-const SPREADSHEET_ID = "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
-const SHEET_NAME_URLS = "web_tda";
-const SHEET_NAME_RAW = "raw_main";
-const INPUT_FILE = process.argv[2] || "parsed-auctions.json";
-const OUTPUT_FILE = "mapped-output.json";
-const ANOMALY_FILE = "mapping-anomalies.json";
+const SERVICE_ACCOUNT_FILE = process.env.SERVICE_ACCOUNT_FILE || "./service-account.json";
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID || "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
+const SHEET_NAME_URLS = process.env.SHEET_NAME_URLS || "web_tda";
+const SHEET_NAME_RAW = process.env.SHEET_NAME_RAW || "raw_main";
+const INPUT_FILE = process.argv[2] || process.env.INPUT_FILE || "parsed-auctions.json";
+const OUTPUT_FILE = process.env.OUTPUT_FILE || "mapped-output.json";
+const ANOMALY_FILE = process.env.ANOMALY_FILE || "mapping-anomalies.json";
+
+const MIN_SURPLUS = parseFloat(process.env.MIN_SURPLUS || "25000");
+const BATCH_SIZE = parseInt(process.env.BATCH_SIZE || "100", 10);
+const RETRY_MAX = parseInt(process.env.RETRY_MAX || "5", 10);
+const RETRY_BASE_MS = parseInt(process.env.RETRY_BASE_MS || "500", 10);
+const ENABLE_SHEET_IDEMPOTENCY = (process.env.ENABLE_SHEET_IDEMPOTENCY || "false").toLowerCase() === "true";
 
 // =========================
 // GOOGLE AUTH
@@ -76,7 +82,7 @@ function yn(val) {
 // =========================
 function parseCurrency(str) {
   if (!str) return null;
-  const n = parseFloat(str.replace(/[^0-9.-]/g, ""));
+  const n = parseFloat(String(str).replace(/[^0-9.-]/g, ""));
   return isNaN(n) ? null : n;
 }
 
@@ -84,7 +90,7 @@ function parseCurrency(str) {
 // Map parsed auction row → TSSF headers
 // =========================
 function mapRow(raw, urlMapping, anomalies) {
-  if (raw.auctionStatus !== "Sold") return null;
+  if (!raw || raw.auctionStatus !== "Sold") return null;
 
   const mapped = {};
   HEADERS.forEach(h => (mapped[h] = ""));
@@ -133,7 +139,7 @@ function mapRow(raw, urlMapping, anomalies) {
   mapped["Estimated Surplus"] = estimatedSurplus !== null ? String(estimatedSurplus) : "";
   mapped["Final Estimated Surplus to Owner"] = estimatedSurplus !== null ? String(estimatedSurplus) : "";
 
-  const meetsMinimum = estimatedSurplus !== null && estimatedSurplus >= 25000;
+  const meetsMinimum = estimatedSurplus !== null && estimatedSurplus >= MIN_SURPLUS;
   mapped["Meets Minimum Surplus? (Yes/No)"] = yn(meetsMinimum ? "Yes" : "No");
   mapped["Deal Viable? (Yes/No)"] = meetsMinimum ? "Yes" : "No";
 
@@ -149,65 +155,142 @@ function mapRow(raw, urlMapping, anomalies) {
 }
 
 // =========================
-// Append rows to sheet
+// Retry wrapper
 // =========================
-async function appendRows(rows) {
+async function withRetry(fn, retries = RETRY_MAX, baseMs = RETRY_BASE_MS) {
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const retriable = err && (err.code === 429 || (err.code >= 500 && err.code < 600));
+      if (!retriable || i === retries) throw err;
+      const wait = baseMs * Math.pow(2, i);
+      console.warn(`Retry ${i + 1}/${retries} after ${wait}ms due to error: ${err.message || err}`);
+      await new Promise(r => setTimeout(r, wait));
+    }
+  }
+}
+
+// =========================
+// Fetch existing keys from sheet for idempotency (optional)
+// Builds keys using Parcel / APN Number + Case Number + Auction Date if present
+// =========================
+async function fetchExistingKeys() {
+  try {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME_RAW}!A2:Z`,
+    });
+    const rows = res.data.values || [];
+    // find header indices by matching HEADERS in the sheet header row if present
+    // We assume the sheet uses the same HEADERS order; if not, we still attempt to map by header names
+    // Build keys from columns: Parcel / APN Number, Case Number, Auction Date
+    const keys = new Set();
+    for (const r of rows) {
+      const parcel = r[5] || ""; // HEADERS index 5 -> Parcel / APN Number
+      const caseNum = r[6] || ""; // index 6 -> Case Number
+      const date = r[7] || ""; // index 7 -> Auction Date
+      const key = `${(parcel || "").toString().trim()}|${(caseNum || "").toString().trim()}|${(date || "").toString().trim()}`;
+      if (key !== "||") keys.add(key);
+    }
+    console.log(`🔎 Fetched ${keys.size} existing keys from sheet for idempotency`);
+    return keys;
+  } catch (err) {
+    console.warn("⚠️ Could not fetch existing sheet rows for idempotency:", err.message || err);
+    return new Set();
+  }
+}
+
+// =========================
+// Append rows batched
+// =========================
+async function appendRowsBatched(rows) {
   if (!rows.length) {
     console.log("⚠️ No mapped rows to append.");
     return;
   }
-
-  const values = rows.map(row => HEADERS.map(h => row[h] || ""));
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: SPREADSHEET_ID,
-    range: SHEET_NAME_RAW,
-    valueInputOption: "RAW",
-    insertDataOption: "INSERT_ROWS",
-    requestBody: { values },
-  });
-  console.log(`✅ Appended ${values.length} mapped rows.`);
+  const batches = [];
+  for (let i = 0; i < rows.length; i += BATCH_SIZE) batches.push(rows.slice(i, i + BATCH_SIZE));
+  for (let i = 0; i < batches.length; i++) {
+    const values = batches[i].map(row => HEADERS.map(h => row[h] || ""));
+    await withRetry(() => sheets.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: SHEET_NAME_RAW,
+      valueInputOption: "RAW",
+      insertDataOption: "INSERT_ROWS",
+      requestBody: { values },
+    }));
+    console.log(`✅ Appended batch ${i + 1}/${batches.length} (${values.length} rows)`);
+    // small throttle to avoid quota bursts
+    await new Promise(r => setTimeout(r, 200));
+  }
 }
 
 // =========================
 // MAIN
 // =========================
 (async () => {
-  if (!fs.existsSync(INPUT_FILE)) {
-    console.error(`❌ Input file not found: ${INPUT_FILE}`);
-    process.exit(1);
-  }
+  try {
+    if (!fs.existsSync(INPUT_FILE)) {
+      console.error(`❌ Input file not found: ${INPUT_FILE}`);
+      process.exit(1);
+    }
 
-  const rawData = JSON.parse(fs.readFileSync(INPUT_FILE, "utf8"));
-  console.log(`📦 Loaded ${rawData.length} parsed rows from ${INPUT_FILE}`);
+    const rawData = JSON.parse(fs.readFileSync(INPUT_FILE, "utf8"));
+    console.log(`📦 Loaded ${rawData.length} parsed rows from ${INPUT_FILE}`);
 
-  const urlMapping = await getUrlMapping();
-  console.log(`🌐 Fetched ${Object.keys(urlMapping).length} URL → County/State mappings`);
+    const urlMapping = await getUrlMapping();
+    console.log(`🌐 Fetched ${Object.keys(urlMapping).length} URL → County/State mappings`);
 
-  const anomalies = [];
-  const uniqueMap = new Map();
+    const anomalies = [];
+    const uniqueMap = new Map();
 
-  rawData.forEach(raw => {
-    const key = `${(raw.sourceUrl || "").split("&page=")[0]}|${raw.caseNumber}|${raw.parcelId}`;
-    if (!uniqueMap.has(key)) {
+    // Optional: fetch existing keys from sheet to avoid appending duplicates
+    const existingKeys = ENABLE_SHEET_IDEMPOTENCY ? await fetchExistingKeys() : new Set();
+
+    rawData.forEach(raw => {
+      // build dedupe key consistent with extractor: baseUrl|caseNumber|parcelId
+      const baseUrl = (raw.sourceUrl || "").split("&page=")[0];
+      const key = `${baseUrl}|${raw.caseNumber || ""}|${raw.parcelId || ""}`;
+
+      // also build sheet-key for idempotency check (parcel|case|date)
+      const sheetKey = `${(raw.parcelId || "").toString().trim()}|${(raw.caseNumber || "").toString().trim()}|${(raw.auctionDate || raw.date || "").toString().trim()}`;
+
+      if (uniqueMap.has(key)) return; // local dedupe
+      if (existingKeys.has(sheetKey)) {
+        // skip rows already present in sheet
+        console.log(`⏭ Skipping already-present row (sheet idempotency): ${sheetKey}`);
+        return;
+      }
+
       const mapped = mapRow(raw, urlMapping, anomalies);
       if (mapped) uniqueMap.set(key, mapped);
+    });
+
+    const mappedRows = [...uniqueMap.values()];
+
+    if (mappedRows.length) {
+      console.log("🧪 Sample mapped row preview:", mappedRows[0]);
+    } else {
+      console.log("ℹ️ No mapped rows to append after dedupe/idempotency checks.");
     }
-  });
 
-  const mappedRows = [...uniqueMap.values()];
+    fs.writeFileSync(OUTPUT_FILE, JSON.stringify(mappedRows, null, 2));
+    console.log(`💾 Saved mapped rows → ${OUTPUT_FILE}`);
 
-  if (mappedRows.length) {
-    console.log("🧪 Sample mapped row preview:", mappedRows[0]);
+    if (anomalies.length) {
+      fs.writeFileSync(ANOMALY_FILE, JSON.stringify(anomalies, null, 2));
+      console.log(`⚠️ Saved ${anomalies.length} anomalies → ${ANOMALY_FILE}`);
+    }
+
+    // Append to sheet in batches with retry/backoff
+    if (mappedRows.length) {
+      await appendRowsBatched(mappedRows);
+    }
+
+    console.log("🏁 Done.");
+  } catch (err) {
+    console.error("❌ Fatal error in mappingScraper:", err.message || err);
+    process.exit(1);
   }
-
-  fs.writeFileSync(OUTPUT_FILE, JSON.stringify(mappedRows, null, 2));
-  console.log(`💾 Saved mapped rows → ${OUTPUT_FILE}`);
-
-  if (anomalies.length) {
-    fs.writeFileSync(ANOMALY_FILE, JSON.stringify(anomalies, null, 2));
-    console.log(`⚠️ Saved ${anomalies.length} anomalies → ${ANOMALY_FILE}`);
-  }
-
-  await appendRows(mappedRows);
-  console.log("🏁 Done.");
 })();
