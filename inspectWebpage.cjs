@@ -253,7 +253,7 @@ const { parseSoldContainer } = require('./lib/parseSold');
 async function inspectAndParse(page, url) {
   const pageResult = { relevantElements: [], parsedRows: [], error: null };
   try {
-    console.log(🌐 Visiting ${url});
+    console.log(Visiting ${url});
     await page.goto(url, { waitUntil: 'networkidle2', timeout: PAGE_TIMEOUT });
     await autoScroll(page);
     await page.waitForTimeout(1200);
@@ -332,10 +332,10 @@ async function inspectAndParse(page, url) {
     }
 
     pageResult.relevantElements = relevant;
-    console.log(📦 Elements found: ${relevant.length} | Auctions parsed: ${pageResult.parsedRows.length});
+    console.log( Elements found: ${relevant.length} | Auctions parsed: ${pageResult.parsedRows.length});
     return pageResult;
   } catch (err) {
-    console.error('❌ Error on', url, err.message);
+    console.error(' Error on', url, err.message);
     pageResult.error = { url, message: err.message };
     return pageResult;
   }
@@ -363,16 +363,16 @@ async function scrapeAllPages(browser, startUrl) {
 
     // stop when no new elements or rows found
     if (!result.relevantElements.length && !result.parsedRows.length) {
-      console.log('⛔ No more pages or no relevant content found');
+      console.log(' No more pages or no relevant content found');
       break;
     }
 
     pageIndex++;
     if (pageIndex > 50) {
-      console.log('⚠️ Reached page limit, stopping.');
+      console.log('Reached page limit, stopping.');
       break;
     }
-    console.log(`➡️ Moving to page ${pageIndex}`);
+    console.log(` Moving to page ${pageIndex}`);
     // small randomized delay to reduce fingerprinting
     await page.waitForTimeout(500 + Math.floor(Math.random() * 800));
   }
@@ -384,7 +384,7 @@ async function scrapeAllPages(browser, startUrl) {
 // =========================
 // MAIN
 (async () => {
-  console.log('📥 Loading URLs...');
+  console.log(' Loading URLs...');
   const urls = await loadTargetUrls();
   if (!urls.length) {
     console.log('No URLs found. Exiting.');
@@ -428,7 +428,7 @@ async function scrapeAllPages(browser, startUrl) {
   fs.writeFileSync(OUTPUT_ROWS_FILE, JSON.stringify(allRows, null, 2));
   if (allErrors.length) {
     fs.writeFileSync(OUTPUT_ERRORS_FILE, JSON.stringify(allErrors, null, 2));
-    console.log(`⚠️ Saved ${allErrors.length} errors → ${OUTPUT_ERRORS_FILE}`);
+    console.log(` Saved ${allErrors.length} errors → ${OUTPUT_ERRORS_FILE}`);
   }
 
   const summary = {
@@ -447,8 +447,8 @@ async function scrapeAllPages(browser, startUrl) {
 
   fs.writeFileSync(OUTPUT_SUMMARY_FILE, JSON.stringify(summary, null, 2));
 
-  console.log(`✅ Saved elements (ndjson) → ${OUTPUT_ELEMENTS_FILE}`);
-  console.log(`✅ Saved ${allRows.length} auctions → ${OUTPUT_ROWS_FILE}`);
-  console.log(`📊 Saved summary → ${OUTPUT_SUMMARY_FILE}`);
-  console.log('🏁 Done');
+  console.log(`Saved elements (ndjson) → ${OUTPUT_ELEMENTS_FILE}`);
+  console.log(` Saved ${allRows.length} auctions → ${OUTPUT_ROWS_FILE}`);
+  console.log(`Saved summary → ${OUTPUT_SUMMARY_FILE}`);
+  console.log(' Done');
 })();
