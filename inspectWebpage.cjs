@@ -406,7 +406,7 @@ async function inspectAndParse(page, url) {
         propertyAddress: (blockText.match(/Property Address\s*:?\\s*([^|\\n]+)/i) || [])[1] || '',
         openingBid,
         assessedValue,
-        auctionDate: (blockText.match(/Date\\/?Time\s*:?\\s*([^|\\n]+)/i) || [])[1] || '',
+        auctionDate: (blockText.match(/Date\/?Time\s*:?\s*([^|\n]+)/i) || [])[1] || '',
         salePrice,
         surplus,
         meetsMinimumSurplus: surplus !== null && surplus >= MIN_SURPLUS ? 'Yes' : 'No'
