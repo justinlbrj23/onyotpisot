@@ -1,7 +1,8 @@
 // inspectWebpage.cjs
 // Stage 2: evaluation + filtration with stealth hardening
 // Requires:
-// npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis p-limit
+// npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis
+// This version uses a built-in concurrency limiter and robust polyfills for compatibility.
 
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
@@ -10,7 +11,6 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { google } = require('googleapis');
-const pLimit = require('p-limit').default || require('p-limit');
 
 puppeteer.use(StealthPlugin());
 
@@ -58,6 +58,32 @@ function appendNdjson(file, obj) {
   fs.appendFileSync(file, JSON.stringify(obj) + '\n');
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Lightweight concurrency limiter (replacement for p-limit)
+function makeLimiter(concurrency) {
+  let active = 0;
+  const queue = [];
+  const next = () => {
+    if (active >= concurrency || queue.length === 0) return;
+    active++;
+    const { fn, resolve, reject } = queue.shift();
+    fn()
+      .then(res => resolve(res))
+      .catch(err => reject(err))
+      .finally(() => {
+        active--;
+        next();
+      });
+  };
+  return (fn) => new Promise((resolve, reject) => {
+    queue.push({ fn, resolve, reject });
+    next();
+  });
+}
+
 // =========================
 // LOAD URLS
 async function loadTargetUrls() {
@@ -67,8 +93,8 @@ async function loadTargetUrls() {
   });
   return (res.data.values || [])
     .flat()
-    .map(v => v.trim())
-    .filter(v => v.startsWith('http'));
+    .map(v => (v || '').toString().trim())
+    .filter(v => v && v.startsWith('http'));
 }
 
 // =========================
@@ -96,20 +122,25 @@ async function setupRequestInterception(page) {
 }
 
 async function autoScroll(page) {
-  await page.evaluate(async () => {
-    await new Promise(resolve => {
-      let total = 0;
-      const distance = 400;
-      const timer = setInterval(() => {
-        window.scrollBy(0, distance);
-        total += distance;
-        if (total > document.body.scrollHeight) {
-          clearInterval(timer);
-          resolve();
-        }
-      }, 200);
+  try {
+    await page.evaluate(async () => {
+      await new Promise(resolve => {
+        let total = 0;
+        const distance = 400;
+        const timer = setInterval(() => {
+          window.scrollBy(0, distance);
+          total += distance;
+          if (total > document.body.scrollHeight) {
+            clearInterval(timer);
+            resolve();
+          }
+        }, 200);
+      });
     });
-  });
+  } catch (e) {
+    // if evaluate fails, fallback to a short sleep
+    await sleep(500);
+  }
 }
 
 // =========================
@@ -256,9 +287,20 @@ async function inspectAndParse(page, url) {
 
   try {
     console.log(`🌐 Visiting ${url}`);
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: PAGE_TIMEOUT });
+    // safe navigation with retry
+    try {
+      await page.goto(url, { waitUntil: 'networkidle2', timeout: PAGE_TIMEOUT });
+    } catch (e) {
+      // fallback: try once more with a longer timeout
+      try {
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT * 2 });
+      } catch (e2) {
+        throw e2;
+      }
+    }
+
     await autoScroll(page);
-    await page.waitForTimeout(1200);
+    await sleep(1200);
 
     const nodes = await page.evaluate(IN_PAGE_EXTRACTOR);
 
@@ -452,7 +494,7 @@ async function scrapeAllPages(browser, startUrl) {
       break;
     }
     console.log(`➡️ Moving to page ${pageIndex}`);
-    await page.waitForTimeout(500 + Math.floor(Math.random() * 800));
+    await sleep(500 + Math.floor(Math.random() * 800));
   }
 
   await page.close();
@@ -472,7 +514,7 @@ async function scrapeAllPages(browser, startUrl) {
   try { fs.unlinkSync(OUTPUT_ELEMENTS_FILE); } catch(e) {}
   fs.writeFileSync(OUTPUT_ELEMENTS_FILE, '');
 
-  const limit = pLimit(CONCURRENCY);
+  const limit = makeLimiter(CONCURRENCY);
 
   const browser = await puppeteer.launch({
     headless: true,
