@@ -1,15 +1,20 @@
 // inspectWebpage.cjs
-// Scraper with Dallas site-specific table extractor, robust sleep polyfill, and built-in concurrency limiter.
+// Stage 2: evaluation + filtration with stealth hardening
+// Site-specific extractor added for dallas.texas.sheriffsaleauctions.com
+// Requires:
+// npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis
 
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const cheerio = require('cheerio'); // fallback only
 const fs = require('fs');
 const crypto = require('crypto');
 const { google } = require('googleapis');
 
 puppeteer.use(StealthPlugin());
 
-// CONFIG
+// =========================
+// CONFIG (env overrides)
 const SERVICE_ACCOUNT_FILE = process.env.SERVICE_ACCOUNT_FILE || './service-account.json';
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA';
 const SHEET_NAME = process.env.SHEET_NAME || 'web_tda';
@@ -25,6 +30,7 @@ const MAX_NODES_PER_PAGE = parseInt(process.env.MAX_NODES_PER_PAGE || '20000', 1
 const CONCURRENCY = parseInt(process.env.CONCURRENCY || '3', 10);
 const PAGE_TIMEOUT = parseInt(process.env.PAGE_TIMEOUT || '120000', 10);
 
+// =========================
 // GOOGLE AUTH
 const auth = new google.auth.GoogleAuth({
   keyFile: SERVICE_ACCOUNT_FILE,
@@ -32,18 +38,29 @@ const auth = new google.auth.GoogleAuth({
 });
 const sheets = google.sheets({ version: 'v4', auth });
 
+// =========================
 // HELPERS
 function parseCurrency(str) {
   if (!str) return null;
   const s = String(str).replace(/\s+/g, '');
   const million = /([\d,.]+)M$/i.exec(s);
   if (million) return parseFloat(million[1].replace(/,/g, '')) * 1e6;
-  const n = parseFloat(s.replace(/[^0-9.-]/g, ''));
+  const n = parseFloat(String(str).replace(/[^0-9.-]/g, ''));
   return isNaN(n) ? null : n;
 }
-function hashString(s) { return crypto.createHash('sha1').update(String(s || '')).digest('hex'); }
-function appendNdjson(file, obj) { fs.appendFileSync(file, JSON.stringify(obj) + '\n'); }
-function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+function hashString(s) {
+  return crypto.createHash('sha1').update(String(s || '')).digest('hex');
+}
+
+function appendNdjson(file, obj) {
+  fs.appendFileSync(file, JSON.stringify(obj) + '\n');
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 function makeLimiter(concurrency) {
   let active = 0;
   const queue = [];
@@ -51,20 +68,34 @@ function makeLimiter(concurrency) {
     if (active >= concurrency || queue.length === 0) return;
     active++;
     const { fn, resolve, reject } = queue.shift();
-    fn().then(res => resolve(res)).catch(err => reject(err)).finally(() => { active--; next(); });
+    fn()
+      .then(res => resolve(res))
+      .catch(err => reject(err))
+      .finally(() => {
+        active--;
+        next();
+      });
   };
-  return (fn) => new Promise((resolve, reject) => { queue.push({ fn, resolve, reject }); next(); });
+  return (fn) => new Promise((resolve, reject) => {
+    queue.push({ fn, resolve, reject });
+    next();
+  });
 }
 
+// =========================
 // LOAD URLS
 async function loadTargetUrls() {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
     range: `${SHEET_NAME}!${URL_RANGE}`,
   });
-  return (res.data.values || []).flat().map(v => (v || '').toString().trim()).filter(v => v && v.startsWith('http'));
+  return (res.data.values || [])
+    .flat()
+    .map(v => (v || '').toString().trim())
+    .filter(v => v && v.startsWith('http'));
 }
 
+// =========================
 // BROWSER UTILITIES
 async function setupRequestInterception(page) {
   try {
@@ -72,12 +103,22 @@ async function setupRequestInterception(page) {
     page.on('request', req => {
       const r = req.resourceType();
       const url = req.url();
-      if (r === 'image' || r === 'font' || r === 'stylesheet' || /analytics|doubleclick|googlesyndication|google-analytics|ads|tracking/i.test(url)) {
+      if (
+        r === 'image' ||
+        r === 'font' ||
+        r === 'stylesheet' ||
+        /analytics|doubleclick|googlesyndication|google-analytics|ads|tracking/i.test(url)
+      ) {
         req.abort();
-      } else req.continue();
+      } else {
+        req.continue();
+      }
     });
-  } catch (e) {}
+  } catch (e) {
+    // ignore if not supported
+  }
 }
+
 async function autoScroll(page) {
   try {
     await page.evaluate(async () => {
@@ -87,17 +128,30 @@ async function autoScroll(page) {
         const timer = setInterval(() => {
           window.scrollBy(0, distance);
           total += distance;
-          if (total > document.body.scrollHeight) { clearInterval(timer); resolve(); }
+          if (total > document.body.scrollHeight) {
+            clearInterval(timer);
+            resolve();
+          }
         }, 200);
       });
     });
-  } catch (e) { await sleep(500); }
+  } catch (e) {
+    await sleep(500);
+  }
 }
 
-// SITE-SPECIFIC TABLE EXTRACTOR FOR DALLAS
+// =========================
+// SITE-SPECIFIC TABLE EXTRACTOR (Dallas sheriff sale preview pages)
 const DALLAS_TABLE_EXTRACTOR = `
 (() => {
-  const selectors = ['table.previewTable','table#tblPreview','div.preview table','table'];
+  // Try common table selectors used on sheriff sale preview pages
+  const selectors = [
+    'table', // fallback to any table
+    'table.previewTable',
+    'table#tblPreview',
+    'div.preview table',
+    '.auctionPreview table'
+  ];
   function normalize(s){ return (s||'').replace(/\\s+/g,' ').trim(); }
   for (const sel of selectors) {
     const t = document.querySelector(sel);
@@ -111,7 +165,10 @@ const DALLAS_TABLE_EXTRACTOR = `
       const cols = Array.from(r.querySelectorAll('td')).map(c => normalize(c.innerText));
       if (!cols.length) continue;
       const obj = {};
-      for (let i = 0; i < cols.length; i++) { const key = headers[i] || ('col' + i); obj[key] = cols[i]; }
+      for (let i = 0; i < cols.length; i++) {
+        const key = headers[i] || ('col' + i);
+        obj[key] = cols[i];
+      }
       out.push(obj);
     }
     if (out.length) return out;
@@ -120,7 +177,8 @@ const DALLAS_TABLE_EXTRACTOR = `
 })();
 `;
 
-// GENERIC IN-PAGE EXTRACTOR (fallback)
+// =========================
+// IN-PAGE GENERIC EXTRACTION (kept as fallback)
 const IN_PAGE_EXTRACTOR = `
 (() => {
   function cssPath(el) {
@@ -142,6 +200,7 @@ const IN_PAGE_EXTRACTOR = `
     }
     return parts.join(' > ');
   }
+
   function isVisible(el) {
     try {
       const style = window.getComputedStyle(el);
@@ -151,31 +210,53 @@ const IN_PAGE_EXTRACTOR = `
       return rect.width > 0 && rect.height > 0;
     } catch (e) { return false; }
   }
+
   function collectFromRoot(root, cap) {
     const out = [];
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, null, false);
-    let node; let index = 0;
+    let node;
+    let index = 0;
     while ((node = walker.nextNode()) && index < cap) {
       index++;
       try {
         const tag = node.tagName.toLowerCase();
         const text = (node.innerText || '').replace(/\\s+/g,' ').trim().slice(0,2000);
         const attrs = {};
-        for (let i=0;i<node.attributes.length;i++){ const a = node.attributes[i]; attrs[a.name] = a.value; }
+        for (let i=0;i<node.attributes.length;i++){
+          const a = node.attributes[i];
+          attrs[a.name] = a.value;
+        }
         const rect = node.getBoundingClientRect();
-        out.push({ tag, cssPath: cssPath(node), text, innerHTML: node.innerHTML ? node.innerHTML.slice(0,2000) : '', attrs, dataset: node.dataset || {}, role: node.getAttribute('role') || '', aria: Object.keys(node.attributes || {}).filter(n=>n.startsWith('aria-')).reduce((acc,k)=>{acc[k]=node.getAttribute(k);return acc;},{ }), visible: isVisible(node), rect: { x: rect.x, y: rect.y, w: rect.width, h: rect.height } });
-      } catch(e) {}
+        out.push({
+          tag,
+          cssPath: cssPath(node),
+          text,
+          innerHTML: node.innerHTML ? node.innerHTML.slice(0,2000) : '',
+          attrs,
+          dataset: node.dataset || {},
+          role: node.getAttribute('role') || '',
+          aria: Object.keys(node.attributes || {}).filter(n=>n.startsWith('aria-')).reduce((acc,k)=>{acc[k]=node.getAttribute(k);return acc;},{ }),
+          visible: isVisible(node),
+          rect: { x: rect.x, y: rect.y, w: rect.width, h: rect.height }
+        });
+      } catch(e) { /* ignore node errors */ }
     }
     return out;
   }
+
   const cap = ${MAX_NODES_PER_PAGE};
   let results = collectFromRoot(document, cap);
+
   const all = Array.from(document.querySelectorAll('*'));
   for (const el of all) {
     if (el.shadowRoot) {
-      try { results = results.concat(collectFromRoot(el.shadowRoot, cap - results.length)); if (results.length >= cap) break; } catch(e) {}
+      try {
+        results = results.concat(collectFromRoot(el.shadowRoot, cap - results.length));
+        if (results.length >= cap) break;
+      } catch(e) {}
     }
   }
+
   const iframes = Array.from(document.querySelectorAll('iframe'));
   for (const f of iframes) {
     try {
@@ -186,31 +267,69 @@ const IN_PAGE_EXTRACTOR = `
         results = results.concat(frameResults);
         if (results.length >= cap) break;
       } else {
-        results.push({ tag: 'iframe', cssPath: cssPath(f), text: '', innerHTML: '', attrs: { src: f.src || '' }, dataset: {}, role: f.getAttribute('role') || '', aria: {}, visible: isVisible(f), rect: (function(){ const rect = f.getBoundingClientRect(); return { x: rect.x, y: rect.y, w: rect.width, h: rect.height }; })(), frameUrl: f.src || '' });
+        results.push({
+          tag: 'iframe',
+          cssPath: cssPath(f),
+          text: '',
+          innerHTML: '',
+          attrs: { src: f.src || '' },
+          dataset: {},
+          role: f.getAttribute('role') || '',
+          aria: {},
+          visible: isVisible(f),
+          rect: (function(){ const rect = f.getBoundingClientRect(); return { x: rect.x, y: rect.y, w: rect.width, h: rect.height }; })(),
+          frameUrl: f.src || ''
+        });
       }
     } catch(e) {
-      results.push({ tag: 'iframe', cssPath: cssPath(f), text: '', innerHTML: '', attrs: { src: f.src || '' }, dataset: {}, role: f.getAttribute('role') || '', aria: {}, visible: isVisible(f), rect: { x:0,y:0,w:0,h:0 }, frameUrl: f.src || '' });
+      results.push({
+        tag: 'iframe',
+        cssPath: cssPath(f),
+        text: '',
+        innerHTML: '',
+        attrs: { src: f.src || '' },
+        dataset: {},
+        role: f.getAttribute('role') || '',
+        aria: {},
+        visible: isVisible(f),
+        rect: { x:0,y:0,w:0,h:0 },
+        frameUrl: f.src || ''
+      });
     }
   }
+
   return results.slice(0, cap);
 })();
 `;
 
-// PARSING HELPERS
-function normalizeText(s) { if (!s) return ''; return String(s).replace(/\s+/g, ' ').replace(/\u00A0/g, ' ').trim(); }
+// =========================
+// PARSING UTILITIES
+function normalizeText(s) {
+  if (!s) return '';
+  return String(s).replace(/\s+/g, ' ').replace(/\u00A0/g, ' ').trim();
+}
+
+// Map table-like row object (from DALLAS_TABLE_EXTRACTOR) to parsed row
 function mapDallasTableRow(obj, url) {
+  // obj keys are header text lowercased; values are cell text
   const get = k => {
     if (!obj) return '';
+    // try exact key, then partial matches
     if (obj[k]) return obj[k];
     const keys = Object.keys(obj);
-    for (const kk of keys) if (kk.includes(k)) return obj[kk];
+    for (const kk of keys) {
+      if (kk.includes(k)) return obj[kk];
+    }
     return '';
   };
+
+  // Common header keywords
   const date = get('date') || get('auction date') || get('sale date') || '';
   const apn = get('apn') || get('parcel') || get('parcel id') || get('parcel number') || '';
   const address = get('address') || get('property address') || '';
   const amount = get('amount') || get('sale price') || get('sold amount') || get('winning bid') || '';
   const opening = get('opening') || get('opening bid') || get('minimum') || '';
+
   const parsed = {
     sourceUrl: url,
     auctionStatus: /sold|finalized|sold for/i.test(amount || '') ? 'Sold' : 'Active',
@@ -225,33 +344,70 @@ function mapDallasTableRow(obj, url) {
     surplus: null,
     meetsMinimumSurplus: 'No'
   };
+
   const sale = parseCurrency(parsed.salePrice);
   const open = parseCurrency(parsed.openingBid);
   if (sale !== null && open !== null) {
-    parsed.surplus = open - sale;
+    parsed.surplus = open !== null ? (open - sale) : null;
     parsed.meetsMinimumSurplus = parsed.surplus !== null && parsed.surplus >= MIN_SURPLUS ? 'Yes' : 'No';
+  } else if (sale !== null) {
+    parsed.surplus = null;
   }
+
   return parsed;
 }
 
-// PAGE PARSING
+// =========================
+// PAGE PARSING + HIGHER-LEVEL ROW EXTRACTION
 async function inspectAndParse(page, url) {
   const pageResult = { relevantElements: [], parsedRows: [], error: null };
+
   try {
     console.log(`🌐 Visiting ${url}`);
-    try { await page.goto(url, { waitUntil: 'networkidle2', timeout: PAGE_TIMEOUT }); }
-    catch (e) { try { await page.goto(url, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT * 2 }); } catch (e2) { throw e2; } }
+    try {
+      await page.goto(url, { waitUntil: 'networkidle2', timeout: PAGE_TIMEOUT });
+    } catch (e) {
+      try {
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT * 2 });
+      } catch (e2) {
+        throw e2;
+      }
+    }
+
     await autoScroll(page);
     await sleep(1200);
 
+    // Site-specific extraction for Dallas sheriff sale preview pages
     let dallasRows = [];
-    try { if (url.includes('dallas.texas.sheriffsaleauctions.com')) dallasRows = await page.evaluate(DALLAS_TABLE_EXTRACTOR); } catch (e) { dallasRows = []; }
+    try {
+      if (url.includes('dallas.texas.sheriffsaleauctions.com')) {
+        dallasRows = await page.evaluate(DALLAS_TABLE_EXTRACTOR);
+      }
+    } catch (e) {
+      // ignore site-specific extraction errors
+      dallasRows = [];
+    }
 
     if (Array.isArray(dallasRows) && dallasRows.length) {
+      // Map each table row into parsedRows
       for (const r of dallasRows) {
         const parsed = mapDallasTableRow(r, url);
         pageResult.parsedRows.push(parsed);
-        const el = { sourceUrl: url, tag: 'table-row', cssPath: '', text: JSON.stringify(r).slice(0,2000), innerHTML: '', attrs: {}, dataset: {}, role: '', aria: {}, visible: true, rect: { x:0,y:0,w:0,h:0 }, frameUrl: '' };
+        // also append a minimal element record for traceability
+        const el = {
+          sourceUrl: url,
+          tag: 'table-row',
+          cssPath: '',
+          text: JSON.stringify(r).slice(0,2000),
+          innerHTML: '',
+          attrs: {},
+          dataset: {},
+          role: '',
+          aria: {},
+          visible: true,
+          rect: { x:0,y:0,w:0,h:0 },
+          frameUrl: ''
+        };
         pageResult.relevantElements.push(el);
         appendNdjson(OUTPUT_ELEMENTS_FILE, el);
       }
@@ -259,23 +415,41 @@ async function inspectAndParse(page, url) {
       return pageResult;
     }
 
+    // Fallback to generic extraction
     const nodes = await page.evaluate(IN_PAGE_EXTRACTOR);
-    const auctionTextRegex = /(\$[0-9]{1,3}(?:,[0-9]{3})+)|\\bAPN\\b|\\bParcel\\b|\\bAuction\\b|\\bCase\\b/i;
+
+    const auctionTextRegex = /(\$[0-9]{1,3}(?:,[0-9]{3})+)|\bAPN\b|\bParcel\b|\bAuction\b|\bCase\b/i;
     const relevant = [];
     const seen = new Set();
+
     for (const n of nodes) {
-      const text = (n.text || '').replace(/\\s+/g, ' ').trim();
+      const text = (n.text || '').replace(/\s+/g, ' ').trim();
       const attrsString = JSON.stringify(n.attrs || {});
       const key = hashString(n.cssPath + '|' + text.slice(0,200));
       if (seen.has(key)) continue;
       seen.add(key);
+
       if (auctionTextRegex.test(text) || /apn|parcel|auction|case/i.test(attrsString)) {
-        const out = { sourceUrl: url, tag: n.tag, cssPath: n.cssPath, text, innerHTML: n.innerHTML, attrs: n.attrs, dataset: n.dataset, role: n.role, aria: n.aria, visible: n.visible, rect: n.rect, frameUrl: n.frameUrl || '' };
+        const out = {
+          sourceUrl: url,
+          tag: n.tag,
+          cssPath: n.cssPath,
+          text,
+          innerHTML: n.innerHTML,
+          attrs: n.attrs,
+          dataset: n.dataset,
+          role: n.role,
+          aria: n.aria,
+          visible: n.visible,
+          rect: n.rect,
+          frameUrl: n.frameUrl || ''
+        };
         relevant.push(out);
         appendNdjson(OUTPUT_ELEMENTS_FILE, out);
       }
     }
 
+    // Build candidate containers by grouping relevant nodes by parent path heuristics
     const containerCandidates = new Map();
     for (const r of relevant) {
       const parts = (r.cssPath || '').split(' > ');
@@ -288,34 +462,103 @@ async function inspectAndParse(page, url) {
     for (const [containerPath, sampleText] of containerCandidates.entries()) {
       const blockText = normalizeText(sampleText);
       if (!blockText) continue;
-      const openingBidMatch = blockText.match(/Opening Bid\\s*:?[\\s\\S]*?\\$[0-9,]+(?:\\.[0-9]{2})?/i);
-      const openingBid = openingBidMatch ? openingBidMatch[0].replace(/Opening Bid\\s*:?/i, '').trim() : '';
-      const assessedValueMatch = blockText.match(/Assessed Value\\s*:?[\\s\\S]*?\\$[0-9,]+(?:\\.[0-9]{2})?/i);
-      const assessedValue = assessedValueMatch ? assessedValueMatch[0].replace(/Assessed Value\\s*:?/i, '').trim() : '';
-      const salePriceMatch = blockText.match(/\\$[0-9,]+(?:\\.[0-9]{2})?/g);
+
+      const looksSold = /sold|auction sold|sale finalized|finalized/i.test(blockText);
+      if (looksSold) {
+        const openingBidMatch = blockText.match(/Opening Bid\s*:?\s*\$[0-9,]+(?:\.[0-9]{2})?/i);
+        const openingBid = openingBidMatch ? openingBidMatch[0].replace(/Opening Bid\s*:?/i, '').trim() : '';
+
+        const assessedValueMatch = blockText.match(/Assessed Value\s*:?\s*\$[0-9,]+(?:\.[0-9]{2})?/i);
+        const assessedValue = assessedValueMatch ? assessedValueMatch[0].replace(/Assessed Value\s*:?/i, '').trim() : '';
+
+        const SALE_PRICE_LABELS = ['Amount','Sale Price','Sold Amount','Winning Bid','Final Bid','Sale Amount','Sold Price','Sold For'];
+        let salePrice = '';
+        for (const label of SALE_PRICE_LABELS) {
+          const regex = new RegExp(label.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&') + '\\s*:?\\s*\\$[0-9,]+(?:\\.[0-9]{2})?', 'i');
+          const m = blockText.match(regex);
+          if (m) {
+            const raw = m[0];
+            const cleaned = raw.replace(new RegExp(label + '\\s*:?\\s*', 'i'), '').trim();
+            salePrice = cleaned;
+            break;
+          }
+        }
+        if (!salePrice) {
+          const moneyMatch = blockText.match(/\$[0-9,]+(?:\.[0-9]{2})?/g);
+          if (moneyMatch && moneyMatch.length) salePrice = moneyMatch[moneyMatch.length - 1];
+        }
+
+        const parcelMatch = blockText.match(/APN\s*[:#]?\s*([0-9A-Za-z-]+)/i) || blockText.match(/Parcel ID\s*[:#]?\s*([0-9A-Za-z-]+)/i);
+        const parcelId = parcelMatch ? parcelMatch[1].trim() : '';
+
+        if (!parcelId || !openingBid) {
+          // fallback to generic parsing below
+        } else {
+          const open = parseCurrency(openingBid);
+          const assess = parseCurrency(assessedValue);
+          const soldPrice = parseCurrency(salePrice);
+
+          let surplus = null;
+          if (assess !== null) {
+            if (soldPrice !== null) surplus = assess - soldPrice;
+            else if (open !== null) surplus = assess - open;
+          }
+
+          pageResult.parsedRows.push({
+            sourceUrl: url,
+            containerPath,
+            auctionStatus: 'Sold',
+            auctionType: (blockText.match(/Auction Type\s*:?\s*([^|\n]+)/i) || [])[1] || '',
+            caseNumber: (blockText.match(/Case\s*#?\s*[:#]?\s*([^|\n]+)/i) || [])[1] || '',
+            parcelId,
+            propertyAddress: (blockText.match(/Property Address\s*:?\s*([^|\n]+)/i) || [])[1] || '',
+            openingBid,
+            assessedValue,
+            auctionDate: (blockText.match(/Date\/?Time\s*:?\s*([^|\n]+)/i) || [])[1] || '',
+            salePrice,
+            surplus,
+            meetsMinimumSurplus: surplus !== null && surplus >= MIN_SURPLUS ? 'Yes' : 'No'
+          });
+          continue;
+        }
+      }
+
+      // Generic fallback parsing (keeps previous behavior)
+      const openingBidMatch = blockText.match(/Opening Bid\s*:?\s*\$[0-9,]+(?:\.[0-9]{2})?/i);
+      const openingBid = openingBidMatch ? openingBidMatch[0].replace(/Opening Bid\s*:?/i, '').trim() : '';
+
+      const assessedValueMatch = blockText.match(/Assessed Value\s*:?\s*\$[0-9,]+(?:\.[0-9]{2})?/i);
+      const assessedValue = assessedValueMatch ? assessedValueMatch[0].replace(/Assessed Value\s*:?/i, '').trim() : '';
+
+      const salePriceMatch = blockText.match(/\$[0-9,]+(?:\.[0-9]{2})?/g);
       const salePrice = salePriceMatch ? salePriceMatch[salePriceMatch.length - 1] : '';
-      const parcelMatch = blockText.match(/APN\\s*[:#]?\\s*([0-9A-Za-z-]+)/i) || blockText.match(/Parcel ID\\s*[:#]?\\s*([0-9A-Za-z-]+)/i);
+
+      const parcelMatch = blockText.match(/APN\s*[:#]?\s*([0-9A-Za-z-]+)/i) || blockText.match(/Parcel ID\s*[:#]?\s*([0-9A-Za-z-]+)/i);
       const parcelId = parcelMatch ? parcelMatch[1].trim() : '';
+
       if (!parcelId || !openingBid) continue;
+
       const open = parseCurrency(openingBid);
       const soldPrice = parseCurrency(salePrice);
       const assess = parseCurrency(assessedValue);
+
       let surplus = null;
       if (assess !== null) {
         if (soldPrice !== null) surplus = assess - soldPrice;
         else if (open !== null) surplus = assess - open;
       }
+
       pageResult.parsedRows.push({
         sourceUrl: url,
         containerPath,
         auctionStatus: /sold/i.test(blockText) ? 'Sold' : 'Active',
-        auctionType: (blockText.match(/Auction Type\\s*:?\\s*([^|\\n]+)/i) || [])[1] || '',
-        caseNumber: (blockText.match(/Case\\s*#?\\s*[:#]?\\s*([^|\\n]+)/i) || [])[1] || '',
+        auctionType: (blockText.match(/Auction Type\s*:?\s*([^|\n]+)/i) || [])[1] || '',
+        caseNumber: (blockText.match(/Case\s*#?\s*[:#]?\s*([^|\n]+)/i) || [])[1] || '',
         parcelId,
-        propertyAddress: (blockText.match(/Property Address\\s*:?\\s*([^|\\n]+)/i) || [])[1] || '',
+        propertyAddress: (blockText.match(/Property Address\s*:?\s*([^|\n]+)/i) || [])[1] || '',
         openingBid,
         assessedValue,
-        auctionDate: (blockText.match(/Date\\/?Time\\s*:?\\s*([^|\\n]+)/i) || [])[1] || '',
+        auctionDate: (blockText.match(/Date\/?Time\s*:?\s*([^|\n]+)/i) || [])[1] || '',
         salePrice,
         surplus,
         meetsMinimumSurplus: surplus !== null && surplus >= MIN_SURPLUS ? 'Yes' : 'No'
@@ -332,6 +575,7 @@ async function inspectAndParse(page, url) {
   }
 }
 
+// =========================
 // SCRAPE PAGINATED URLS
 async function scrapeAllPages(browser, startUrl) {
   const page = await browser.newPage();
@@ -341,30 +585,41 @@ async function scrapeAllPages(browser, startUrl) {
 
   const allRows = [];
   const errors = [];
+
   let pageIndex = 1;
   while (true) {
     const currentUrl = pageIndex === 1 ? startUrl : `${startUrl}&page=${pageIndex}`;
     const result = await inspectAndParse(page, currentUrl);
     if (result.error) errors.push(result.error);
     allRows.push(...result.parsedRows);
+
     if (!result.relevantElements.length && !result.parsedRows.length) {
       console.log('⛔ No more pages or no relevant content found');
       break;
     }
+
     pageIndex++;
-    if (pageIndex > 50) { console.log('⚠️ Reached page limit, stopping.'); break; }
+    if (pageIndex > 50) {
+      console.log('⚠️ Reached page limit, stopping.');
+      break;
+    }
     console.log(`➡️ Moving to page ${pageIndex}`);
     await sleep(500 + Math.floor(Math.random() * 800));
   }
+
   await page.close();
   return { allRows, errors };
 }
 
+// =========================
 // MAIN
 (async () => {
   console.log('📥 Loading URLs...');
   const urls = await loadTargetUrls();
-  if (!urls.length) { console.log('No URLs found. Exiting.'); process.exit(0); }
+  if (!urls.length) {
+    console.log('No URLs found. Exiting.');
+    process.exit(0);
+  }
 
   try { fs.unlinkSync(OUTPUT_ELEMENTS_FILE); } catch(e) {}
   fs.writeFileSync(OUTPUT_ELEMENTS_FILE, '');
@@ -373,7 +628,13 @@ async function scrapeAllPages(browser, startUrl) {
 
   const browser = await puppeteer.launch({
     headless: true,
-    args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-blink-features=AutomationControlled','--ignore-certificate-errors'],
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-blink-features=AutomationControlled',
+      '--ignore-certificate-errors',
+    ],
   });
 
   const allRows = [];
@@ -390,14 +651,23 @@ async function scrapeAllPages(browser, startUrl) {
   }));
 
   await Promise.all(tasks);
+
   await browser.close();
 
   fs.writeFileSync(OUTPUT_ROWS_FILE, JSON.stringify(allRows, null, 2));
-  if (allErrors.length) { fs.writeFileSync(OUTPUT_ERRORS_FILE, JSON.stringify(allErrors, null, 2)); console.log(`⚠️ Saved ${allErrors.length} errors → ${OUTPUT_ERRORS_FILE}`); }
+  if (allErrors.length) {
+    fs.writeFileSync(OUTPUT_ERRORS_FILE, JSON.stringify(allErrors, null, 2));
+    console.log(`⚠️ Saved ${allErrors.length} errors → ${OUTPUT_ERRORS_FILE}`);
+  }
 
   const summary = {
     totalUrls: urls.length,
-    totalElements: (() => { try { const lines = fs.readFileSync(OUTPUT_ELEMENTS_FILE, 'utf8').trim().split('\\n').filter(Boolean); return lines.length; } catch (e) { return 0; } })(),
+    totalElements: (() => {
+      try {
+        const lines = fs.readFileSync(OUTPUT_ELEMENTS_FILE, 'utf8').trim().split('\n').filter(Boolean);
+        return lines.length;
+      } catch (e) { return 0; }
+    })(),
     totalRowsFinal: allRows.length,
     errorsCount: allErrors.length,
     surplusAboveThreshold: allRows.filter(r => r.meetsMinimumSurplus === 'Yes').length,
@@ -405,6 +675,7 @@ async function scrapeAllPages(browser, startUrl) {
   };
 
   fs.writeFileSync(OUTPUT_SUMMARY_FILE, JSON.stringify(summary, null, 2));
+
   console.log(`✅ Saved elements (ndjson) → ${OUTPUT_ELEMENTS_FILE}`);
   console.log(`✅ Saved ${allRows.length} auctions → ${OUTPUT_ROWS_FILE}`);
   console.log(`📊 Saved summary → ${OUTPUT_SUMMARY_FILE}`);
