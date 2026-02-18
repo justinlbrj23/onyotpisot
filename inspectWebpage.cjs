@@ -242,179 +242,97 @@ const IN_PAGE_EXTRACTOR = `
 
 // =========================
 // PAGE PARSING + HIGHER-LEVEL ROW EXTRACTION
-async function inspectAndParse(page, url) {
-  const pageResult = {
-    relevantElements: [],
-    parsedRows: [],
-    error: null
-  };
+// inspectWebpage.cjs
+// Only the changed/integration parts are shown here. Replace your existing inspectAndParse function
+// and add the require for the parser at the top of the file.
 
+const { parseSoldContainer } = require('./lib/parseSold');
+
+// ... existing imports and setup remain unchanged ...
+
+async function inspectAndParse(page, url) {
+  const pageResult = { relevantElements: [], parsedRows: [], error: null };
   try {
-    console.log(`🌐 Visiting ${url}`);
+    console.log(🌐 Visiting ${url});
     await page.goto(url, { waitUntil: 'networkidle2', timeout: PAGE_TIMEOUT });
     await autoScroll(page);
-    // short mutation observer window to capture late DOM changes
-    await page.evaluate(() => {
-      return new Promise(resolve => {
-        const obs = new MutationObserver(() => {});
-        obs.observe(document, { childList: true, subtree: true });
-        setTimeout(() => { obs.disconnect(); resolve(); }, 1500);
-      });
-    });
+    await page.waitForTimeout(1200);
 
-    // run in-page extractor
-    const nodes = await page.evaluate(IN_PAGE_EXTRACTOR);
+    // run in-page extractor (same as earlier provided INPAGEEXTRACTOR)
+    const nodes = await page.evaluate(INPAGEEXTRACTOR);
 
-    // filter for auction-relevant nodes quickly in Node
+    // quick filter for auction-relevant nodes
     const auctionTextRegex = /(\$[0-9]{1,3}(?:,[0-9]{3})+)|\bAPN\b|\bParcel\b|\bAuction\b|\bCase\b/i;
     const relevant = [];
     const seen = new Set();
 
     for (const n of nodes) {
       const text = (n.text || '').replace(/\s+/g, ' ').trim();
-      const attrsString = JSON.stringify(n.attrs || {});
-      const key = hashString(n.cssPath + '|' + text.slice(0,200));
+      const key = ${n.cssPath}|${text.slice(0,200)};
       if (seen.has(key)) continue;
       seen.add(key);
-
-      if (auctionTextRegex.test(text) || /apn|parcel|auction|case/i.test(attrsString)) {
-        const out = {
-          sourceUrl: url,
-          tag: n.tag,
-          cssPath: n.cssPath,
-          text,
-          innerHTML: n.innerHTML,
-          attrs: n.attrs,
-          dataset: n.dataset,
-          role: n.role,
-          aria: n.aria,
-          visible: n.visible,
-          rect: n.rect,
-          frameUrl: n.frameUrl || ''
-        };
+      if (auctionTextRegex.test(text) || /apn|parcel|auction|case/i.test(JSON.stringify(n.attrs || {}))) {
+        const out = { sourceUrl: url, tag: n.tag, cssPath: n.cssPath, text, innerHTML: n.innerHTML, attrs: n.attrs, visible: n.visible, rect: n.rect, frameUrl: n.frameUrl || '' };
         relevant.push(out);
-        appendNdjson(OUTPUT_ELEMENTS_FILE, out);
+        appendNdjson(OUTPUTELEMENTSFILE, out);
       }
     }
 
-    // CARD-BASED PARSING: coarse pass to find container nodes that look like auction cards
-    // We'll look for containers that contain money + parcel/APN keywords
-    const containers = [];
+    // Build candidate containers by grouping relevant nodes by parent path heuristics
+    const containerCandidates = new Map();
     for (const r of relevant) {
-      // use cssPath to find parent container heuristics: take up to 3 levels up
-      const pathParts = (r.cssPath || '').split(' > ');
-      if (pathParts.length <= 1) continue;
-      // candidate container path: parent or grandparent
-      const parentPath = pathParts.slice(0, Math.max(1, pathParts.length - 1)).join(' > ');
-      containers.push({ parentPath, sampleText: r.text });
+      const parts = (r.cssPath || '').split(' > ');
+      if (parts.length <= 1) continue;
+      const parentPath = parts.slice(0, Math.max(1, parts.length - 1)).join(' > ');
+      if (!containerCandidates.has(parentPath)) containerCandidates.set(parentPath, r.text);
+      else containerCandidates.set(parentPath, containerCandidates.get(parentPath) + ' | ' + r.text);
     }
 
-    // dedupe containers
-    const containerMap = new Map();
-    for (const c of containers) {
-      if (!containerMap.has(c.parentPath)) containerMap.set(c.parentPath, c.sampleText);
-    }
-
-    // For each container, attempt to extract structured fields using regexes on the sampleText
-    const SALE_PRICE_LABELS = [
-      'Amount',
-      'Sale Price',
-      'Sold Amount',
-      'Winning Bid',
-      'Final Bid',
-      'Sale Amount'
-    ];
-
-    for (const [containerPath, sampleText] of containerMap.entries()) {
-      const blockText = (sampleText || '').replace(/\s+/g, ' ').trim();
+    // For each container, first try the generic parser, then the sold-specific parser as fallback
+    for (const [containerPath, sampleText] of containerCandidates.entries()) {
+      const blockText = sampleText.replace(/\s+/g, ' ').trim();
       if (!blockText) continue;
 
-      // quick heuristics: must contain money or APN/Parcel
-      if (!/(\$[0-9]|APN|Parcel|Auction|Case)/i.test(blockText)) continue;
+      // Try sold-specific parser from lib/parseSold.js
+      const soldRow = parseSoldContainer(blockText);
+      if (soldRow) {
+        parsedRow = Object.assign({ sourceUrl: url, containerPath }, soldRow);
+        pageResult.parsedRows.push(parsedRow);
+        continue;
+      }
 
-      // extractors
-      const extractLabel = (label) => {
-        const regex = new RegExp(label.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&') + '\\s*:?\\s*([^\\n$]+)', 'i');
-        const m = blockText.match(regex);
-        if (m) return m[1].trim();
-        const regex2 = new RegExp(label.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&') + '\\s+([^\\n$]+)', 'i');
-        const m2 = blockText.match(regex2);
-        return m2 ? m2[1].trim() : '';
-      };
-
-      // Auction Status
-      let auctionStatus = 'Active';
-      if (/redeemed/i.test(blockText)) auctionStatus = 'Redeemed';
-      else if (/auction sold/i.test(blockText) || /sold/i.test(blockText)) auctionStatus = 'Sold';
-
-      // Opening Bid
-      const openingBidMatch = blockText.match(/Opening Bid\\s*:?\\s*\\$[0-9,]+(?:\\.[0-9]{2})?/i);
+      // Generic extraction fallback (your existing logic for openingBid, assessedValue, salePrice)
+      // Keep your existing regex-based extraction here if needed
+      // Example minimal fallback:
+      const openingBidMatch = blockText.match(/Opening Bid\s:?\\s\\$[0-9,]+(?:\\.[0-9]{2})?/i);
       const openingBid = openingBidMatch ? openingBidMatch[0].replace(/Opening Bid\\s*:?/i, '').trim() : '';
+      const salePrice = (blockText.match(/\\$[0-9,]+(?:\\.[0-9]{2})?/) || [''])[0];
+      const parcelId = (blockText.match(/APN\\s[:#]?\\s([0-9A-Za-z-]+)/i) || [])[1] || '';
 
-      // Assessed Value
-      const assessedValueMatch = blockText.match(/Assessed Value\\s*:?\\s*\\$[0-9,]+(?:\\.[0-9]{2})?/i);
-      const assessedValue = assessedValueMatch ? assessedValueMatch[0].replace(/Assessed Value\\s*:?/i, '').trim() : '';
-
-      // Auction Date
-      const auctionDateMatch = blockText.match(/Date\\/?Time\\s*:?\\s*([0-9]{1,2}\\/[^\\n]+)/i);
-      const auctionDate = auctionDateMatch ? auctionDateMatch[1].trim() : '';
-
-      // Sale Price candidates
-      let salePrice = '';
-      for (const label of SALE_PRICE_LABELS) {
-        const regex = new RegExp(label.replace(/[-/\\\\^$*+?.()|[\\]{}]/g, '\\\\$&') + '\\s*:?\\s*\\$[0-9,]+(?:\\.[0-9]{2})?', 'i');
-        const m = blockText.match(regex);
-        if (m) {
-          const raw = m[0];
-          const cleaned = raw.replace(new RegExp(label + '\\\\s*:?\\\\s*', 'i'), '').trim();
-          salePrice = cleaned;
-          break;
-        }
-      }
-
-      // Parcel ID attempt: look for APN or first link-like token
-      let parcelId = '';
-      const apnMatch = blockText.match(/APN\\s*[:#]?\\s*([0-9A-Za-z-]+)/i);
-      if (apnMatch) parcelId = apnMatch[1].trim();
-      else {
-        const linkLike = blockText.match(/\\b[A-Z0-9-]{4,}\\b/);
-        if (linkLike) parcelId = linkLike[0];
-      }
-
-      // require minimal fields
       if (!parcelId || !openingBid) continue;
 
       const open = parseCurrency(openingBid);
-      const assess = parseCurrency(assessedValue);
       const soldPrice = parseCurrency(salePrice);
+      const assessMatch = blockText.match(/Assessed Value\\s:?\\s\\$[0-9,]+(?:\\.[0-9]{2})?/i);
+      const assessedValue = assessMatch ? assessMatch[0].replace(/Assessed Value\\s*:?/i, '').trim() : '';
 
-      let surplus = null;
-      if (assess !== null) {
-        if (auctionStatus === 'Sold' && soldPrice !== null) surplus = assess - soldPrice;
-        else if (open !== null) surplus = assess - open;
-      }
+      const surplus = (assessedValue && soldPrice) ? (parseCurrency(assessedValue) - soldPrice) : null;
 
-      const row = {
+      pageResult.parsedRows.push({
         sourceUrl: url,
         containerPath,
-        auctionStatus,
-        auctionType: extractLabel('Auction Type'),
-        caseNumber: extractLabel('Case #') || extractLabel('Case'),
+        auctionStatus: /sold/i.test(blockText) ? 'Sold' : 'Active',
         parcelId,
-        propertyAddress: extractLabel('Property Address'),
         openingBid,
         assessedValue,
-        auctionDate,
         salePrice,
         surplus,
-        meetsMinimumSurplus: surplus !== null && surplus >= ${MIN_SURPLUS} ? 'Yes' : 'No'
-      };
-
-      pageResult.parsedRows.push(row);
+        meetsMinimumSurplus: surplus !== null && surplus >= MIN_SURPLUS ? 'Yes' : 'No'
+      });
     }
 
     pageResult.relevantElements = relevant;
-    console.log(\`📦 Elements found: \${relevant.length} | Auctions parsed: \${pageResult.parsedRows.length}\`);
+    console.log(📦 Elements found: ${relevant.length} | Auctions parsed: ${pageResult.parsedRows.length});
     return pageResult;
   } catch (err) {
     console.error('❌ Error on', url, err.message);
