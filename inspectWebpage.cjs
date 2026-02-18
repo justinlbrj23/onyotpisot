@@ -312,10 +312,10 @@ async function inspectAndParse(page, url) {
       const looksSold = /sold|auction sold|sale finalized|finalized/i.test(blockText);
       if (looksSold) {
         // Try to extract common fields
-        const openingBidMatch = blockText.match(/Opening Bid\s*:?\\s*\\$[0-9,]+(?:\\.[0-9]{2})?/i);
+        const openingBidMatch = blockText.match(/Opening Bid\s*:?\s*\$[0-9,]+(?:\.[0-9]{2})?/i);
         const openingBid = openingBidMatch ? openingBidMatch[0].replace(/Opening Bid\s*:?/i, '').trim() : '';
 
-        const assessedValueMatch = blockText.match(/Assessed Value\s*:?\\s*\\$[0-9,]+(?:\\.[0-9]{2})?/i);
+        const assessedValueMatch = blockText.match(/Assessed Value\s*:?\s*\$[0-9,]+(?:\.[0-9]{2})?/i);
         const assessedValue = assessedValueMatch ? assessedValueMatch[0].replace(/Assessed Value\s*:?/i, '').trim() : '';
 
         // Sale price: try multiple labels
@@ -332,11 +332,11 @@ async function inspectAndParse(page, url) {
           }
         }
         if (!salePrice) {
-          const moneyMatch = blockText.match(/\\$[0-9,]+(?:\\.[0-9]{2})?/g);
+          const moneyMatch = blockText.match(/\$[0-9,]+(?:\.[0-9]{2})?/g);
           if (moneyMatch && moneyMatch.length) salePrice = moneyMatch[moneyMatch.length - 1];
         }
 
-        const parcelMatch = blockText.match(/APN\\s*[:#]?\\s*([0-9A-Za-z-]+)/i) || blockText.match(/Parcel ID\\s*[:#]?\\s*([0-9A-Za-z-]+)/i);
+        const parcelMatch = blockText.match(/APN\s*[:#]?\s*([0-9A-Za-z-]+)/i) || blockText.match(/Parcel ID\s*[:#]?\s*([0-9A-Za-z-]+)/i);
         const parcelId = parcelMatch ? parcelMatch[1].trim() : '';
 
         if (!parcelId || !openingBid) {
@@ -356,13 +356,13 @@ async function inspectAndParse(page, url) {
             sourceUrl: url,
             containerPath,
             auctionStatus: 'Sold',
-            auctionType: (blockText.match(/Auction Type\s*:?\\s*([^|\\n]+)/i) || [])[1] || '',
-            caseNumber: (blockText.match(/Case\\s*#?\\s*[:#]?\\s*([^|\\n]+)/i) || [])[1] || '',
+            auctionType: (blockText.match(/Auction Type\s*:?\s*([^|\n]+)/i) || [])[1] || '',
+            caseNumber: (blockText.match(/Case\s*#?\s*[:#]?\s*([^|\n]+)/i) || [])[1] || '',
             parcelId,
-            propertyAddress: (blockText.match(/Property Address\\s*:?\\s*([^|\\n]+)/i) || [])[1] || '',
+            propertyAddress: (blockText.match(/Property Address\s*:?\s*([^|\n]+)/i) || [])[1] || '',
             openingBid,
             assessedValue,
-            auctionDate: (blockText.match(/Date\\/?Time\\s*:?\\s*([^|\\n]+)/i) || [])[1] || '',
+            auctionDate: (blockText.match(/Date\/?Time\s*:?\s*([^|\n]+)/i) || [])[1] || '',
             salePrice,
             surplus,
             meetsMinimumSurplus: surplus !== null && surplus >= MIN_SURPLUS ? 'Yes' : 'No'
@@ -372,16 +372,16 @@ async function inspectAndParse(page, url) {
       }
 
       // Generic extraction fallback
-      const openingBidMatch = blockText.match(/Opening Bid\s*:?\\s*\\$[0-9,]+(?:\\.[0-9]{2})?/i);
+      const openingBidMatch = blockText.match(/Opening Bid\s*:?\s*\$[0-9,]+(?:\.[0-9]{2})?/i);
       const openingBid = openingBidMatch ? openingBidMatch[0].replace(/Opening Bid\s*:?/i, '').trim() : '';
 
-      const assessedValueMatch = blockText.match(/Assessed Value\s*:?\\s*\\$[0-9,]+(?:\\.[0-9]{2})?/i);
+      const assessedValueMatch = blockText.match(/Assessed Value\s*:?\s*\$[0-9,]+(?:\.[0-9]{2})?/i);
       const assessedValue = assessedValueMatch ? assessedValueMatch[0].replace(/Assessed Value\s*:?/i, '').trim() : '';
 
-      const salePriceMatch = blockText.match(/\\$[0-9,]+(?:\\.[0-9]{2})?/g);
+      const salePriceMatch = blockText.match(/\$[0-9,]+(?:\.[0-9]{2})?/g);
       const salePrice = salePriceMatch ? salePriceMatch[salePriceMatch.length - 1] : '';
 
-      const parcelMatch = blockText.match(/APN\\s*[:#]?\\s*([0-9A-Za-z-]+)/i) || blockText.match(/Parcel ID\\s*[:#]?\\s*([0-9A-Za-z-]+)/i);
+      const parcelMatch = blockText.match(/APN\s*[:#]?\s*([0-9A-Za-z-]+)/i) || blockText.match(/Parcel ID\s*[:#]?\s*([0-9A-Za-z-]+)/i);
       const parcelId = parcelMatch ? parcelMatch[1].trim() : '';
 
       if (!parcelId || !openingBid) continue;
@@ -400,10 +400,10 @@ async function inspectAndParse(page, url) {
         sourceUrl: url,
         containerPath,
         auctionStatus: /sold/i.test(blockText) ? 'Sold' : 'Active',
-        auctionType: (blockText.match(/Auction Type\s*:?\\s*([^|\\n]+)/i) || [])[1] || '',
-        caseNumber: (blockText.match(/Case\\s*#?\\s*[:#]?\\s*([^|\\n]+)/i) || [])[1] || '',
+        auctionType: (blockText.match(/Auction Type\s*:?\s*([^|\n]+)/i) || [])[1] || '',
+        caseNumber: (blockText.match(/Case\s*#?\s*[:#]?\s*([^|\n]+)/i) || [])[1] || '',
         parcelId,
-        propertyAddress: (blockText.match(/Property Address\s*:?\\s*([^|\\n]+)/i) || [])[1] || '',
+        propertyAddress: (blockText.match(/Property Address\s*:?\s*([^|\n]+)/i) || [])[1] || '',
         openingBid,
         assessedValue,
         auctionDate: (blockText.match(/Date\/?Time\s*:?\s*([^|\n]+)/i) || [])[1] || '',
