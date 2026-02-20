@@ -10,14 +10,23 @@ jobs:
       GOOGLE_APPLICATION_CREDENTIALS: ./service-account.json
 
     steps:
+      # --------------------------------------------------
+      # Checkout repository
+      # --------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # --------------------------------------------------
+      # Setup Node.js
+      # --------------------------------------------------
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
+      # --------------------------------------------------
+      # Install dependencies
+      # --------------------------------------------------
       - name: Install dependencies
         run: |
           if [ -f package-lock.json ]; then
@@ -25,31 +34,50 @@ jobs:
           else
             npm install
           fi
-          # Ensure required packages are present
+          # Ensure required packages (including stealth and cheerio/googleapis)
           npm install puppeteer-extra puppeteer-extra-plugin-stealth puppeteer cheerio googleapis
+          # Install jq for robust JSON validation
+          sudo apt-get update -y
+          sudo apt-get install -y jq
 
+      # --------------------------------------------------
+      # Write Service Account JSON (preserve newlines)
+      # --------------------------------------------------
       - name: Write Service Account JSON
         run: |
-          printf '%s' "${{ secrets.SERVICE_ACCOUNT_JSON }}" > service-account.json
+          cat > service-account.json <<'EOF'
+${{ secrets.SERVICE_ACCOUNT_JSON }}
+EOF
           chmod 600 service-account.json
 
+      # --------------------------------------------------
+      # Validate service account JSON (jq)
+      # --------------------------------------------------
       - name: Validate service account JSON
         run: |
-          node -e "
-            const fs = require('fs');
-            const j = JSON.parse(fs.readFileSync('service-account.json','utf8'));
-            if (!j.private_key || !j.client_email) {
-              throw new Error('Invalid service account JSON');
-            }
-            console.log('Service account OK:', j.client_email);
-          "
+          if ! jq -e . service-account.json >/dev/null 2>&1; then
+            echo "Invalid JSON in service-account.json"
+            echo "First 200 bytes of file for debugging:"
+            head -c 200 service-account.json | sed -n '1,200p'
+            exit 1
+          fi
+          echo "Service account JSON is valid."
+          echo "Service account email:"
+          jq -r '.client_email // "MISSING_CLIENT_EMAIL"' service-account.json
 
+      # --------------------------------------------------
+      # STEP 1 — Create TSSF Headers
+      # --------------------------------------------------
       - name: Run organizer_headers_tssf.cjs
         run: node organizer_headers_tssf.cjs
 
+      # --------------------------------------------------
+      # STEP 2 — Run webInspector.cjs (Sold-only)
+      # --------------------------------------------------
       - name: Run webInspector.cjs
         run: node webInspector.cjs
 
+      # Save artifacts from webInspector
       - name: Upload inspector artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -60,9 +88,13 @@ jobs:
             errors.json
             summary.json
 
+      # --------------------------------------------------
+      # STEP 3 — Run mappingScraper.cjs (Final Mapping, Sold-only)
+      # --------------------------------------------------
       - name: Run mappingScraper.cjs
         run: node mappingScraper.cjs parsed-auctions.json
 
+      # Save mapped output and anomalies
       - name: Upload mapped output
         uses: actions/upload-artifact@v4
         with:
@@ -71,6 +103,9 @@ jobs:
             mapped-output.json
             mapping-anomalies.json
 
+      # --------------------------------------------------
+      # Cleanup credentials
+      # --------------------------------------------------
       - name: Cleanup secrets
         if: always()
         run: rm -f service-account.json
