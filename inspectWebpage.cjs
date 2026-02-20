@@ -1,37 +1,33 @@
-// inspectWebpage.cjs
-// Stage 2: evaluation + filtration with stealth hardening
-// Site-specific extractor added for dallas.texas.sheriffsaleauctions.com
+// inspectWebpage.cjs (Stage 2: evaluation + filtration with stealth hardening)
 // Requires:
 // npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis
 
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-const cheerio = require('cheerio'); // fallback only
+const cheerio = require('cheerio');
 const fs = require('fs');
-const crypto = require('crypto');
 const { google } = require('googleapis');
 
 puppeteer.use(StealthPlugin());
 
 // =========================
-// CONFIG (env overrides)
-const SERVICE_ACCOUNT_FILE = process.env.SERVICE_ACCOUNT_FILE || './service-account.json';
-const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA';
-const SHEET_NAME = process.env.SHEET_NAME || 'web_tda';
-const URL_RANGE = process.env.URL_RANGE || 'C2:C';
+// CONFIG
+// =========================
+const SERVICE_ACCOUNT_FILE = './service-account.json';
+const SPREADSHEET_ID = '1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA';
+const SHEET_NAME = 'web_tda';
+const URL_RANGE = 'C2:C';
 
-const OUTPUT_ELEMENTS_FILE = process.env.OUTPUT_ELEMENTS_FILE || 'raw-elements.ndjson';
-const OUTPUT_ROWS_FILE = process.env.OUTPUT_ROWS_FILE || 'parsed-auctions.json';
-const OUTPUT_ERRORS_FILE = process.env.OUTPUT_ERRORS_FILE || 'errors.json';
-const OUTPUT_SUMMARY_FILE = process.env.OUTPUT_SUMMARY_FILE || 'summary.json';
+const OUTPUT_ELEMENTS_FILE = 'raw-elements.json';
+const OUTPUT_ROWS_FILE = 'parsed-auctions.json';
+const OUTPUT_ERRORS_FILE = 'errors.json';
+const OUTPUT_SUMMARY_FILE = 'summary.json';
 
-const MIN_SURPLUS = parseFloat(process.env.MIN_SURPLUS || '25000');
-const MAX_NODES_PER_PAGE = parseInt(process.env.MAX_NODES_PER_PAGE || '20000', 10);
-const CONCURRENCY = parseInt(process.env.CONCURRENCY || '3', 10);
-const PAGE_TIMEOUT = parseInt(process.env.PAGE_TIMEOUT || '120000', 10);
+const MIN_SURPLUS = 25000;
 
 // =========================
 // GOOGLE AUTH
+// =========================
 const auth = new google.auth.GoogleAuth({
   keyFile: SERVICE_ACCOUNT_FILE,
   scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
@@ -39,562 +35,227 @@ const auth = new google.auth.GoogleAuth({
 const sheets = google.sheets({ version: 'v4', auth });
 
 // =========================
-// HELPERS
-function parseCurrency(str) {
-  if (!str) return null;
-  const s = String(str).replace(/\s+/g, '');
-  const million = /([\d,.]+)M$/i.exec(s);
-  if (million) return parseFloat(million[1].replace(/,/g, '')) * 1e6;
-  const n = parseFloat(String(str).replace(/[^0-9.-]/g, ''));
-  return isNaN(n) ? null : n;
-}
-
-function hashString(s) {
-  return crypto.createHash('sha1').update(String(s || '')).digest('hex');
-}
-
-function appendNdjson(file, obj) {
-  fs.appendFileSync(file, JSON.stringify(obj) + '\n');
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function makeLimiter(concurrency) {
-  let active = 0;
-  const queue = [];
-  const next = () => {
-    if (active >= concurrency || queue.length === 0) return;
-    active++;
-    const { fn, resolve, reject } = queue.shift();
-    fn()
-      .then(res => resolve(res))
-      .catch(err => reject(err))
-      .finally(() => {
-        active--;
-        next();
-      });
-  };
-  return (fn) => new Promise((resolve, reject) => {
-    queue.push({ fn, resolve, reject });
-    next();
-  });
-}
-
+/** Load URLs */
 // =========================
-// LOAD URLS
 async function loadTargetUrls() {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
     range: `${SHEET_NAME}!${URL_RANGE}`,
   });
+
   return (res.data.values || [])
     .flat()
-    .map(v => (v || '').toString().trim())
-    .filter(v => v && v.startsWith('http'));
+    .map(v => v.trim())
+    .filter(v => v.startsWith('http'));
 }
 
 // =========================
-// BROWSER UTILITIES
-async function setupRequestInterception(page) {
-  try {
-    await page.setRequestInterception(true);
-    page.on('request', req => {
-      const r = req.resourceType();
-      const url = req.url();
-      if (
-        r === 'image' ||
-        r === 'font' ||
-        r === 'stylesheet' ||
-        /analytics|doubleclick|googlesyndication|google-analytics|ads|tracking/i.test(url)
-      ) {
-        req.abort();
-      } else {
-        req.continue();
-      }
-    });
-  } catch (e) {
-    // ignore if not supported
-  }
+/** Currency parser */
+// =========================
+function parseCurrency(str) {
+  if (!str) return null;
+  const n = parseFloat(str.replace(/[^0-9.-]/g, ''));
+  return isNaN(n) ? null : n;
 }
 
-async function autoScroll(page) {
-  try {
-    await page.evaluate(async () => {
-      await new Promise(resolve => {
-        let total = 0;
-        const distance = 400;
-        const timer = setInterval(() => {
-          window.scrollBy(0, distance);
-          total += distance;
-          if (total > document.body.scrollHeight) {
-            clearInterval(timer);
-            resolve();
-          }
-        }, 200);
-      });
-    });
-  } catch (e) {
-    await sleep(500);
+// =========================
+/** Delay helper */
+// =========================
+async function delay(page, ms) {
+  if (typeof page.waitForTimeout === 'function') {
+    await page.waitForTimeout(ms);
+  } else {
+    await new Promise(resolve => setTimeout(resolve, ms));
   }
 }
 
 // =========================
-// SITE-SPECIFIC TABLE EXTRACTOR (Dallas sheriff sale preview pages)
-const DALLAS_TABLE_EXTRACTOR = `
-(() => {
-  // Try common table selectors used on sheriff sale preview pages
-  const selectors = [
-    'table', // fallback to any table
-    'table.previewTable',
-    'table#tblPreview',
-    'div.preview table',
-    '.auctionPreview table'
-  ];
-  function normalize(s){ return (s||'').replace(/\\s+/g,' ').trim(); }
-  for (const sel of selectors) {
-    const t = document.querySelector(sel);
-    if (!t) continue;
-    const rows = Array.from(t.querySelectorAll('tr'));
-    if (!rows.length) continue;
-    const headerRow = rows.find(r => r.querySelectorAll('th').length > 0) || rows[0];
-    const headers = Array.from(headerRow.querySelectorAll('th,td')).map(h => normalize(h.innerText).toLowerCase());
-    const out = [];
-    for (const r of rows.slice(1)) {
-      const cols = Array.from(r.querySelectorAll('td')).map(c => normalize(c.innerText));
-      if (!cols.length) continue;
-      const obj = {};
-      for (let i = 0; i < cols.length; i++) {
-        const key = headers[i] || ('col' + i);
-        obj[key] = cols[i];
-      }
-      out.push(obj);
-    }
-    if (out.length) return out;
-  }
-  return [];
-})();
-`;
-
+/** Inspect + Parse Page */
 // =========================
-// IN-PAGE GENERIC EXTRACTION (kept as fallback)
-const IN_PAGE_EXTRACTOR = `
-(() => {
-  function cssPath(el) {
-    if (!el) return '';
-    const parts = [];
-    while (el && el.nodeType === 1 && el.tagName.toLowerCase() !== 'html') {
-      let part = el.tagName.toLowerCase();
-      if (el.id) part += '#' + el.id;
-      else if (el.className && typeof el.className === 'string') {
-        const cls = el.className.trim().split(/\\s+/).slice(0,2).join('.');
-        if (cls) part += '.' + cls;
-      }
-      let nth = 1;
-      let p = el.previousElementSibling;
-      while (p) { if (p.tagName === el.tagName) nth++; p = p.previousElementSibling; }
-      if (nth > 1) part += ':nth-of-type(' + nth + ')';
-      parts.unshift(part);
-      el = el.parentElement;
-    }
-    return parts.join(' > ');
-  }
-
-  function isVisible(el) {
-    try {
-      const style = window.getComputedStyle(el);
-      if (!style) return false;
-      if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) return false;
-      const rect = el.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
-    } catch (e) { return false; }
-  }
-
-  function collectFromRoot(root, cap) {
-    const out = [];
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, null, false);
-    let node;
-    let index = 0;
-    while ((node = walker.nextNode()) && index < cap) {
-      index++;
-      try {
-        const tag = node.tagName.toLowerCase();
-        const text = (node.innerText || '').replace(/\\s+/g,' ').trim().slice(0,2000);
-        const attrs = {};
-        for (let i=0;i<node.attributes.length;i++){
-          const a = node.attributes[i];
-          attrs[a.name] = a.value;
-        }
-        const rect = node.getBoundingClientRect();
-        out.push({
-          tag,
-          cssPath: cssPath(node),
-          text,
-          innerHTML: node.innerHTML ? node.innerHTML.slice(0,2000) : '',
-          attrs,
-          dataset: node.dataset || {},
-          role: node.getAttribute('role') || '',
-          aria: Object.keys(node.attributes || {}).filter(n=>n.startsWith('aria-')).reduce((acc,k)=>{acc[k]=node.getAttribute(k);return acc;},{ }),
-          visible: isVisible(node),
-          rect: { x: rect.x, y: rect.y, w: rect.width, h: rect.height }
-        });
-      } catch(e) { /* ignore node errors */ }
-    }
-    return out;
-  }
-
-  const cap = ${MAX_NODES_PER_PAGE};
-  let results = collectFromRoot(document, cap);
-
-  const all = Array.from(document.querySelectorAll('*'));
-  for (const el of all) {
-    if (el.shadowRoot) {
-      try {
-        results = results.concat(collectFromRoot(el.shadowRoot, cap - results.length));
-        if (results.length >= cap) break;
-      } catch(e) {}
-    }
-  }
-
-  const iframes = Array.from(document.querySelectorAll('iframe'));
-  for (const f of iframes) {
-    try {
-      const doc = f.contentDocument;
-      if (doc) {
-        const frameResults = collectFromRoot(doc, cap - results.length);
-        for (const r of frameResults) r.frameUrl = f.src || location.href;
-        results = results.concat(frameResults);
-        if (results.length >= cap) break;
-      } else {
-        results.push({
-          tag: 'iframe',
-          cssPath: cssPath(f),
-          text: '',
-          innerHTML: '',
-          attrs: { src: f.src || '' },
-          dataset: {},
-          role: f.getAttribute('role') || '',
-          aria: {},
-          visible: isVisible(f),
-          rect: (function(){ const rect = f.getBoundingClientRect(); return { x: rect.x, y: rect.y, w: rect.width, h: rect.height }; })(),
-          frameUrl: f.src || ''
-        });
-      }
-    } catch(e) {
-      results.push({
-        tag: 'iframe',
-        cssPath: cssPath(f),
-        text: '',
-        innerHTML: '',
-        attrs: { src: f.src || '' },
-        dataset: {},
-        role: f.getAttribute('role') || '',
-        aria: {},
-        visible: isVisible(f),
-        rect: { x:0,y:0,w:0,h:0 },
-        frameUrl: f.src || ''
-      });
-    }
-  }
-
-  return results.slice(0, cap);
-})();
-`;
-
-// =========================
-// PARSING UTILITIES
-function normalizeText(s) {
-  if (!s) return '';
-  return String(s).replace(/\s+/g, ' ').replace(/\u00A0/g, ' ').trim();
-}
-
-// Map table-like row object (from DALLAS_TABLE_EXTRACTOR) to parsed row
-function mapDallasTableRow(obj, url) {
-  // obj keys are header text lowercased; values are cell text
-  const get = k => {
-    if (!obj) return '';
-    // try exact key, then partial matches
-    if (obj[k]) return obj[k];
-    const keys = Object.keys(obj);
-    for (const kk of keys) {
-      if (kk.includes(k)) return obj[kk];
-    }
-    return '';
-  };
-
-  // Common header keywords
-  const date = get('date') || get('auction date') || get('sale date') || '';
-  const apn = get('apn') || get('parcel') || get('parcel id') || get('parcel number') || '';
-  const address = get('address') || get('property address') || '';
-  const amount = get('amount') || get('sale price') || get('sold amount') || get('winning bid') || '';
-  const opening = get('opening') || get('opening bid') || get('minimum') || '';
-
-  const parsed = {
-    sourceUrl: url,
-    auctionStatus: /sold|finalized|sold for/i.test(amount || '') ? 'Sold' : 'Active',
-    auctionType: '',
-    caseNumber: get('case') || get('case number') || '',
-    parcelId: apn,
-    propertyAddress: address,
-    openingBid: opening,
-    assessedValue: '',
-    auctionDate: date,
-    salePrice: amount,
-    surplus: null,
-    meetsMinimumSurplus: 'No'
-  };
-
-  const sale = parseCurrency(parsed.salePrice);
-  const open = parseCurrency(parsed.openingBid);
-  if (sale !== null && open !== null) {
-    parsed.surplus = open !== null ? (open - sale) : null;
-    parsed.meetsMinimumSurplus = parsed.surplus !== null && parsed.surplus >= MIN_SURPLUS ? 'Yes' : 'No';
-  } else if (sale !== null) {
-    parsed.surplus = null;
-  }
-
-  return parsed;
-}
-
-// =========================
-// PAGE PARSING + HIGHER-LEVEL ROW EXTRACTION
 async function inspectAndParse(page, url) {
-  const pageResult = { relevantElements: [], parsedRows: [], error: null };
-
   try {
     console.log(`🌐 Visiting ${url}`);
-    try {
-      await page.goto(url, { waitUntil: 'networkidle2', timeout: PAGE_TIMEOUT });
-    } catch (e) {
-      try {
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT * 2 });
-      } catch (e2) {
-        throw e2;
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 120000 });
+    await delay(page, 15000);
+
+    const html = await page.content();
+    if (
+      html.includes('403 Forbidden') ||
+      html.includes('Access Denied') ||
+      html.toLowerCase().includes('forbidden')
+    ) {
+      throw new Error('Blocked by target website (403)');
+    }
+
+    const $ = cheerio.load(html);
+
+    // (1) FILTER: auction-relevant elements ONLY
+    const relevantElements = [];
+    const auctionTextRegex =
+      /(\$\d{1,3}(,\d{3})+)|(\bAPN\b)|(\bParcel\b)|(\bAuction\b)|(\bCase\b)/i;
+
+    $('*').each((_, el) => {
+      const tag = el.tagName;
+      const text = $(el).text().replace(/\s+/g, ' ').trim();
+      const attrs = el.attribs || {};
+      if (text && auctionTextRegex.test(text)) {
+        relevantElements.push({ sourceUrl: url, tag, text, attrs });
       }
-    }
+    });
 
-    await autoScroll(page);
-    await sleep(1200);
+    // Helper: robust label-based extractor within a block of text
+    const makeExtractor = blockText => label => {
+      // Try "Label: value"
+      let regex = new RegExp(`${label}\\s*:?\\s*([^\\n$]+)`, 'i');
+      let m = blockText.match(regex);
+      if (m) return m[1].trim();
 
-    // Site-specific extraction for Dallas sheriff sale preview pages
-    let dallasRows = [];
-    try {
-      if (url.includes('dallas.texas.sheriffsaleauctions.com')) {
-        dallasRows = await page.evaluate(DALLAS_TABLE_EXTRACTOR);
+      // Fallback: "Label value" until next label-like token
+      regex = new RegExp(`${label}\\s+([^\\n$]+)`, 'i');
+      m = blockText.match(regex);
+      return m ? m[1].trim() : '';
+    };
+
+    // Sale price label variants
+    const SALE_PRICE_LABELS = [
+      'Amount',
+      'Sale Price',
+      'Sold Amount',
+      'Winning Bid',
+      'Final Bid',
+      'Sale Amount',
+    ];
+
+    // (2) CARD-BASED AUCTION PARSER
+    const parsedRows = [];
+    $('div').each((_, container) => {
+      const blockText = $(container).text().replace(/\s+/g, ' ').trim();
+      if (!blockText.includes('Auction Type')) return;
+
+      const extract = makeExtractor(blockText);
+
+      // Auction Status
+      let auctionStatus = 'Active';
+      if (/redeemed/i.test(blockText)) {
+        auctionStatus = 'Redeemed';
+      } else if (/auction sold/i.test(blockText)) {
+        auctionStatus = 'Sold';
       }
-    } catch (e) {
-      // ignore site-specific extraction errors
-      dallasRows = [];
-    }
 
-    if (Array.isArray(dallasRows) && dallasRows.length) {
-      // Map each table row into parsedRows
-      for (const r of dallasRows) {
-        const parsed = mapDallasTableRow(r, url);
-        pageResult.parsedRows.push(parsed);
-        // also append a minimal element record for traceability
-        const el = {
-          sourceUrl: url,
-          tag: 'table-row',
-          cssPath: '',
-          text: JSON.stringify(r).slice(0,2000),
-          innerHTML: '',
-          attrs: {},
-          dataset: {},
-          role: '',
-          aria: {},
-          visible: true,
-          rect: { x:0,y:0,w:0,h:0 },
-          frameUrl: ''
-        };
-        pageResult.relevantElements.push(el);
-        appendNdjson(OUTPUT_ELEMENTS_FILE, el);
-      }
-      console.log(`📦 Dallas table rows extracted: ${pageResult.parsedRows.length}`);
-      return pageResult;
-    }
+      // Opening Bid
+      const openingBidMatch = blockText.match(/Opening Bid:\s*\$[0-9,]+(?:\.[0-9]{2})?/i);
+      const openingBid = openingBidMatch
+        ? openingBidMatch[0].replace(/Opening Bid:/i, '').trim()
+        : '';
 
-    // Fallback to generic extraction
-    const nodes = await page.evaluate(IN_PAGE_EXTRACTOR);
+      // Assessed Value
+      const assessedValueMatch = blockText.match(/Assessed Value:\s*\$[0-9,]+(?:\.[0-9]{2})?/i);
+      const assessedValue = assessedValueMatch
+        ? assessedValueMatch[0].replace(/Assessed Value:/i, '').trim()
+        : '';
 
-    const auctionTextRegex = /(\$[0-9]{1,3}(?:,[0-9]{3})+)|\bAPN\b|\bParcel\b|\bAuction\b|\bCase\b/i;
-    const relevant = [];
-    const seen = new Set();
+      // Auction Date (keep your existing pattern)
+      const auctionDateMatch = blockText.match(
+        /Date\/Time:\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?\s*ET)?)/i
+      );
+      const auctionDate = auctionDateMatch ? auctionDateMatch[1].trim() : '';
 
-    for (const n of nodes) {
-      const text = (n.text || '').replace(/\s+/g, ' ').trim();
-      const attrsString = JSON.stringify(n.attrs || {});
-      const key = hashString(n.cssPath + '|' + text.slice(0,200));
-      if (seen.has(key)) continue;
-      seen.add(key);
+      // Sale Price: try multiple labels
+      let salePrice = '';
+      const salePriceCandidates = {};
 
-      if (auctionTextRegex.test(text) || /apn|parcel|auction|case/i.test(attrsString)) {
-        const out = {
-          sourceUrl: url,
-          tag: n.tag,
-          cssPath: n.cssPath,
-          text,
-          innerHTML: n.innerHTML,
-          attrs: n.attrs,
-          dataset: n.dataset,
-          role: n.role,
-          aria: n.aria,
-          visible: n.visible,
-          rect: n.rect,
-          frameUrl: n.frameUrl || ''
-        };
-        relevant.push(out);
-        appendNdjson(OUTPUT_ELEMENTS_FILE, out);
-      }
-    }
-
-    // Build candidate containers by grouping relevant nodes by parent path heuristics
-    const containerCandidates = new Map();
-    for (const r of relevant) {
-      const parts = (r.cssPath || '').split(' > ');
-      if (parts.length <= 1) continue;
-      const parentPath = parts.slice(0, Math.max(1, parts.length - 1)).join(' > ');
-      if (!containerCandidates.has(parentPath)) containerCandidates.set(parentPath, r.text);
-      else containerCandidates.set(parentPath, containerCandidates.get(parentPath) + ' | ' + r.text);
-    }
-
-    for (const [containerPath, sampleText] of containerCandidates.entries()) {
-      const blockText = normalizeText(sampleText);
-      if (!blockText) continue;
-
-      const looksSold = /sold|auction sold|sale finalized|finalized/i.test(blockText);
-      if (looksSold) {
-        const openingBidMatch = blockText.match(/Opening Bid\s*:?\s*\$[0-9,]+(?:\.[0-9]{2})?/i);
-        const openingBid = openingBidMatch ? openingBidMatch[0].replace(/Opening Bid\s*:?/i, '').trim() : '';
-
-        const assessedValueMatch = blockText.match(/Assessed Value\s*:?\s*\$[0-9,]+(?:\.[0-9]{2})?/i);
-        const assessedValue = assessedValueMatch ? assessedValueMatch[0].replace(/Assessed Value\s*:?/i, '').trim() : '';
-
-        const SALE_PRICE_LABELS = ['Amount','Sale Price','Sold Amount','Winning Bid','Final Bid','Sale Amount','Sold Price','Sold For'];
-        let salePrice = '';
-        for (const label of SALE_PRICE_LABELS) {
-          const regex = new RegExp(label.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&') + '\\s*:?\\s*\\$[0-9,]+(?:\\.[0-9]{2})?', 'i');
-          const m = blockText.match(regex);
-          if (m) {
-            const raw = m[0];
-            const cleaned = raw.replace(new RegExp(label + '\\s*:?\\s*', 'i'), '').trim();
+      for (const label of SALE_PRICE_LABELS) {
+        const regex = new RegExp(
+          `${label}\\s*:?\\s*\\$[0-9,]+(?:\\.[0-9]{2})?`,
+          'i'
+        );
+        const m = blockText.match(regex);
+        if (m) {
+          const raw = m[0];
+          const cleaned = raw.replace(new RegExp(label + '\\s*:?\\s*', 'i'), '').trim();
+          salePriceCandidates[label] = cleaned;
+          if (!salePrice) {
             salePrice = cleaned;
-            break;
           }
-        }
-        if (!salePrice) {
-          const moneyMatch = blockText.match(/\$[0-9,]+(?:\.[0-9]{2})?/g);
-          if (moneyMatch && moneyMatch.length) salePrice = moneyMatch[moneyMatch.length - 1];
-        }
-
-        const parcelMatch = blockText.match(/APN\s*[:#]?\s*([0-9A-Za-z-]+)/i) || blockText.match(/Parcel ID\s*[:#]?\s*([0-9A-Za-z-]+)/i);
-        const parcelId = parcelMatch ? parcelMatch[1].trim() : '';
-
-        if (!parcelId || !openingBid) {
-          // fallback to generic parsing below
-        } else {
-          const open = parseCurrency(openingBid);
-          const assess = parseCurrency(assessedValue);
-          const soldPrice = parseCurrency(salePrice);
-
-          let surplus = null;
-          if (assess !== null) {
-            if (soldPrice !== null) surplus = assess - soldPrice;
-            else if (open !== null) surplus = assess - open;
-          }
-
-          pageResult.parsedRows.push({
-            sourceUrl: url,
-            containerPath,
-            auctionStatus: 'Sold',
-            auctionType: (blockText.match(/Auction Type\s*:?\s*([^|\n]+)/i) || [])[1] || '',
-            caseNumber: (blockText.match(/Case\s*#?\s*[:#]?\s*([^|\n]+)/i) || [])[1] || '',
-            parcelId,
-            propertyAddress: (blockText.match(/Property Address\s*:?\s*([^|\n]+)/i) || [])[1] || '',
-            openingBid,
-            assessedValue,
-            auctionDate: (blockText.match(/Date\/?Time\s*:?\s*([^|\n]+)/i) || [])[1] || '',
-            salePrice,
-            surplus,
-            meetsMinimumSurplus: surplus !== null && surplus >= MIN_SURPLUS ? 'Yes' : 'No'
-          });
-          continue;
         }
       }
 
-      // Generic fallback parsing (keeps previous behavior)
-      const openingBidMatch = blockText.match(/Opening Bid\s*:?\s*\$[0-9,]+(?:\.[0-9]{2})?/i);
-      const openingBid = openingBidMatch ? openingBidMatch[0].replace(/Opening Bid\s*:?/i, '').trim() : '';
+      // Optional: uncomment for debugging label hits
+      // if (Object.keys(salePriceCandidates).length) {
+      //   console.log('Sale Price Candidates for block:', { url, salePriceCandidates });
+      // }
 
-      const assessedValueMatch = blockText.match(/Assessed Value\s*:?\s*\$[0-9,]+(?:\.[0-9]{2})?/i);
-      const assessedValue = assessedValueMatch ? assessedValueMatch[0].replace(/Assessed Value\s*:?/i, '').trim() : '';
+      // Parcel ID from first link text
+      const parcelLink = $(container).find('a').first();
+      const parcelId = parcelLink.text().trim();
 
-      const salePriceMatch = blockText.match(/\$[0-9,]+(?:\.[0-9]{2})?/g);
-      const salePrice = salePriceMatch ? salePriceMatch[salePriceMatch.length - 1] : '';
-
-      const parcelMatch = blockText.match(/APN\s*[:#]?\s*([0-9A-Za-z-]+)/i) || blockText.match(/Parcel ID\s*[:#]?\s*([0-9A-Za-z-]+)/i);
-      const parcelId = parcelMatch ? parcelMatch[1].trim() : '';
-
-      if (!parcelId || !openingBid) continue;
+      if (!parcelId || !openingBid) return;
 
       const open = parseCurrency(openingBid);
-      const soldPrice = parseCurrency(salePrice);
       const assess = parseCurrency(assessedValue);
+      const soldPrice = parseCurrency(salePrice);
 
       let surplus = null;
       if (assess !== null) {
-        if (soldPrice !== null) surplus = assess - soldPrice;
-        else if (open !== null) surplus = assess - open;
+        if (auctionStatus === 'Sold' && soldPrice !== null) {
+          // Correct surplus for sold auctions: Assessed - Sale Price
+          surplus = assess - soldPrice;
+        } else if (open !== null) {
+          // Fallback: Assessed - Opening Bid
+          surplus = assess - open;
+        }
       }
 
-      pageResult.parsedRows.push({
+      parsedRows.push({
         sourceUrl: url,
-        containerPath,
-        auctionStatus: /sold/i.test(blockText) ? 'Sold' : 'Active',
-        auctionType: (blockText.match(/Auction Type\s*:?\s*([^|\n]+)/i) || [])[1] || '',
-        caseNumber: (blockText.match(/Case\s*#?\s*[:#]?\s*([^|\n]+)/i) || [])[1] || '',
+        auctionStatus,
+        auctionType: extract('Auction Type'),
+        caseNumber: extract('Case #'),
         parcelId,
-        propertyAddress: (blockText.match(/Property Address\s*:?\s*([^|\n]+)/i) || [])[1] || '',
+        propertyAddress: extract('Property Address'),
         openingBid,
         assessedValue,
-        auctionDate: (blockText.match(/Date\/?Time\s*:?\s*([^|\n]+)/i) || [])[1] || '',
+        auctionDate,
         salePrice,
         surplus,
-        meetsMinimumSurplus: surplus !== null && surplus >= MIN_SURPLUS ? 'Yes' : 'No'
+        meetsMinimumSurplus:
+          surplus !== null && surplus >= MIN_SURPLUS ? 'Yes' : 'No',
       });
-    }
+    });
 
-    pageResult.relevantElements = relevant;
-    console.log(`📦 Elements found: ${relevant.length} | Auctions parsed: ${pageResult.parsedRows.length}`);
-    return pageResult;
+    console.log(`📦 Elements: ${relevantElements.length} | Auctions: ${parsedRows.length}`);
+    return { relevantElements, parsedRows };
   } catch (err) {
-    console.error(`❌ Error on ${url}:`, err && err.message ? err.message : err);
-    pageResult.error = { url, message: err && err.message ? err.message : String(err) };
-    return pageResult;
+    console.error(`❌ Error on ${url}:`, err.message);
+    return { relevantElements: [], parsedRows: [], error: { url, message: err.message } };
   }
 }
 
 // =========================
-// SCRAPE PAGINATED URLS
+/** Scrape all pages (URL-based pagination) */
+// =========================
 async function scrapeAllPages(browser, startUrl) {
   const page = await browser.newPage();
-  await page.setViewport({ width: 1280, height: 900 });
-  try { await page.emulateTimezone('America/New_York'); } catch (e) {}
-  await setupRequestInterception(page);
+  page.setViewport({ width: 1280, height: 800 });
+  await page.emulateTimezone('America/New_York');
 
+  const allElements = [];
   const allRows = [];
   const errors = [];
 
   let pageIndex = 1;
+
   while (true) {
     const currentUrl = pageIndex === 1 ? startUrl : `${startUrl}&page=${pageIndex}`;
-    const result = await inspectAndParse(page, currentUrl);
-    if (result.error) errors.push(result.error);
-    allRows.push(...result.parsedRows);
+    console.log(`🌐 Visiting ${currentUrl}`);
 
-    if (!result.relevantElements.length && !result.parsedRows.length) {
-      console.log('⛔ No more pages or no relevant content found');
+    const { relevantElements, parsedRows, error } = await inspectAndParse(page, currentUrl);
+    allElements.push(...relevantElements);
+    allRows.push(...parsedRows);
+    if (error) errors.push(error);
+
+    if (!relevantElements.length && !parsedRows.length) {
+      console.log('⛔ No more pages');
       break;
     }
 
@@ -604,27 +265,18 @@ async function scrapeAllPages(browser, startUrl) {
       break;
     }
     console.log(`➡️ Moving to page ${pageIndex}`);
-    await sleep(500 + Math.floor(Math.random() * 800));
   }
 
   await page.close();
-  return { allRows, errors };
+  return { allElements, allRows, errors };
 }
 
 // =========================
-// MAIN
+/** MAIN */
+// =========================
 (async () => {
   console.log('📥 Loading URLs...');
   const urls = await loadTargetUrls();
-  if (!urls.length) {
-    console.log('No URLs found. Exiting.');
-    process.exit(0);
-  }
-
-  try { fs.unlinkSync(OUTPUT_ELEMENTS_FILE); } catch(e) {}
-  fs.writeFileSync(OUTPUT_ELEMENTS_FILE, '');
-
-  const limit = makeLimiter(CONCURRENCY);
 
   const browser = await puppeteer.launch({
     headless: true,
@@ -637,46 +289,38 @@ async function scrapeAllPages(browser, startUrl) {
     ],
   });
 
+  const allElements = [];
   const allRows = [];
-  const allErrors = [];
+  const errors = [];
 
-  const tasks = urls.map(url => limit(async () => {
-    try {
-      const res = await scrapeAllPages(browser, url);
-      allRows.push(...res.allRows);
-      allErrors.push(...res.errors);
-    } catch (e) {
-      allErrors.push({ url, message: e && e.message ? e.message : String(e) });
-    }
-  }));
-
-  await Promise.all(tasks);
+  for (const url of urls) {
+    const result = await scrapeAllPages(browser, url);
+    allElements.push(...result.allElements);
+    allRows.push(...result.allRows);
+    errors.push(...result.errors);
+  }
 
   await browser.close();
 
+  fs.writeFileSync(OUTPUT_ELEMENTS_FILE, JSON.stringify(allElements, null, 2));
   fs.writeFileSync(OUTPUT_ROWS_FILE, JSON.stringify(allRows, null, 2));
-  if (allErrors.length) {
-    fs.writeFileSync(OUTPUT_ERRORS_FILE, JSON.stringify(allErrors, null, 2));
-    console.log(`⚠️ Saved ${allErrors.length} errors → ${OUTPUT_ERRORS_FILE}`);
+  if (errors.length) {
+    fs.writeFileSync(OUTPUT_ERRORS_FILE, JSON.stringify(errors, null, 2));
+    console.log(`⚠️ Saved ${errors.length} errors → ${OUTPUT_ERRORS_FILE}`);
   }
 
   const summary = {
     totalUrls: urls.length,
-    totalElements: (() => {
-      try {
-        const lines = fs.readFileSync(OUTPUT_ELEMENTS_FILE, 'utf8').trim().split('\n').filter(Boolean);
-        return lines.length;
-      } catch (e) { return 0; }
-    })(),
+    totalElements: allElements.length,
     totalRowsFinal: allRows.length,
-    errorsCount: allErrors.length,
+    errorsCount: errors.length,
     surplusAboveThreshold: allRows.filter(r => r.meetsMinimumSurplus === 'Yes').length,
     surplusBelowThreshold: allRows.filter(r => r.meetsMinimumSurplus === 'No').length,
   };
 
   fs.writeFileSync(OUTPUT_SUMMARY_FILE, JSON.stringify(summary, null, 2));
 
-  console.log(`✅ Saved elements (ndjson) → ${OUTPUT_ELEMENTS_FILE}`);
+  console.log(`✅ Saved ${allElements.length} elements → ${OUTPUT_ELEMENTS_FILE}`);
   console.log(`✅ Saved ${allRows.length} auctions → ${OUTPUT_ROWS_FILE}`);
   console.log(`📊 Saved summary → ${OUTPUT_SUMMARY_FILE}`);
   console.log('🏁 Done');
