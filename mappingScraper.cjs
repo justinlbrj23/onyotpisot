@@ -2,7 +2,9 @@
 // Requires: npm install googleapis
 
 const fs = require("fs");
-const { google } = require("google========
+const { google } = require("googleapis");
+
+// =========================
 // CONFIG
 // =========================
 const SERVICE_ACCOUNT_FILE = "./service-account.json";
