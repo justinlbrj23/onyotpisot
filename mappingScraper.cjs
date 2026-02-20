@@ -2,9 +2,7 @@
 // Requires: npm install googleapis
 
 const fs = require("fs");
-const { google } = require("googleapis");
-
-// =========================
+const { google } = require("google========
 // CONFIG
 // =========================
 const SERVICE_ACCOUNT_FILE = "./service-account.json";
@@ -47,6 +45,7 @@ async function getUrlMapping() {
     range: `${SHEET_NAME_URLS}!A2:C`,
   });
 
+  console.log('DEBUG getUrlMapping response keys:', Object.keys(res.data || {}));
   const rows = res.data.values || [];
   const mapping = {};
 
@@ -61,12 +60,12 @@ async function getUrlMapping() {
 // Normalize Yes/No
 // =========================
 function yn(val) {
-  if (val === true || val === "Yes") return "Yes";
-  if (val === false || val === "No") return "No";
+  if (val === true) return "Yes";
+  if (val === false) return "No";
   if (typeof val === "string") {
     const v = val.trim().toLowerCase();
-    if (v === "yes") return "Yes";
-    if (v === "no") return "No";
+    if (v === "yes" || v === "y" || v === "true") return "Yes";
+    if (v === "no" || v === "n" || v === "false") return "No";
   }
   return "";
 }
@@ -75,8 +74,9 @@ function yn(val) {
 // Currency parser
 // =========================
 function parseCurrency(str) {
-  if (!str) return null;
-  const n = parseFloat(str.replace(/[^0-9.-]/g, ""));
+  if (str === null || str === undefined) return null;
+  if (typeof str === "number") return str;
+  const n = parseFloat(String(str).replace(/[^0-9.-]/g, ""));
   return isNaN(n) ? null : n;
 }
 
@@ -84,7 +84,8 @@ function parseCurrency(str) {
 // Map parsed auction row → TSSF headers
 // =========================
 function mapRow(raw, urlMapping, anomalies) {
-  if (raw.auctionStatus !== "Sold") return null;
+  // allow case-insensitive Sold and trim whitespace
+  if (!raw || String(raw.auctionStatus || '').trim().toLowerCase() !== 'sold') return null;
 
   const mapped = {};
   HEADERS.forEach(h => (mapped[h] = ""));
@@ -106,14 +107,33 @@ function mapRow(raw, urlMapping, anomalies) {
   mapped["Sale Price"] = salePrice;
   mapped["Opening / Minimum Bid"] = openingBid;
 
+  // Prefer assessed - sale (owner surplus). Fallback to sale - open.
+  const assessed = parseCurrency(raw.assessedValue || raw.assessed || '');
   const sale = parseCurrency(salePrice);
   const open = parseCurrency(openingBid);
-  const estimatedSurplus = sale !== null && open !== null ? sale - open : null;
+  let estimatedSurplus = null;
+
+  if (assessed !== null && sale !== null) {
+    estimatedSurplus = assessed - sale;
+  } else if (sale !== null && open !== null) {
+    estimatedSurplus = sale - open;
+  }
 
   if (sale === null) {
     anomalies.push({
       type: "MissingSalePrice",
       message: "Sold auction missing sale price",
+      parcelId: raw.parcelId,
+      caseNumber: raw.caseNumber,
+      sourceUrl: raw.sourceUrl
+    });
+  }
+
+  if (assessed === null && sale !== null && open === null) {
+    // assessed missing and no fallback available
+    anomalies.push({
+      type: "MissingAssessedValue",
+      message: "Missing assessed value and no opening bid to compute fallback surplus",
       parcelId: raw.parcelId,
       caseNumber: raw.caseNumber,
       sourceUrl: raw.sourceUrl
@@ -158,14 +178,25 @@ async function appendRows(rows) {
   }
 
   const values = rows.map(row => HEADERS.map(h => row[h] || ""));
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: SPREADSHEET_ID,
-    range: SHEET_NAME_RAW,
-    valueInputOption: "RAW",
-    insertDataOption: "INSERT_ROWS",
-    requestBody: { values },
-  });
-  console.log(`✅ Appended ${values.length} mapped rows.`);
+
+  // Try append with basic retry and clear logging
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `${SHEET_NAME_RAW}!A1`,
+        valueInputOption: "RAW",
+        insertDataOption: "INSERT_ROWS",
+        requestBody: { values },
+      });
+      console.log(`✅ Appended ${values.length} mapped rows.`);
+      break;
+    } catch (err) {
+      console.error(`❌ Sheets append attempt ${attempt} failed:`, err.message || err);
+      if (attempt === 2) throw err;
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  }
 }
 
 // =========================
@@ -179,25 +210,34 @@ async function appendRows(rows) {
 
   const rawData = JSON.parse(fs.readFileSync(INPUT_FILE, "utf8"));
   console.log(`📦 Loaded ${rawData.length} parsed rows from ${INPUT_FILE}`);
+  console.log('DEBUG sample row:', rawData[0] || 'no rows');
 
   const urlMapping = await getUrlMapping();
   console.log(`🌐 Fetched ${Object.keys(urlMapping).length} URL → County/State mappings`);
 
   const anomalies = [];
   const uniqueMap = new Map();
+  let filteredOutCount = 0;
 
   rawData.forEach(raw => {
-    const key = `${(raw.sourceUrl || "").split("&page=")[0]}|${raw.caseNumber}|${raw.parcelId}`;
+    const base = (raw.sourceUrl || "").split("&page=")[0];
+    const key = `${base}|${raw.caseNumber || ''}|${raw.parcelId || ''}`;
     if (!uniqueMap.has(key)) {
       const mapped = mapRow(raw, urlMapping, anomalies);
+      console.log('DEBUG mapping attempt:', { key, auctionStatus: raw.auctionStatus, mappedPresent: !!mapped });
       if (mapped) uniqueMap.set(key, mapped);
+      else filteredOutCount++;
     }
   });
+
+  console.log(`ℹ️ Filtered out ${filteredOutCount} rows (non-Sold or invalid).`);
 
   const mappedRows = [...uniqueMap.values()];
 
   if (mappedRows.length) {
     console.log("🧪 Sample mapped row preview:", mappedRows[0]);
+  } else {
+    console.log("⚠️ No mapped rows produced after mapping step.");
   }
 
   fs.writeFileSync(OUTPUT_FILE, JSON.stringify(mappedRows, null, 2));
@@ -208,6 +248,12 @@ async function appendRows(rows) {
     console.log(`⚠️ Saved ${anomalies.length} anomalies → ${ANOMALY_FILE}`);
   }
 
-  await appendRows(mappedRows);
+  try {
+    await appendRows(mappedRows);
+  } catch (err) {
+    console.error('❌ Final append failed:', err.message || err);
+    process.exit(1);
+  }
+
   console.log("🏁 Done.");
 })();
