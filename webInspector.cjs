@@ -1,5 +1,4 @@
-// webInspector.cjs (RealForeclose SOLD parser - improved block splitting)
-// Requires:
+// webInspector.cjs (RealForeclose Dallas SOLD parser - stable production version)
 // npm install puppeteer cheerio googleapis
 
 const puppeteer = require('puppeteer');
@@ -15,7 +14,6 @@ const SPREADSHEET_ID = '1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA';
 const SHEET_NAME = 'web_tda';
 const URL_RANGE = 'C2:C';
 
-const OUTPUT_ELEMENTS_FILE = 'raw-elements.json';
 const OUTPUT_ROWS_FILE = 'parsed-auctions.json';
 const OUTPUT_ERRORS_FILE = 'errors.json';
 const OUTPUT_SUMMARY_FILE = 'summary.json';
@@ -47,7 +45,7 @@ async function loadTargetUrls() {
 }
 
 // =========================
-// Currency parser
+// Helpers
 // =========================
 function parseCurrency(str) {
   if (!str) return null;
@@ -55,9 +53,6 @@ function parseCurrency(str) {
   return isNaN(n) ? null : n;
 }
 
-// =========================
-// Extract helpers (regex-based, RealForeclose-safe)
-// =========================
 function extract(regex, text) {
   const m = text.match(regex);
   return m ? m[1].trim() : '';
@@ -65,48 +60,57 @@ function extract(regex, text) {
 
 function extractMoney(regex, text) {
   const m = text.match(regex);
-  return m ? m[1] : '';
+  return m ? `$${m[1]}` : '';
 }
 
 // =========================
-// Split page into auction blocks
+// Normalize RealForeclose Text
 // =========================
-function splitIntoAuctionBlocks(fullText) {
-  const blocks = fullText
+function normalizeText(text) {
+  return text
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/(\d)([A-Z])/g, '$1 $2')
+    .replace(/([A-Z])(\d)/g, '$1 $2')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// =========================
+// Split Into Auction Blocks
+// =========================
+function splitBlocks(text) {
+  return text
     .split(/Auction Status/i)
     .map(b => b.trim())
-    .filter(b => b.length > 100);
-
-  return blocks.map(b => "Auction Status " + b);
+    .filter(b => b.includes('Auction Sold') || b.includes('Struck Off'))
+    .map(b => "Auction Status " + b);
 }
 
 // =========================
-// Parse single block (SOLD only)
+// Parse Auction Block
 // =========================
-function parseAuctionBlock(block, sourceUrl) {
-  if (!/Auction Sold/i.test(block)) return null;
+function parseBlock(block, sourceUrl) {
+  const isSold = /Auction Sold/i.test(block);
+  const isStruck = /Struck Off/i.test(block);
+
+  if (!isSold && !isStruck) return null;
 
   const caseNumber = extract(/Cause Number:\s*([A-Z0-9\-]+)/i, block);
-
   const parcelId = extract(/Account Number:\s*([0-9A-Z]+)/i, block);
-
-  const propertyAddress = extract(
-    /Property Address:\s*([^A]+?\d{5}(?:-\d{4})?)/i,
-    block
-  );
+  const propertyAddress = extract(/Property Address:\s*(.+?)\s{2,}/i, block);
 
   const assessedValue = extractMoney(
-    /Adjudged Value:\s*(\$[\d,]+(?:\.\d{2})?)/i,
+    /Adjudged Value:\s*\$?([\d,]+(?:\.\d{2})?)/i,
     block
   );
 
   const openingBid = extractMoney(
-    /Est\.?\s*Min\.?\s*Bid:\s*(\$[\d,]+(?:\.\d{2})?)/i,
+    /Est\.?\s*Min\.?\s*Bid:\s*\$?([\d,]+(?:\.\d{2})?)/i,
     block
   );
 
   const salePrice = extractMoney(
-    /Amount\s*(\$[\d,]+(?:\.\d{2})?)/i,
+    /Amount\s*\$?([\d,]+(?:\.\d{2})?)/i,
     block
   );
 
@@ -115,11 +119,11 @@ function parseAuctionBlock(block, sourceUrl) {
     block
   );
 
-  if (!caseNumber || !parcelId || !openingBid || !salePrice || !assessedValue)
+  if (!caseNumber || !parcelId || !assessedValue || !openingBid)
     return null;
 
-  const open = parseCurrency(openingBid);
   const assess = parseCurrency(assessedValue);
+  const open = parseCurrency(openingBid);
   const sale = parseCurrency(salePrice);
 
   const surplusAssessVsSale =
@@ -130,7 +134,7 @@ function parseAuctionBlock(block, sourceUrl) {
 
   return {
     sourceUrl,
-    auctionStatus: 'Sold',
+    auctionStatus: isSold ? 'Sold' : 'Struck Off',
     auctionType: 'Tax Sale',
     caseNumber,
     parcelId,
@@ -164,20 +168,24 @@ async function inspectAndParse(browser, url) {
     const html = await page.content();
     const $ = cheerio.load(html);
 
-    const fullText = $('body').text().replace(/\s+/g, ' ').trim();
+    let fullText = $('body').text();
+    fullText = normalizeText(fullText);
 
-    const blocks = splitIntoAuctionBlocks(fullText);
+    const blocks = splitBlocks(fullText);
 
     const rows = [];
+
     for (const block of blocks) {
-      const parsed = parseAuctionBlock(block, url);
+      const parsed = parseBlock(block, url);
       if (parsed) rows.push(parsed);
     }
 
-    return { relevantElements: [], parsedRows: rows };
+    console.log(`📦 Found ${rows.length} SOLD/Struck records`);
+    return { parsedRows: rows };
+
   } catch (err) {
     console.error(`❌ Error on ${url}:`, err.message);
-    return { relevantElements: [], parsedRows: [], error: { url, message: err.message } };
+    return { parsedRows: [], error: { url, message: err.message } };
   } finally {
     await page.close();
   }
@@ -211,20 +219,20 @@ async function inspectAndParse(browser, url) {
 
   await browser.close();
 
-  // Global dedupe
-  const uniqueMap = new Map();
-  for (const row of allRows) {
-    const key = `${row.sourceUrl}|${row.caseNumber}|${row.parcelId}`;
-    if (!uniqueMap.has(key)) uniqueMap.set(key, row);
+  // Deduplicate
+  const unique = new Map();
+  for (const r of allRows) {
+    const key = `${r.sourceUrl}|${r.caseNumber}|${r.parcelId}`;
+    if (!unique.has(key)) unique.set(key, r);
   }
 
-  const finalRows = [...uniqueMap.values()];
+  const finalRows = [...unique.values()];
 
   const summary = {
     totalUrls: urls.length,
-    totalRowsFinal: finalRows.length,
-    errorsCount: errors.length,
+    totalRows: finalRows.length,
     surplusAboveThreshold: finalRows.filter(r => r.meetsMinimumSurplus === 'Yes').length,
+    errorsCount: errors.length
   };
 
   fs.writeFileSync(OUTPUT_ROWS_FILE, JSON.stringify(finalRows, null, 2));
@@ -234,6 +242,6 @@ async function inspectAndParse(browser, url) {
     fs.writeFileSync(OUTPUT_ERRORS_FILE, JSON.stringify(errors, null, 2));
   }
 
-  console.log(`✅ Saved ${finalRows.length} SOLD auctions → ${OUTPUT_ROWS_FILE}`);
+  console.log(`✅ Saved ${finalRows.length} auctions → ${OUTPUT_ROWS_FILE}`);
   console.log('🏁 Done');
 })();
