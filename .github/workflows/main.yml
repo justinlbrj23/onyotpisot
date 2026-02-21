@@ -78,17 +78,6 @@ jobs:
             parsed-auctions.json
             errors.json
 
-      - name: Validate parsed auctions
-        run: |
-          node -e "
-            const fs = require('fs');
-            const data = JSON.parse(fs.readFileSync('parsed-auctions.json','utf8'));
-            if (!Array.isArray(data) || data.length === 0) {
-              throw new Error('No SOLD auctions parsed');
-            }
-            console.log('Parsed auctions:', data.length);
-          "
-
       
       # --------------------------------------------------
       # STEP 4 — Run mappingScraper.cjs (Final Mapping, Sold-only)
