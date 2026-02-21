@@ -39,6 +39,28 @@ const HEADERS = [
 ];
 
 // =========================
+// Helpers
+// =========================
+
+// Normalize URL for mapping lookups: remove page param, trailing slashes, lowercase origin+path
+function normalizeBaseUrl(u) {
+  if (!u) return "";
+  try {
+    const url = new URL(u);
+    // remove page param if present
+    url.searchParams.delete("page");
+    // remove any page= in query string variants
+    url.search = url.search.replace(/(^&|&)?page=\d+/g, "");
+    // remove trailing slash(es) from pathname
+    const p = url.pathname.replace(/\/+$/, "");
+    return `${url.protocol}//${url.hostname}${p}`.toLowerCase();
+  } catch (e) {
+    // fallback: strip &page= and trailing slash
+    return String(u).split("&page=")[0].replace(/\/+$/, "").trim().toLowerCase();
+  }
+}
+
+// =========================
 // County/State mapping
 // =========================
 async function getUrlMapping() {
@@ -47,12 +69,21 @@ async function getUrlMapping() {
     range: `${SHEET_NAME_URLS}!A2:C`,
   });
 
-  console.log('DEBUG getUrlMapping response keys:', Object.keys(res.data || {}));
+  console.log("DEBUG getUrlMapping response keys:", Object.keys(res.data || {}));
   const rows = res.data.values || [];
   const mapping = {};
 
   rows.forEach(([county, state, url]) => {
-    if (url) mapping[url.trim()] = { county: county || "", state: state || "" };
+    if (!url) return;
+    const key = normalizeBaseUrl(url);
+    mapping[key] = { county: county || "", state: state || "" };
+    // also store origin-only fallback (host)
+    try {
+      const origin = new URL(url).origin.toLowerCase();
+      if (!mapping[origin]) mapping[origin] = { county: county || "", state: state || "" };
+    } catch (e) {
+      // ignore
+    }
   });
 
   return mapping;
@@ -78,7 +109,9 @@ function yn(val) {
 function parseCurrency(str) {
   if (str === null || str === undefined) return null;
   if (typeof str === "number") return str;
-  const n = parseFloat(String(str).replace(/[^0-9.-]/g, ""));
+  const s = String(str).trim();
+  if (!s) return null;
+  const n = parseFloat(s.replace(/[^0-9.-]/g, ""));
   return isNaN(n) ? null : n;
 }
 
@@ -92,8 +125,16 @@ function mapRow(raw, urlMapping, anomalies) {
   const mapped = {};
   HEADERS.forEach(h => (mapped[h] = ""));
 
-  const baseUrl = (raw.sourceUrl || "").split("&page=")[0];
-  const geo = urlMapping[baseUrl] || { county: "", state: "" };
+  const baseKey = normalizeBaseUrl(raw.sourceUrl || "");
+  let geo = urlMapping[baseKey] || { county: "", state: "" };
+
+  // fallback: try origin-only mapping
+  try {
+    const origin = new URL(raw.sourceUrl || "").origin.toLowerCase();
+    if ((!geo.county || !geo.state) && urlMapping[origin]) geo = urlMapping[origin];
+  } catch (e) {
+    // ignore
+  }
 
   mapped["State"] = geo.state;
   mapped["County"] = geo.county;
@@ -103,39 +144,40 @@ function mapRow(raw, urlMapping, anomalies) {
   mapped["Auction Date"] = raw.auctionDate || raw.date || "";
   mapped["Sale Finalized (Yes/No)"] = "Yes";
 
-  const salePrice = raw.salePrice || raw.amount || "";
-  const openingBid = raw.openingBid || "";
+  const salePriceRaw = raw.salePrice || raw.amount || "";
+  const openingBidRaw = raw.openingBid || "";
+  const assessedRaw = raw.assessedValue || raw.assessed || "";
 
-  mapped["Sale Price"] = salePrice;
-  mapped["Opening / Minimum Bid"] = openingBid;
+  mapped["Sale Price"] = salePriceRaw;
+  mapped["Opening / Minimum Bid"] = openingBidRaw;
 
-  // Prefer assessed - sale (owner surplus). Fallback to sale - open.
-  const assessed = parseCurrency(raw.assessedValue || raw.assessed || '');
-  const sale = parseCurrency(salePrice);
-  const open = parseCurrency(openingBid);
+  // Prefer parser-provided surplus fields if present
   let estimatedSurplus = null;
+  if (raw.surplusAssessVsSale !== undefined && raw.surplusAssessVsSale !== null) {
+    const n = parseFloat(raw.surplusAssessVsSale);
+    estimatedSurplus = isNaN(n) ? null : n;
+  } else if (raw.surplusSaleVsOpen !== undefined && raw.surplusSaleVsOpen !== null) {
+    const n = parseFloat(raw.surplusSaleVsOpen);
+    estimatedSurplus = isNaN(n) ? null : n;
+  } else {
+    // fallback: compute from assessed - sale OR sale - open
+    const assessed = parseCurrency(assessedRaw);
+    const sale = parseCurrency(salePriceRaw);
+    const open = parseCurrency(openingBidRaw);
 
-  if (assessed !== null && sale !== null) {
-    estimatedSurplus = assessed - sale;
-  } else if (sale !== null && open !== null) {
-    estimatedSurplus = sale - open;
+    if (assessed !== null && sale !== null) {
+      estimatedSurplus = assessed - sale;
+    } else if (sale !== null && open !== null) {
+      estimatedSurplus = sale - open;
+    }
   }
 
-  if (sale === null) {
+  // anomalies: only push when we truly cannot determine sale or surplus
+  const saleNum = parseCurrency(salePriceRaw);
+  if (saleNum === null) {
     anomalies.push({
       type: "MissingSalePrice",
-      message: "Sold auction missing sale price",
-      parcelId: raw.parcelId,
-      caseNumber: raw.caseNumber,
-      sourceUrl: raw.sourceUrl
-    });
-  }
-
-  if (assessed === null && sale !== null && open === null) {
-    // assessed missing and no fallback available
-    anomalies.push({
-      type: "MissingAssessedValue",
-      message: "Missing assessed value and no opening bid to compute fallback surplus",
+      message: "Sold auction missing sale price (parser output or extracted).",
       parcelId: raw.parcelId,
       caseNumber: raw.caseNumber,
       sourceUrl: raw.sourceUrl
@@ -145,7 +187,7 @@ function mapRow(raw, urlMapping, anomalies) {
   if (estimatedSurplus === null) {
     anomalies.push({
       type: "MissingSurplus",
-      message: "Could not compute surplus",
+      message: "Could not compute surplus (no parser surplus and insufficient fields).",
       parcelId: raw.parcelId,
       caseNumber: raw.caseNumber,
       sourceUrl: raw.sourceUrl
@@ -155,10 +197,18 @@ function mapRow(raw, urlMapping, anomalies) {
   mapped["Estimated Surplus"] = estimatedSurplus !== null ? String(estimatedSurplus) : "";
   mapped["Final Estimated Surplus to Owner"] = estimatedSurplus !== null ? String(estimatedSurplus) : "";
 
-  const meetsMinimum = estimatedSurplus !== null && estimatedSurplus >= 25000;
-  mapped["Meets Minimum Surplus? (Yes/No)"] = yn(meetsMinimum ? "Yes" : "No");
+  // Use parser's meetsMinimumSurplus if present (it is 'Yes'/'No' in parser), else compute
+  let meetsMinimum = null;
+  if (raw.meetsMinimumSurplus !== undefined && raw.meetsMinimumSurplus !== null) {
+    meetsMinimum = String(raw.meetsMinimumSurplus).trim().toLowerCase() === "yes";
+  } else if (estimatedSurplus !== null) {
+    meetsMinimum = estimatedSurplus >= 25000;
+  }
+
+  mapped["Meets Minimum Surplus? (Yes/No)"] = meetsMinimum === null ? "" : (meetsMinimum ? "Yes" : "No");
   mapped["Deal Viable? (Yes/No)"] = meetsMinimum ? "Yes" : "No";
 
+  // default collection flags
   mapped["Ownership Deed Collected? (Yes/No)"] = "No";
   mapped["Foreclosure Deed Collected? (Yes/No)"] = "No";
   mapped["Proof of Sale Collected? (Yes/No)"] = "No";
@@ -171,7 +221,7 @@ function mapRow(raw, urlMapping, anomalies) {
 }
 
 // =========================
-// Append rows to sheet
+// Append rows to sheet (exponential backoff)
 // =========================
 async function appendRows(rows) {
   if (!rows.length) {
@@ -181,8 +231,10 @@ async function appendRows(rows) {
 
   const values = rows.map(row => HEADERS.map(h => row[h] || ""));
 
-  // Try append with basic retry and clear logging
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  let attempt = 0;
+  const maxAttempts = 4;
+  while (attempt < maxAttempts) {
+    attempt++;
     try {
       await sheets.spreadsheets.values.append({
         spreadsheetId: SPREADSHEET_ID,
@@ -192,11 +244,13 @@ async function appendRows(rows) {
         requestBody: { values },
       });
       console.log(`✅ Appended ${values.length} mapped rows.`);
-      break;
+      return;
     } catch (err) {
+      const wait = Math.min(2000 * attempt, 8000);
       console.error(`❌ Sheets append attempt ${attempt} failed:`, err.message || err);
-      if (attempt === 2) throw err;
-      await new Promise(r => setTimeout(r, 1500));
+      if (attempt >= maxAttempts) throw err;
+      console.log(`⏳ Retrying in ${wait}ms...`);
+      await new Promise(r => setTimeout(r, wait));
     }
   }
 }
@@ -222,8 +276,8 @@ async function appendRows(rows) {
   let filteredOutCount = 0;
 
   rawData.forEach(raw => {
-    const base = (raw.sourceUrl || "").split("&page=")[0];
-    const key = `${base}|${raw.caseNumber || ''}|${raw.parcelId || ''}`;
+    const baseKey = normalizeBaseUrl(raw.sourceUrl || "");
+    const key = `${baseKey}|${raw.caseNumber || ''}|${raw.parcelId || ''}`;
     if (!uniqueMap.has(key)) {
       const mapped = mapRow(raw, urlMapping, anomalies);
       console.log('DEBUG mapping attempt:', { key, auctionStatus: raw.auctionStatus, mappedPresent: !!mapped });
