@@ -1,5 +1,4 @@
-// mappingScraper.cjs
-// Stage 3: Map parsed auctions → Google Sheets + artifact output
+// mappingScraper.cjs (Stage 3: map parsed auctions → Google Sheets + artifact output)
 // Requires: npm install googleapis
 
 const fs = require("fs");
@@ -12,12 +11,9 @@ const SERVICE_ACCOUNT_FILE = "./service-account.json";
 const SPREADSHEET_ID = "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
 const SHEET_NAME_URLS = "web_tda";
 const SHEET_NAME_RAW = "raw_main";
-
 const INPUT_FILE = process.argv[2] || "parsed-auctions.json";
 const OUTPUT_FILE = "mapped-output.json";
 const ANOMALY_FILE = "mapping-anomalies.json";
-
-const MIN_SURPLUS = 25000;
 
 // =========================
 // GOOGLE AUTH
@@ -29,7 +25,7 @@ const auth = new google.auth.GoogleAuth({
 const sheets = google.sheets({ version: "v4", auth });
 
 // =========================
-// HEADERS
+// HEADERS (TSSF-compliant)
 // =========================
 const HEADERS = [
   "State","County","Property Address","City","ZIP Code","Parcel / APN Number","Case Number",
@@ -43,35 +39,7 @@ const HEADERS = [
 ];
 
 // =========================
-// HELPERS
-// =========================
-
-function normalizeBaseUrl(u) {
-  if (!u) return "";
-  try {
-    const url = new URL(u);
-    url.searchParams.delete("page");
-    const params = url.searchParams.toString();
-    const cleanQuery = params ? `?${params}` : "";
-    const cleanPath = url.pathname.replace(/\/+$/, "");
-    return `${url.protocol}//${url.hostname}${cleanPath}${cleanQuery}`.toLowerCase();
-  } catch {
-    return String(u)
-      .replace(/([?&])page=\d+/g, "")
-      .replace(/\/+$/, "")
-      .trim()
-      .toLowerCase();
-  }
-}
-
-function parseCurrency(str) {
-  if (!str) return null;
-  const n = parseFloat(String(str).replace(/[^0-9.-]/g, ""));
-  return isNaN(n) ? null : n;
-}
-
-// =========================
-// URL → County/State Mapping
+// County/State mapping
 // =========================
 async function getUrlMapping() {
   const res = await sheets.spreadsheets.values.get({
@@ -79,77 +47,117 @@ async function getUrlMapping() {
     range: `${SHEET_NAME_URLS}!A2:C`,
   });
 
+  console.log('DEBUG getUrlMapping response keys:', Object.keys(res.data || {}));
   const rows = res.data.values || [];
   const mapping = {};
 
   rows.forEach(([county, state, url]) => {
-    if (!url) return;
-    const key = normalizeBaseUrl(url);
-    mapping[key] = { county: county || "", state: state || "" };
+    if (url) mapping[url.trim()] = { county: county || "", state: state || "" };
   });
 
   return mapping;
 }
 
 // =========================
-// Map Row
+// Normalize Yes/No
+// =========================
+function yn(val) {
+  if (val === true) return "Yes";
+  if (val === false) return "No";
+  if (typeof val === "string") {
+    const v = val.trim().toLowerCase();
+    if (v === "yes" || v === "y" || v === "true") return "Yes";
+    if (v === "no" || v === "n" || v === "false") return "No";
+  }
+  return "";
+}
+
+// =========================
+// Currency parser
+// =========================
+function parseCurrency(str) {
+  if (str === null || str === undefined) return null;
+  if (typeof str === "number") return str;
+  const n = parseFloat(String(str).replace(/[^0-9.-]/g, ""));
+  return isNaN(n) ? null : n;
+}
+
+// =========================
+// Map parsed auction row → TSSF headers
 // =========================
 function mapRow(raw, urlMapping, anomalies) {
-
-  if (
-    !raw ||
-    !raw.auctionStatus ||
-    String(raw.auctionStatus).trim().toLowerCase() !== "sold"
-  ) {
-    return null;
-  }
+  // allow case-insensitive Sold and trim whitespace
+  if (!raw || String(raw.auctionStatus || '').trim().toLowerCase() !== 'sold') return null;
 
   const mapped = {};
   HEADERS.forEach(h => (mapped[h] = ""));
 
-  const baseKey = normalizeBaseUrl(raw.sourceUrl || "");
-  const geo = urlMapping[baseKey] || { county: "", state: "" };
+  const baseUrl = (raw.sourceUrl || "").split("&page=")[0];
+  const geo = urlMapping[baseUrl] || { county: "", state: "" };
 
   mapped["State"] = geo.state;
   mapped["County"] = geo.county;
   mapped["Property Address"] = raw.propertyAddress || "";
   mapped["Parcel / APN Number"] = raw.parcelId || "";
   mapped["Case Number"] = raw.caseNumber || "";
-  mapped["Auction Date"] = raw.auctionDate || "";
+  mapped["Auction Date"] = raw.auctionDate || raw.date || "";
   mapped["Sale Finalized (Yes/No)"] = "Yes";
-  mapped["Sale Price"] = raw.salePrice || "";
-  mapped["Opening / Minimum Bid"] = raw.openingBid || "";
 
-  let surplus = null;
+  const salePrice = raw.salePrice || raw.amount || "";
+  const openingBid = raw.openingBid || "";
 
-  if (raw.surplusAssessVsSale !== null && raw.surplusAssessVsSale !== undefined) {
-    surplus = Number(raw.surplusAssessVsSale);
-  } else if (raw.surplusSaleVsOpen !== null && raw.surplusSaleVsOpen !== undefined) {
-    surplus = Number(raw.surplusSaleVsOpen);
-  } else {
-    const assess = parseCurrency(raw.assessedValue);
-    const sale = parseCurrency(raw.salePrice);
-    if (assess !== null && sale !== null) {
-      surplus = assess - sale;
-    }
+  mapped["Sale Price"] = salePrice;
+  mapped["Opening / Minimum Bid"] = openingBid;
+
+  // Prefer assessed - sale (owner surplus). Fallback to sale - open.
+  const assessed = parseCurrency(raw.assessedValue || raw.assessed || '');
+  const sale = parseCurrency(salePrice);
+  const open = parseCurrency(openingBid);
+  let estimatedSurplus = null;
+
+  if (assessed !== null && sale !== null) {
+    estimatedSurplus = assessed - sale;
+  } else if (sale !== null && open !== null) {
+    estimatedSurplus = sale - open;
   }
 
-  if (surplus === null) {
+  if (sale === null) {
     anomalies.push({
-      type: "MissingSurplus",
-      caseNumber: raw.caseNumber,
+      type: "MissingSalePrice",
+      message: "Sold auction missing sale price",
       parcelId: raw.parcelId,
-      sourceUrl: raw.sourceUrl,
+      caseNumber: raw.caseNumber,
+      sourceUrl: raw.sourceUrl
     });
   }
 
-  mapped["Estimated Surplus"] = surplus !== null ? String(surplus) : "";
-  mapped["Final Estimated Surplus to Owner"] = surplus !== null ? String(surplus) : "";
+  if (assessed === null && sale !== null && open === null) {
+    // assessed missing and no fallback available
+    anomalies.push({
+      type: "MissingAssessedValue",
+      message: "Missing assessed value and no opening bid to compute fallback surplus",
+      parcelId: raw.parcelId,
+      caseNumber: raw.caseNumber,
+      sourceUrl: raw.sourceUrl
+    });
+  }
 
-  const meets = surplus !== null ? surplus >= MIN_SURPLUS : false;
+  if (estimatedSurplus === null) {
+    anomalies.push({
+      type: "MissingSurplus",
+      message: "Could not compute surplus",
+      parcelId: raw.parcelId,
+      caseNumber: raw.caseNumber,
+      sourceUrl: raw.sourceUrl
+    });
+  }
 
-  mapped["Meets Minimum Surplus? (Yes/No)"] = meets ? "Yes" : "No";
-  mapped["Deal Viable? (Yes/No)"] = meets ? "Yes" : "No";
+  mapped["Estimated Surplus"] = estimatedSurplus !== null ? String(estimatedSurplus) : "";
+  mapped["Final Estimated Surplus to Owner"] = estimatedSurplus !== null ? String(estimatedSurplus) : "";
+
+  const meetsMinimum = estimatedSurplus !== null && estimatedSurplus >= 25000;
+  mapped["Meets Minimum Surplus? (Yes/No)"] = yn(meetsMinimum ? "Yes" : "No");
+  mapped["Deal Viable? (Yes/No)"] = meetsMinimum ? "Yes" : "No";
 
   mapped["Ownership Deed Collected? (Yes/No)"] = "No";
   mapped["Foreclosure Deed Collected? (Yes/No)"] = "No";
@@ -163,68 +171,91 @@ function mapRow(raw, urlMapping, anomalies) {
 }
 
 // =========================
-// Append to Sheets
+// Append rows to sheet
 // =========================
 async function appendRows(rows) {
   if (!rows.length) {
-    console.log("⚠️ No rows to append.");
+    console.log("⚠️ No mapped rows to append.");
     return;
   }
 
   const values = rows.map(row => HEADERS.map(h => row[h] || ""));
 
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_NAME_RAW}!A1`,
-    valueInputOption: "RAW",
-    insertDataOption: "INSERT_ROWS",
-    requestBody: { values },
-  });
-
-  console.log(`✅ Appended ${values.length} rows.`);
+  // Try append with basic retry and clear logging
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `${SHEET_NAME_RAW}!A1`,
+        valueInputOption: "RAW",
+        insertDataOption: "INSERT_ROWS",
+        requestBody: { values },
+      });
+      console.log(`✅ Appended ${values.length} mapped rows.`);
+      break;
+    } catch (err) {
+      console.error(`❌ Sheets append attempt ${attempt} failed:`, err.message || err);
+      if (attempt === 2) throw err;
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  }
 }
 
 // =========================
 // MAIN
 // =========================
 (async () => {
-
   if (!fs.existsSync(INPUT_FILE)) {
-    console.error("❌ Input file missing.");
+    console.error(`❌ Input file not found: ${INPUT_FILE}`);
     process.exit(1);
   }
 
-  let rawData = JSON.parse(fs.readFileSync(INPUT_FILE, "utf8"));
-
-  if (!Array.isArray(rawData)) {
-    console.error("❌ parsed-auctions.json is not an array.");
-    process.exit(1);
-  }
-
-  console.log(`📦 Loaded ${rawData.length} rows.`);
+  const rawData = JSON.parse(fs.readFileSync(INPUT_FILE, "utf8"));
+  console.log(`📦 Loaded ${rawData.length} parsed rows from ${INPUT_FILE}`);
+  console.log('DEBUG sample row:', rawData[0] || 'no rows');
 
   const urlMapping = await getUrlMapping();
-  const anomalies = [];
+  console.log(`🌐 Fetched ${Object.keys(urlMapping).length} URL → County/State mappings`);
 
+  const anomalies = [];
   const uniqueMap = new Map();
+  let filteredOutCount = 0;
 
   rawData.forEach(raw => {
-    const key = `${normalizeBaseUrl(raw.sourceUrl)}|${raw.caseNumber}|${raw.parcelId}`;
+    const base = (raw.sourceUrl || "").split("&page=")[0];
+    const key = `${base}|${raw.caseNumber || ''}|${raw.parcelId || ''}`;
     if (!uniqueMap.has(key)) {
       const mapped = mapRow(raw, urlMapping, anomalies);
+      console.log('DEBUG mapping attempt:', { key, auctionStatus: raw.auctionStatus, mappedPresent: !!mapped });
       if (mapped) uniqueMap.set(key, mapped);
+      else filteredOutCount++;
     }
   });
 
+  console.log(`ℹ️ Filtered out ${filteredOutCount} rows (non-Sold or invalid).`);
+
   const mappedRows = [...uniqueMap.values()];
 
+  if (mappedRows.length) {
+    console.log("🧪 Sample mapped row preview:", mappedRows[0]);
+  } else {
+    console.log("⚠️ No mapped rows produced after mapping step.");
+  }
+
   fs.writeFileSync(OUTPUT_FILE, JSON.stringify(mappedRows, null, 2));
+  console.log(`💾 Saved mapped rows → ${OUTPUT_FILE}`);
 
   if (anomalies.length) {
     fs.writeFileSync(ANOMALY_FILE, JSON.stringify(anomalies, null, 2));
+    console.log(`⚠️ Saved ${anomalies.length} anomalies → ${ANOMALY_FILE}`);
   }
 
-  await appendRows(mappedRows);
+  try {
+    await appendRows(mappedRows);
+  } catch (err) {
+    console.error('❌ Final append failed:', err.message || err);
+    process.exit(1);
+  }
 
-  console.log("🏁 Mapping complete.");
+  console.log("🏁 Done.");
 })();
