@@ -50,11 +50,15 @@ async function scrapeAllPages(url) {
 
   try {
     browser = await puppeteer.launch({
-      headless: 'new',
+      headless: true, // DO NOT use 'new' in CI
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--single-process',
+        '--no-zygote',
       ],
     });
 
