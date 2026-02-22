@@ -9,8 +9,8 @@ const { google } = require('googleapis');
 // CONFIG
 // =========================
 const SERVICE_ACCOUNT_FILE = './service-account.json';
-const SPREADSHEET_ID = '12qESHoxzkSXwUc5Pa1gAzt8-hIw7QyiExkIh6UeDCMM';
-const SHEET_RANGE = 'Property Appraiser!A:I';
+const SPREADSHEET_ID = '1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA';
+const SHEET_RANGE = 'Palm Beach - Taxdeed!A:I';
 
 const TARGET_URL =
   'https://dallas.texas.sheriffsaleauctions.com/index.cfm?zaction=AUCTION&Zmethod=PREVIEW&AUCTIONDATE=02/03/2026';
