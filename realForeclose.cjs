@@ -106,75 +106,53 @@ async function resolveAuctionRealm(page) {
 }
 
 /**
- * Find a clickable "Next" element within the given dom (Page or Frame) *without* using $x.
- * We search common elements and filter by text/value/attributes indicating "next".
+ * Parse "Page X of Y" from .Head_C div:nth-of-type(3) span.PageText
+ * Returns { current, total } as numbers, or null if not found.
+ */
+async function getPageIndicator(dom) {
+  try {
+    const text = await dom.$eval(
+      '.Head_C div:nth-of-type(3) span.PageText',
+      (el) => (el.innerText || el.textContent || '').trim()
+    );
+    // Match patterns like "Page 1 of 7", "Page: 3 of 12", etc.
+    const m = text.match(/page\s*[:]?[\s]*([0-9]+)\s+of\s+([0-9]+)/i);
+    if (m) {
+      return { current: Number(m[1]), total: Number(m[2]) };
+    }
+  } catch (_) {
+    // ignore
+  }
+  return null;
+}
+
+/**
+ * Find the "Next" button using your selector: .PageRight_HVR img
+ * Returns an element handle or null.
  */
 async function findNextHandle(dom) {
-  // Broad query for likely click targets
-  const candidates = await dom.$$(
-    [
-      'a',
-      'button',
-      'input[type="submit"]',
-      'input[type="button"]',
-      'input[type="image"]',
-      'a[rel="next"]',
-      '.pagination-next a',
-      '.pagination .next a',
-      'a.next',
-      '.PageRight_HVR img',
-      'button.next',
-    ].join(', ')
-  );
+  try {
+    // Ensure the container exists (best-effort)
+    await dom.waitForSelector('.PageRight_HVR img', { timeout: 3000 }).catch(() => {});
+    const h = await dom.$('.PageRight_HVR img');
+    if (!h) return null;
 
-  if (!candidates || candidates.length === 0) {
-    return null;
-  }
-
-  // Build a scored list based on how likely each is the "Next" control
-  const scored = [];
-  for (const h of candidates) {
-    const info = await dom.evaluate((el) => {
-      const text = (el.innerText || el.textContent || '').trim();
-      const value = (el.getAttribute('value') || '').trim();
-      const rel = (el.getAttribute('rel') || '').toLowerCase();
-      const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
-      const title = (el.getAttribute('title') || '').toLowerCase();
-      const cls = (el.getAttribute('class') || '').toLowerCase();
-      const disabledAttr = el.hasAttribute('disabled') && el.getAttribute('disabled') !== 'false';
-      const ariaDisabled = el.getAttribute('aria-disabled');
+    // Filter out hidden/disabled
+    const isClickable = await dom.evaluate((el) => {
       const style = window.getComputedStyle(el);
       const hidden =
         style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0';
-      const clickable = !hidden && !disabledAttr && ariaDisabled !== 'true';
-
-      // Normalize text/value for matching
-      const loText = text.toLowerCase();
-      const loValue = value.toLowerCase();
-
-      let score = 0;
-      if (rel === 'next') score += 5;
-      if (cls.includes('next')) score += 3;
-      if (ariaLabel.includes('next')) score += 3;
-      if (title.includes('next')) score += 2;
-      if (loText.includes('next')) score += 4;
-      if (loValue.includes('next')) score += 4;
-
-      return { score, clickable };
+      // Some sites disable via parent class
+      const p = el.closest('.PageRight_HVR');
+      const cls = (p ? p.getAttribute('class') : el.getAttribute('class') || '').toLowerCase();
+      const ariaDisabled = (p ? p.getAttribute('aria-disabled') : el.getAttribute('aria-disabled')) || '';
+      return !hidden && !cls.includes('disabled') && ariaDisabled !== 'true';
     }, h);
 
-    if (info.clickable && info.score > 0) {
-      scored.push({ handle: h, score: info.score });
-    }
-  }
-
-  if (scored.length === 0) {
+    return isClickable ? h : null;
+  } catch (_) {
     return null;
   }
-
-  // Prefer the highest score (rel="next" > text/value > class/title)
-  scored.sort((a, b) => b.score - a.score);
-  return scored[0].handle;
 }
 
 /**
@@ -201,7 +179,7 @@ async function waitForListChange(dom) {
     })(),
   ]);
 
-  // Small settle to ensure DOM is stable
+  // Small settle
   const maybePage = typeof dom.page === 'function' ? dom.page() : dom;
   if (maybePage && typeof maybePage.waitForTimeout === 'function') {
     await maybePage.waitForTimeout(400);
@@ -211,7 +189,7 @@ async function waitForListChange(dom) {
 }
 
 // =========================
-// SCRAPER WITH PAGINATION
+/** SCRAPER WITH PAGINATION */
 // =========================
 async function scrapeAllPages(url) {
   let browser;
@@ -241,7 +219,7 @@ async function scrapeAllPages(url) {
 
     await page.goto(url, { waitUntil: 'networkidle0', timeout: 120000 });
 
-    // Handle common disclaimers/cookies if present (best-effort)
+    // Best-effort handle consent
     try {
       const agreeBtns = await page.$$(
         "button, input[type='button'], input[type='submit']"
@@ -260,12 +238,15 @@ async function scrapeAllPages(url) {
     } catch (_) {}
 
     // Resolve where the auction rows live (page or iframe)
-    const { dom, realm } = await resolveAuctionRealm(page);
+    const { dom } = await resolveAuctionRealm(page);
 
     // Wait for at least one row
     await dom.waitForSelector('div[aid]', { timeout: 60000 });
 
-    let currentPage = 1;
+    // Determine starting page/total via indicator (if present)
+    let indicator = await getPageIndicator(dom);
+    let currentPage = indicator?.current || 1;
+    const totalPages = indicator?.total || null;
 
     while (currentPage <= MAX_PAGES) {
       console.log(`📄 Scraping page ${currentPage}...`);
@@ -285,10 +266,9 @@ async function scrapeAllPages(url) {
           openingBid: getByLabel($, $item, 'Est. Min. Bid'),
           parcelId: getByLabel($, $item, 'Account Number'),
           streetAddress: getByLabel($, $item, 'Property Address'),
-          // Try label, fallback to the original nth-of-type if label not found
           cityStateZip:
-            getByLabel($, $item, 'City') ||
             getByLabel($, $item, 'City, State Zip') ||
+            getByLabel($, $item, 'City') ||
             clean($item.find('tr:nth-of-type(8) td').first().text()),
           status: clean($item.find('div.ASTAT_MSGA').first().text()),
           soldAmount: clean($item.find('div.ASTAT_MSGD').first().text()),
@@ -300,26 +280,17 @@ async function scrapeAllPages(url) {
       console.log(`   ➜ Found ${pageResults.length} auctions`);
       allResults.push(...pageResults);
 
-      // Try to find a usable "Next" control
-      const nextHandle = await findNextHandle(dom);
-      if (!nextHandle) {
-        console.log('🛑 No "Next" found. End of pagination.');
+      // If we know total pages and are at/over the end, stop
+      indicator = await getPageIndicator(dom);
+      if (indicator && indicator.total && indicator.current >= indicator.total) {
+        console.log(`🛑 Reached last page (${indicator.current} of ${indicator.total}).`);
         break;
       }
 
-      // Before we click Next, double-check if it's actually disabled
-      const isDisabled = await dom.evaluate((el) => {
-        const cls = (el.getAttribute('class') || '').toLowerCase();
-        const disabledAttr = el.hasAttribute('disabled') && el.getAttribute('disabled') !== 'false';
-        const ariaDisabled = el.getAttribute('aria-disabled');
-        const style = window.getComputedStyle(el);
-        const hidden =
-          style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0';
-        return hidden || cls.includes('disabled') || disabledAttr || ariaDisabled === 'true';
-      }, nextHandle);
-
-      if (isDisabled) {
-        console.log('🛑 "Next" is disabled. End of pagination.');
+      // Try to find and click "Next"
+      const nextHandle = await findNextHandle(dom);
+      if (!nextHandle) {
+        console.log('🛑 Next button not found (.PageRight_HVR img). End of pagination.');
         break;
       }
 
@@ -330,7 +301,7 @@ async function scrapeAllPages(url) {
         await dom.evaluate((el) => el.scrollIntoView({ block: 'center', behavior: 'instant' }), nextHandle);
       } catch (_) {}
 
-      // Click and wait for change
+      // Click and wait for list change
       await Promise.allSettled([
         dom.waitForNavigation({ waitUntil: 'networkidle0', timeout: 15000 }),
         nextHandle.click(),
@@ -339,12 +310,27 @@ async function scrapeAllPages(url) {
       try {
         await waitForListChange(dom);
       } catch (_) {
-        // If no change detected, assume end to avoid infinite loop
-        console.log('⚠️ Did not detect list change after "Next". Stopping.');
-        break;
+        // As a fallback, try to see if the indicator changed
+        const afterIndicator = await getPageIndicator(dom);
+        if (!afterIndicator || afterIndicator.current === currentPage) {
+          console.log('⚠️ Did not detect list change after "Next". Stopping.');
+          break;
+        }
       }
 
-      currentPage++;
+      // Update current page from indicator if available; else increment
+      indicator = await getPageIndicator(dom);
+      if (indicator && indicator.current) {
+        currentPage = indicator.current;
+      } else {
+        currentPage += 1;
+      }
+
+      // Safety stop if we somehow exceed a known total
+      if (indicator && indicator.total && currentPage > indicator.total) {
+        console.log(`🛑 Exceeded total pages (${indicator.total}). Stopping.`);
+        break;
+      }
     }
 
     return allResults;
@@ -447,4 +433,3 @@ async function appendToSheet(data) {
 
   console.log('🏁 Finished.');
 })();
-``
