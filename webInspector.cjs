@@ -47,7 +47,7 @@ async function loadTargetUrls() {
 }
 
 // =========================
-// Currency parser
+/** Currency parser: accepts $1,234 or $1,234.56 */
 // =========================
 function parseCurrency(str) {
   if (!str) return null;
@@ -56,27 +56,31 @@ function parseCurrency(str) {
 }
 
 // =========================
-// Helpers
+// Helpers to extract fields
 // =========================
 function extractBetween(text, startLabel, stopLabels = []) {
   const idx = text.toLowerCase().indexOf(startLabel.toLowerCase());
   if (idx === -1) return '';
+
   let substr = text.slice(idx + startLabel.length).trim();
+
   let stopIndex = substr.length;
   for (const stop of stopLabels) {
     const i = substr.toLowerCase().indexOf(stop.toLowerCase());
     if (i !== -1 && i < stopIndex) stopIndex = i;
   }
+
   return substr.slice(0, stopIndex).trim();
 }
 
+/** Flexible date capture across common formats */
 function extractDateFlexible(text) {
   const patterns = [
-    /Date\s*:?\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4}.*)/i,
-    /Auction Date\s*:?\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4}.*)/i,
-    /Sale Date\s*:?\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4}.*)/i,
-    /Date Sold\s*:?\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4}.*)/i,
-    /([0-9]{4}-[0-9]{2}-[0-9]{2}.*)/i,
+    /Date\s*:?\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)\s*\w*)?)/i,
+    /Auction Date\s*:?\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)\s*\w*)?)/i,
+    /Sale Date\s*:?\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)\s*\w*)?)/i,
+    /Date Sold\s*:?\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)\s*\w*)?)/i,
+    /([0-9]{4}-[0-9]{2}-[0-9]{2}(?:\s+[0-9]{2}:[0-9]{2}(?::[0-9]{2})?\s*(?:AM|PM)?\s*\w*)?)/i,
   ];
   for (const re of patterns) {
     const m = text.match(re);
@@ -85,6 +89,7 @@ function extractDateFlexible(text) {
   return '';
 }
 
+/** Currency after label: optional colon, optional cents */
 function extractAmountAfter(text, label) {
   const regex = new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:?' + '\\s*\\$[\\d,]+(?:\\.\\d{2})?', 'i');
   const m = text.match(regex);
@@ -93,6 +98,7 @@ function extractAmountAfter(text, label) {
   return moneyMatch ? moneyMatch[0] : '';
 }
 
+/** Proximity-based currency near any of the labels (within N chars) */
 function extractCurrencyNearLabels(text, labels, window = 60) {
   const lower = text.toLowerCase();
   for (const label of labels) {
@@ -106,20 +112,39 @@ function extractCurrencyNearLabels(text, labels, window = 60) {
   return '';
 }
 
+// =========================
+// Multi-label sale price extractor (robust)
+// =========================
 function extractSalePrice(text) {
   const labels = [
-    'Amount','Sale Price','Sold Price','Sold Amount','Winning Bid',
-    'Final Bid','Final Sale Price','Winning Amount','Winning Offer'
+    'Amount',
+    'Sale Price',
+    'Sold Price',
+    'Sold Amount',
+    'Sold Amount/Sold Price',
+    'Winning Bid',
+    'Winning Bid Amount',
+    'Sold For',
+    'Final Bid',
+    'Final Sale Price',
+    'Winning Amount',
+    'Winning Offer',
   ];
+
+  // 1) Try strict label→amount
   for (const label of labels) {
     const v = extractAmountAfter(text, label);
     if (v) return v;
   }
+  // 2) Try proximity-based fallback
   const near = extractCurrencyNearLabels(text, labels, 80);
   if (near) return near;
+
+  // 3) Last resort: pick the largest currency in the block (often sale price)
   const allMoney = [...text.matchAll(/\$[\d,]+(?:\.\d{2})?/g)].map(m => m[0]);
   if (allMoney.length) {
-    const sorted = allMoney.map(s => ({ s, n: parseCurrency(s) }))
+    const sorted = allMoney
+      .map(s => ({ s, n: parseCurrency(s) }))
       .filter(x => x.n !== null)
       .sort((a, b) => b.n - a.n);
     return sorted.length ? sorted[0].s : '';
@@ -127,26 +152,47 @@ function extractSalePrice(text) {
   return '';
 }
 
+// =========================
+// Schema validation
+// =========================
+function validateRow(row) {
+  return (
+    row.caseNumber &&
+    row.parcelId &&
+    row.openingBid &&
+    row.salePrice &&
+    row.assessedValue
+  );
+}
+
+// =========================
+// Build label→value map from container nodes
+// =========================
 function buildLabelValueMap($container) {
   const map = {};
   const textNodes = [];
+
   $container.find('*').each((_, el) => {
     const t = $container.find(el).text().replace(/\s+/g, ' ').trim();
     if (t) textNodes.push(t);
   });
+
+  // Heuristic: split on common separators
   for (const t of textNodes) {
     const parts = t.split(/[:|-]\s*/);
     if (parts.length >= 2) {
       const label = parts[0].trim().toLowerCase();
       const value = parts.slice(1).join(':').trim();
-      if (label && value) map[label] = value;
+      if (label && value) {
+        map[label] = value;
+      }
     }
   }
   return { map, text: textNodes.join(' | ') };
 }
 
 // =========================
-// Inspect + Parse Page
+// Inspect + Parse Page (SOLD only)
 // =========================
 async function inspectAndParse(browser, url) {
   const page = await browser.newPage();
@@ -157,8 +203,17 @@ async function inspectAndParse(browser, url) {
   const seen = new Set();
 
   try {
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36');
-    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+    // Anti-bot hardening
+    await page.setUserAgent(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
+        'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+        'Chrome/120.0.0.0 Safari/537.36'
+    );
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'en-US,en;q=0.9',
+      Accept:
+        'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    });
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
@@ -171,34 +226,77 @@ async function inspectAndParse(browser, url) {
       await new Promise(r => setTimeout(r, 8000));
 
       const html = await page.content();
+      if (
+        html.includes('403 Forbidden') ||
+        html.includes('Access Denied') ||
+        html.toLowerCase().includes('forbidden')
+      ) {
+        throw new Error('Blocked by target website (403)');
+      }
+
       const $ = cheerio.load(html);
 
+      // (1) FILTER: auction-relevant elements ONLY (for diagnostics)
+      const auctionTextRegex =
+        /(\$\d{1,3}(,\d{3})+)|(\bAPN\b)|(\bParcel\b)|(\bAuction\b)|(\bCase\b)|(\bWinning Bid\b)|(\bSale Price\b)/i;
+
+      $('*').each((_, el) => {
+        const tag = el.tagName;
+        const text = $(el).text().replace(/\s+/g, ' ').trim();
+        const attrs = el.attribs || {};
+        if (text && auctionTextRegex.test(text)) {
+          allRelevantElements.push({ sourceUrl: pageUrl, tag, text, attrs });
+        }
+      });
+
+      // (2) CARD-BASED AUCTION PARSER (SOLD ONLY)
       $('div').each((_, container) => {
         const $container = $(container);
         const blockText = $container.text().replace(/\s+/g, ' ').trim();
-
-        // Loosened filter
-        if (!/(Auction\s*Sold|Sold\s*at\s*Auction|Sale\s*Finalized|Completed\s*Sale|Sold)/i.test(blockText)) return;
-
-        console.log("DEBUG: Candidate sold block:", blockText.slice(0, 200));
+        if (!/Auction Sold/i.test(blockText)) return;
 
         const { map: kv, text: joinedText } = buildLabelValueMap($container);
 
         const auctionStatus = 'Sold';
-        const rawCase = extractBetween(blockText, 'Case #:', ['Certificate','Opening Bid']) || (kv['case #'] || kv['case'] || '');
+        const auctionType =
+          extractBetween(blockText, 'Auction Type:', ['Case #', 'Certificate', 'Opening Bid']) ||
+          (kv['auction type'] || '');
+
+        const rawCase =
+          extractBetween(blockText, 'Case #:', ['Certificate', 'Opening Bid']) ||
+          (kv['case #'] || kv['case'] || '');
         const caseNumber = rawCase.split(/\s+/)[0].trim();
 
-        const openingBidStr = extractAmountAfter(blockText, 'Opening Bid') || (kv['opening bid'] || '');
-        const assessedValueStr = extractBetween(blockText, 'Assessed Value:', []) || (kv['assessed value'] || '');
+        const openingBidStr =
+          extractAmountAfter(blockText, 'Opening Bid') ||
+          extractAmountAfter(joinedText, 'Opening Bid') ||
+          (kv['opening bid'] && kv['opening bid'].match(/\$[\d,]+(?:\.\d{2})?/)?.[0]) ||
+          '';
+
+        const assessedValueStr =
+          extractBetween(blockText, 'Assessed Value:', []) ||
+          (kv['assessed value'] || '');
         const assessedMoneyMatch = assessedValueStr.match(/\$[\d,]+(?:\.\d{2})?/);
         const assessedValue = assessedMoneyMatch ? assessedMoneyMatch[0] : '';
 
-        const salePriceStr = extractSalePrice(blockText) || (kv['sale price'] || kv['sold price'] || kv['winning bid'] || '');
+        const salePriceStr =
+          extractSalePrice(blockText) ||
+          extractSalePrice(joinedText) ||
+          (kv['sale price'] && kv['sale price'].match(/\$[\d,]+(?:\.\d{2})?/)?.[0]) ||
+          (kv['sold price'] && kv['sold price'].match(/\$[\d,]+(?:\.\d{2})?/)?.[0]) ||
+          (kv['winning bid'] && kv['winning bid'].match(/\$[\d,]+(?:\.\d{2})?/)?.[0]) ||
+          (kv['sold amount'] && kv['sold amount'].match(/\$[\d,]+(?:\.\d{2})?/)?.[0]) ||
+          '';
 
-        const parcelRaw = extractBetween(blockText, 'Parcel ID:', ['Property Address','Assessed Value']) || (kv['parcel id'] || kv['apn'] || '');
+        const parcelRaw =
+          extractBetween(blockText, 'Parcel ID:', ['Property Address', 'Assessed Value']) ||
+          (kv['parcel id'] || kv['apn'] || '');
         const parcelId = parcelRaw.split('|')[0].trim();
 
-        const propertyAddress = extractBetween(blockText, 'Property Address:', ['Assessed Value']) || (kv['property address'] || kv['address'] || '');
+        const propertyAddress =
+          extractBetween(blockText, 'Property Address:', ['Assessed Value']) ||
+          (kv['property address'] || kv['address'] || '');
+
         const auctionDate =
           extractDateFlexible(blockText) ||
           extractDateFlexible(joinedText) ||
@@ -207,7 +305,7 @@ async function inspectAndParse(browser, url) {
         const row = {
           sourceUrl: pageUrl,
           auctionStatus,
-          auctionType: kv['auction type'] || 'Tax Sale',
+          auctionType: auctionType || 'Tax Sale',
           caseNumber,
           parcelId,
           propertyAddress,
@@ -217,17 +315,7 @@ async function inspectAndParse(browser, url) {
           auctionDate,
         };
 
-        // Relaxed validation for debugging: log rows that fail validation
-        if (!validateRow(row)) {
-          console.log('DEBUG: Row failed validation, showing extracted fields:', {
-            caseNumber: row.caseNumber,
-            parcelId: row.parcelId,
-            openingBid: row.openingBid,
-            salePrice: row.salePrice,
-            assessedValue: row.assessedValue,
-          });
-          return;
-        }
+        if (!validateRow(row)) return;
 
         const open = parseCurrency(openingBidStr);
         const assess = parseCurrency(assessedValue);
@@ -240,7 +328,8 @@ async function inspectAndParse(browser, url) {
           salePrice !== null && open !== null ? salePrice - open : null;
 
         row.meetsMinimumSurplus =
-          row.surplusAssessVsSale !== null && row.surplusAssessVsSale >= MIN_SURPLUS
+          row.surplusAssessVsSale !== null &&
+          row.surplusAssessVsSale >= MIN_SURPLUS
             ? 'Yes'
             : 'No';
 
@@ -249,30 +338,27 @@ async function inspectAndParse(browser, url) {
         seen.add(dedupeKey);
 
         allParsedRows.push(row);
-      }); // end $('div').each
+      });
 
       console.log(`📦 Page ${pageIndex}: Elements ${allRelevantElements.length} | SOLD auctions so far ${allParsedRows.length}`);
 
-      // Detect if there is a "Next" link (robust: look for rel=next or text)
-      let nextLink = $('a[rel="next"]').attr('href');
-      if (!nextLink) {
-        nextLink = $('a').filter((_, el) => {
-          const txt = $(el).text().trim().toLowerCase();
-          return txt === 'next' || txt === 'next ›' || txt.includes('next');
-        }).attr('href');
-      }
+      // Detect if there is a "Next" link
+      const nextLink = $('a').filter((_, el) => {
+        const txt = $(el).text().trim().toLowerCase();
+        return txt === 'next' || txt.includes('next');
+      }).attr('href');
 
       if (!nextLink) break;
       pageIndex++;
       if (pageIndex > 50) break; // safety cap
-    } // end while
+    }
 
     return { relevantElements: allRelevantElements, parsedRows: allParsedRows };
   } catch (err) {
     console.error(`❌ Error on ${url}:`, err.message);
     return { relevantElements: [], parsedRows: [], error: { url, message: err.message } };
   } finally {
-    try { await page.close(); } catch (e) { /* ignore */ }
+    await page.close();
   }
 }
 
@@ -281,20 +367,7 @@ async function inspectAndParse(browser, url) {
 // =========================
 (async () => {
   console.log('📥 Loading URLs...');
-  let urls = [];
-  try {
-    urls = await loadTargetUrls();
-  } catch (err) {
-    console.error('❌ Failed to load target URLs from sheet:', err.message);
-    process.exit(1);
-  }
-
-  if (!urls.length) {
-    console.log('⚠️ No target URLs found. Exiting.');
-    fs.writeFileSync(OUTPUT_ELEMENTS_FILE, JSON.stringify([], null, 2));
-    fs.writeFileSync(OUTPUT_ROWS_FILE, JSON.stringify([], null, 2));
-    process.exit(0);
-  }
+  const urls = await loadTargetUrls();
 
   const browser = await puppeteer.launch({
     headless: 'new',
@@ -323,7 +396,7 @@ async function inspectAndParse(browser, url) {
     }
   }
 
-  try { await browser.close(); } catch (e) { /* ignore */ }
+  await browser.close();
 
   // Global dedupe
   const uniqueMap = new Map();
@@ -349,14 +422,9 @@ async function inspectAndParse(browser, url) {
   };
 
   // Write artifacts
-  try {
-    fs.writeFileSync(OUTPUT_ELEMENTS_FILE, JSON.stringify(allElements, null, 2));
-    fs.writeFileSync(OUTPUT_ROWS_FILE, JSON.stringify(finalRows, null, 2));
-    fs.writeFileSync(OUTPUT_SUMMARY_FILE, JSON.stringify(summary, null, 2));
-  } catch (err) {
-    console.error('❌ Failed to write output files:', err.message);
-    process.exit(1);
-  }
+  fs.writeFileSync(OUTPUT_ELEMENTS_FILE, JSON.stringify(allElements, null, 2));
+  fs.writeFileSync(OUTPUT_ROWS_FILE, JSON.stringify(finalRows, null, 2));
+  fs.writeFileSync(OUTPUT_SUMMARY_FILE, JSON.stringify(summary, null, 2));
 
   if (errors.length) {
     fs.writeFileSync(OUTPUT_ERRORS_FILE, JSON.stringify(errors, null, 2));
