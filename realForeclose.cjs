@@ -75,7 +75,7 @@ async function scrapeAllPages(url) {
     while (currentPage <= MAX_PAGES) {
       console.log(`📄 Scraping page ${currentPage}...`);
 
-      await page.waitForSelector('div[aid]', { timeout: 60000 });
+      await page.waitForSelector('#BID_WINDOW_CONTAINER', { timeout: 60000 });
 
       const html = await page.content();
       const $ = cheerio.load(html);
