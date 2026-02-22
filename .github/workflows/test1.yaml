@@ -95,23 +95,6 @@ jobs:
         python realForeclose.py
 
 
-    # --------------------------------------------------
-    # Capture debug snapshot
-    # --------------------------------------------------
-
-    - name: Capture debug snapshot
-      env:
-        TARGET_URL: 'https://www.nmlsconsumeraccess.org/'
-      run: |
-
-        TS=$(date +%s)
-
-        google-chrome-stable \
-          --headless \
-          --no-sandbox \
-          --disable-dev-shm-usage \
-          --dump-dom "$TARGET_URL" > debug-${TS}.html || true
-
 
     # --------------------------------------------------
     # Upload artifacts
