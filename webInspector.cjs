@@ -21,6 +21,10 @@ const OUTPUT_ERRORS_FILE = 'errors.json';
 const OUTPUT_SUMMARY_FILE = 'summary.json';
 
 const MIN_SURPLUS = 25000;
+const MAX_PAGES = 50;
+const NAV_TIMEOUT = 120000;
+const PAGE_WAIT_MS = 3000;
+const DEBUG = true;
 
 // =========================
 // GOOGLE AUTH
@@ -32,55 +36,46 @@ const auth = new google.auth.GoogleAuth({
 const sheets = google.sheets({ version: 'v4', auth });
 
 // =========================
-// Load URLs
+// LABEL ALIASES AND NORMALIZATION
 // =========================
-async function loadTargetUrls() {
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_NAME}!${URL_RANGE}`,
-  });
+const LABEL_ALIASES = {
+  caseNumber: ['case', 'case number', 'case no', 'cause number', 'cause no', 'cause', 'cause #'],
+  parcelId: ['parcel id', 'account number', 'account no', 'account #', 'apn', 'account'],
+  openingBid: ['opening bid', 'est min bid', 'est. min. bid', 'est min. bid', 'est. min bid', 'est min'],
+  assessedValue: ['assessed value', 'adjudged value', 'adjudged', 'assessed'],
+  salePrice: ['sold for', 'sale price', 'final bid', 'winning bid', 'paid amount', 'sold price', 'sold amount'],
+  auctionStatus: ['auction status', 'status', 'sale status'],
+  propertyAddress: ['property address', 'address', 'property'],
+  auctionDate: ['auction date', 'date sold', 'sale date', 'date']
+};
 
-  return (res.data.values || [])
-    .flat()
-    .map(v => v.trim())
-    .filter(v => v.startsWith('http'));
+function normalizeLabel(raw) {
+  return raw.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function findCanonicalKey(labelRaw) {
+  const nl = normalizeLabel(labelRaw);
+  for (const [canon, variants] of Object.entries(LABEL_ALIASES)) {
+    if (variants.includes(nl) || nl === canon) return canon;
+  }
+  // fallback: return normalized label as-is
+  return nl;
 }
 
 // =========================
-/** Currency parser: accepts $1,234 or $1,234.56 */
+// UTILITIES
 // =========================
 function parseCurrency(str) {
   if (!str) return null;
-  const n = parseFloat(str.replace(/[^0-9.-]/g, ''));
+  const n = parseFloat(String(str).replace(/[^0-9.-]/g, ''));
   return isNaN(n) ? null : n;
 }
 
-// =========================
-// Helpers to extract fields
-// =========================
-function extractBetween(text, startLabel, stopLabels = []) {
-  const idx = text.toLowerCase().indexOf(startLabel.toLowerCase());
-  if (idx === -1) return '';
-
-  let substr = text.slice(idx + startLabel.length).trim();
-
-  let stopIndex = substr.length;
-  for (const stop of stopLabels) {
-    const i = substr.toLowerCase().indexOf(stop.toLowerCase());
-    if (i !== -1 && i < stopIndex) stopIndex = i;
-  }
-
-  return substr.slice(0, stopIndex).trim();
-}
-
-/** Flexible date capture across common formats */
 function extractDateFlexible(text) {
+  if (!text) return '';
   const patterns = [
-    /Date\s*:?\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)\s*\w*)?)/i,
-    /Auction Date\s*:?\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)\s*\w*)?)/i,
-    /Sale Date\s*:?\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)\s*\w*)?)/i,
-    /Date Sold\s*:?\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)\s*\w*)?)/i,
-    /([0-9]{4}-[0-9]{2}-[0-9]{2}(?:\s+[0-9]{2}:[0-9]{2}(?::[0-9]{2})?\s*(?:AM|PM)?\s*\w*)?)/i,
+    /([0-9]{2}\/[0-9]{2}\/[0-9]{4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)?)/i,
+    /([0-9]{4}-[0-9]{2}-[0-9]{2}(?:\s+[0-9]{2}:[0-9]{2}(?::[0-9]{2})?)?)/i,
   ];
   for (const re of patterns) {
     const m = text.match(re);
@@ -89,22 +84,23 @@ function extractDateFlexible(text) {
   return '';
 }
 
-/** Currency after label: optional colon, optional cents */
 function extractAmountAfter(text, label) {
-  const regex = new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:?' + '\\s*\\$[\\d,]+(?:\\.\\d{2})?', 'i');
+  if (!text || !label) return '';
+  const safeLabel = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const regex = new RegExp(safeLabel + '\\s*[:#-]?\\s*\\$[\\d,]+(?:\\.\\d{2})?', 'i');
   const m = text.match(regex);
   if (!m) return '';
   const moneyMatch = m[0].match(/\$[\d,]+(?:\.\d{2})?/);
   return moneyMatch ? moneyMatch[0] : '';
 }
 
-/** Proximity-based currency near any of the labels (within N chars) */
-function extractCurrencyNearLabels(text, labels, window = 60) {
+function extractCurrencyNearLabels(text, labels, window = 80) {
+  if (!text) return '';
   const lower = text.toLowerCase();
   for (const label of labels) {
     const idx = lower.indexOf(label.toLowerCase());
     if (idx !== -1) {
-      const slice = text.slice(idx, Math.min(text.length, idx + window));
+      const slice = text.slice(Math.max(0, idx - 20), Math.min(text.length, idx + window));
       const m = slice.match(/\$[\d,]+(?:\.\d{2})?/);
       if (m) return m[0];
     }
@@ -112,61 +108,19 @@ function extractCurrencyNearLabels(text, labels, window = 60) {
   return '';
 }
 
-// =========================
-// Multi-label sale price extractor (robust)
-// =========================
-function extractSalePrice(text) {
-  const labels = [
-    'Amount',
-    'Sale Price',
-    'Sold Price',
-    'Sold Amount',
-    'Sold Amount/Sold Price',
-    'Winning Bid',
-    'Winning Bid Amount',
-    'Sold For',
-    'Final Bid',
-    'Final Sale Price',
-    'Winning Amount',
-    'Winning Offer',
-  ];
-
-  // 1) Try strict label→amount
-  for (const label of labels) {
-    const v = extractAmountAfter(text, label);
-    if (v) return v;
-  }
-  // 2) Try proximity-based fallback
-  const near = extractCurrencyNearLabels(text, labels, 80);
-  if (near) return near;
-
-  // 3) Last resort: pick the largest currency in the block (often sale price)
+function largestCurrencyInText(text) {
+  if (!text) return '';
   const allMoney = [...text.matchAll(/\$[\d,]+(?:\.\d{2})?/g)].map(m => m[0]);
-  if (allMoney.length) {
-    const sorted = allMoney
-      .map(s => ({ s, n: parseCurrency(s) }))
-      .filter(x => x.n !== null)
-      .sort((a, b) => b.n - a.n);
-    return sorted.length ? sorted[0].s : '';
-  }
-  return '';
+  if (!allMoney.length) return '';
+  const sorted = allMoney
+    .map(s => ({ s, n: parseCurrency(s) }))
+    .filter(x => x.n !== null)
+    .sort((a, b) => b.n - a.n);
+  return sorted.length ? sorted[0].s : '';
 }
 
 // =========================
-// Schema validation
-// =========================
-function validateRow(row) {
-  return (
-    row.caseNumber &&
-    row.parcelId &&
-    row.openingBid &&
-    row.salePrice &&
-    row.assessedValue
-  );
-}
-
-// =========================
-// Build label→value map from container nodes
+// BUILD LABEL→VALUE MAP
 // =========================
 function buildLabelValueMap($container) {
   const map = {};
@@ -177,26 +131,36 @@ function buildLabelValueMap($container) {
     if (t) textNodes.push(t);
   });
 
-  // Heuristic: split on common separators
   for (const t of textNodes) {
     const parts = t.split(/[:|-]\s*/);
     if (parts.length >= 2) {
-      const label = parts[0].trim().toLowerCase();
+      const labelRaw = parts[0].trim();
       const value = parts.slice(1).join(':').trim();
-      if (label && value) {
-        map[label] = value;
-      }
+      const canon = findCanonicalKey(labelRaw);
+      if (canon && value) map[canon] = value;
     }
   }
+
+  // Also expose raw joined text for diagnostics
   return { map, text: textNodes.join(' | ') };
 }
 
 // =========================
-// Inspect + Parse Page (SOLD only)
+// VALIDATION
+// =========================
+function validateRow(row) {
+  const hasId = (row.caseNumber && row.caseNumber.trim()) || (row.parcelId && row.parcelId.trim());
+  const hasSale = row.salePrice && row.salePrice.trim();
+  const paidStatus = /paid in full|paid prior to sale|paid/i.test(row.auctionStatus || '');
+  return !!(hasId && (hasSale || paidStatus));
+}
+
+// =========================
+// PAGE PARSER
 // =========================
 async function inspectAndParse(browser, url) {
   const page = await browser.newPage();
-  page.setDefaultNavigationTimeout(120000);
+  page.setDefaultNavigationTimeout(NAV_TIMEOUT);
 
   const allRelevantElements = [];
   const allParsedRows = [];
@@ -222,8 +186,8 @@ async function inspectAndParse(browser, url) {
     while (true) {
       const pageUrl = pageIndex === 1 ? url : `${url}&page=${pageIndex}`;
       console.log(`🌐 Visiting ${pageUrl}`);
-      await page.goto(pageUrl, { waitUntil: 'networkidle2', timeout: 120000 });
-      await new Promise(r => setTimeout(r, 8000));
+      await page.goto(pageUrl, { waitUntil: 'networkidle2', timeout: NAV_TIMEOUT });
+      await page.waitForTimeout(PAGE_WAIT_MS);
 
       const html = await page.content();
       if (
@@ -236,9 +200,9 @@ async function inspectAndParse(browser, url) {
 
       const $ = cheerio.load(html);
 
-      // (1) FILTER: auction-relevant elements ONLY (for diagnostics)
+      // Collect diagnostic elements
       const auctionTextRegex =
-        /(\$\d{1,3}(,\d{3})+)|(\bAPN\b)|(\bParcel\b)|(\bAuction\b)|(\bCase\b)|(\bWinning Bid\b)|(\bSale Price\b)/i;
+        /(\$\d{1,3}(,\d{3})+)|(\bAPN\b)|(\bParcel\b)|(\bAuction\b)|(\bCase\b)|(\bWinning Bid\b)|(\bSale Price\b)|(\bAdjudged\b)|(\bEst\.?\s*Min\.?\s*Bid\b)/i;
 
       $('*').each((_, el) => {
         const tag = el.tagName;
@@ -249,89 +213,117 @@ async function inspectAndParse(browser, url) {
         }
       });
 
-      // (2) CARD-BASED AUCTION PARSER (SOLD ONLY)
-      $('div').each((_, container) => {
+      // Card-based parsing: look for blocks that contain auction-like text
+      $('div, li, section, article').each((_, container) => {
         const $container = $(container);
         const blockText = $container.text().replace(/\s+/g, ' ').trim();
-        if (!/Auction Sold/i.test(blockText)) return;
+        if (!blockText) return;
+
+        // Quick filter: must contain either a case/cause or parcel/account and a status or money
+        if (!/case|cause|tx-|parcel|account|apn/i.test(blockText)) return;
 
         const { map: kv, text: joinedText } = buildLabelValueMap($container);
 
-        const auctionStatus = 'Sold';
-        const auctionType =
-          extractBetween(blockText, 'Auction Type:', ['Case #', 'Certificate', 'Opening Bid']) ||
-          (kv['auction type'] || '');
+        // Determine auctionStatus from explicit labels or inline phrases
+        const auctionStatus =
+          kv['auctionStatus'] ||
+          kv['status'] ||
+          (blockText.match(/\b(Paid in Full|Paid prior to sale|Paid|Canceled|Pulled for no bids|Sold)\b/i)?.[0] || '');
+
+        // Extract canonical fields using aliases and fallbacks
+        const auctionType = kv['auction type'] || kv['sale type'] || '';
 
         const rawCase =
-          extractBetween(blockText, 'Case #:', ['Certificate', 'Opening Bid']) ||
-          (kv['case #'] || kv['case'] || '');
-        const caseNumber = rawCase.split(/\s+/)[0].trim();
-
-        const openingBidStr =
-          extractAmountAfter(blockText, 'Opening Bid') ||
-          extractAmountAfter(joinedText, 'Opening Bid') ||
-          (kv['opening bid'] && kv['opening bid'].match(/\$[\d,]+(?:\.\d{2})?/)?.[0]) ||
+          kv['caseNumber'] ||
+          kv['case'] ||
+          extractBetweenFallback(blockText, ['case #', 'cause number', 'cause no', 'cause:'], 40) ||
           '';
-
-        const assessedValueStr =
-          extractBetween(blockText, 'Assessed Value:', []) ||
-          (kv['assessed value'] || '');
-        const assessedMoneyMatch = assessedValueStr.match(/\$[\d,]+(?:\.\d{2})?/);
-        const assessedValue = assessedMoneyMatch ? assessedMoneyMatch[0] : '';
-
-        const salePriceStr =
-          extractSalePrice(blockText) ||
-          extractSalePrice(joinedText) ||
-          (kv['sale price'] && kv['sale price'].match(/\$[\d,]+(?:\.\d{2})?/)?.[0]) ||
-          (kv['sold price'] && kv['sold price'].match(/\$[\d,]+(?:\.\d{2})?/)?.[0]) ||
-          (kv['winning bid'] && kv['winning bid'].match(/\$[\d,]+(?:\.\d{2})?/)?.[0]) ||
-          (kv['sold amount'] && kv['sold amount'].match(/\$[\d,]+(?:\.\d{2})?/)?.[0]) ||
-          '';
+        const caseNumber = (rawCase || '').split(/\s+/)[0].trim();
 
         const parcelRaw =
-          extractBetween(blockText, 'Parcel ID:', ['Property Address', 'Assessed Value']) ||
-          (kv['parcel id'] || kv['apn'] || '');
-        const parcelId = parcelRaw.split('|')[0].trim();
+          kv['parcelId'] ||
+          kv['parcel id'] ||
+          kv['account number'] ||
+          kv['account'] ||
+          extractBetweenFallback(blockText, ['parcel id', 'account number', 'account no', 'apn'], 40) ||
+          '';
+        const parcelId = (parcelRaw || '').split(/\s+/)[0].trim();
+
+        // openingBid from label or Est Min Bid
+        const openingBidStr =
+          kv['openingBid'] ||
+          kv['est min bid'] ||
+          extractAmountAfter(blockText, 'Opening Bid') ||
+          extractAmountAfter(blockText, 'Est. Min. Bid') ||
+          extractCurrencyNearLabels(blockText, ['Opening Bid', 'Est. Min. Bid', 'Est Min Bid'], 120) ||
+          '';
+
+        // assessedValue from label or Adjudged Value
+        const assessedValueStr =
+          kv['assessedValue'] ||
+          kv['adjudged value'] ||
+          extractAmountAfter(blockText, 'Assessed Value') ||
+          extractAmountAfter(blockText, 'Adjudged Value') ||
+          extractCurrencyNearLabels(blockText, ['Assessed Value', 'Adjudged Value'], 120) ||
+          '';
+
+        // salePrice: multi-strategy
+        const salePriceStr =
+          kv['salePrice'] ||
+          kv['sold for'] ||
+          kv['sold price'] ||
+          extractAmountAfter(blockText, 'Sold For') ||
+          extractAmountAfter(joinedText, 'Sold For') ||
+          extractCurrencyNearLabels(blockText, ['Sold For', 'Sale Price', 'Final Bid', 'Winning Bid'], 160) ||
+          largestCurrencyInText(blockText) ||
+          '';
 
         const propertyAddress =
-          extractBetween(blockText, 'Property Address:', ['Assessed Value']) ||
-          (kv['property address'] || kv['address'] || '');
+          kv['propertyAddress'] || kv['address'] || extractBetweenFallback(blockText, ['property address', 'address'], 80) || '';
 
         const auctionDate =
-          extractDateFlexible(blockText) ||
-          extractDateFlexible(joinedText) ||
-          (kv['auction date'] || kv['date sold'] || kv['sale date'] || kv['date'] || '');
+          kv['auctionDate'] || extractDateFlexible(blockText) || extractDateFlexible(joinedText) || '';
 
         const row = {
           sourceUrl: pageUrl,
-          auctionStatus,
+          auctionStatus: auctionStatus || '',
           auctionType: auctionType || 'Tax Sale',
           caseNumber,
           parcelId,
           propertyAddress,
           openingBid: openingBidStr,
           salePrice: salePriceStr,
-          assessedValue,
+          assessedValue: assessedValueStr,
           auctionDate,
+          rawText: blockText,
         };
 
-        if (!validateRow(row)) return;
+        // Add statusNote if salePrice missing but status present
+        if (!row.salePrice && row.auctionStatus) row.statusNote = row.auctionStatus;
 
-        const open = parseCurrency(openingBidStr);
-        const assess = parseCurrency(assessedValue);
-        const salePrice = parseCurrency(salePriceStr);
+        // Validate and log if skipped
+        if (!validateRow(row)) {
+          if (DEBUG) {
+            const missing = [];
+            if (!row.caseNumber && !row.parcelId) missing.push('id');
+            if (!row.salePrice && !/paid in full|paid prior to sale|paid/i.test(row.auctionStatus || '')) missing.push('salePrice');
+            console.log('⛔ Skipping card', {
+              sourceUrl: pageUrl,
+              missing,
+              snippet: blockText.slice(0, 240)
+            });
+          }
+          return;
+        }
 
-        row.surplusAssessVsSale =
-          assess !== null && salePrice !== null ? assess - salePrice : null;
+        // Parse numeric values for surplus calculations
+        const open = parseCurrency(row.openingBid);
+        const assess = parseCurrency(row.assessedValue);
+        const salePrice = parseCurrency(row.salePrice);
 
-        row.surplusSaleVsOpen =
-          salePrice !== null && open !== null ? salePrice - open : null;
-
-        row.meetsMinimumSurplus =
-          row.surplusAssessVsSale !== null &&
-          row.surplusAssessVsSale >= MIN_SURPLUS
-            ? 'Yes'
-            : 'No';
+        row.surplusAssessVsSale = assess !== null && salePrice !== null ? assess - salePrice : null;
+        row.surplusSaleVsOpen = salePrice !== null && open !== null ? salePrice - open : null;
+        row.meetsMinimumSurplus = row.surplusAssessVsSale !== null && row.surplusAssessVsSale >= MIN_SURPLUS ? 'Yes' : 'No';
 
         const dedupeKey = `${pageUrl}|${caseNumber}|${parcelId}`;
         if (seen.has(dedupeKey)) return;
@@ -340,17 +332,20 @@ async function inspectAndParse(browser, url) {
         allParsedRows.push(row);
       });
 
-      console.log(`📦 Page ${pageIndex}: Elements ${allRelevantElements.length} | SOLD auctions so far ${allParsedRows.length}`);
+      console.log(`📦 Page ${pageIndex}: Elements ${allRelevantElements.length} | Parsed ${allParsedRows.length}`);
 
-      // Detect if there is a "Next" link
-      const nextLink = $('a').filter((_, el) => {
-        const txt = $(el).text().trim().toLowerCase();
-        return txt === 'next' || txt.includes('next');
-      }).attr('href');
+      // Next link detection: prefer rel=next or anchor text 'next'
+      let nextLink = $('a[rel="next"]').attr('href');
+      if (!nextLink) {
+        nextLink = $('a').filter((_, el) => {
+          const txt = $(el).text().trim().toLowerCase();
+          return txt === 'next' || txt.includes('next');
+        }).attr('href');
+      }
 
       if (!nextLink) break;
       pageIndex++;
-      if (pageIndex > 50) break; // safety cap
+      if (pageIndex > MAX_PAGES) break;
     }
 
     return { relevantElements: allRelevantElements, parsedRows: allParsedRows };
@@ -362,12 +357,39 @@ async function inspectAndParse(browser, url) {
   }
 }
 
+// Helper: extractBetweenFallback for labels not in kv
+function extractBetweenFallback(text, labels, window = 80) {
+  if (!text) return '';
+  const lower = text.toLowerCase();
+  for (const label of labels) {
+    const idx = lower.indexOf(label.toLowerCase());
+    if (idx !== -1) {
+      const slice = text.slice(idx, Math.min(text.length, idx + window));
+      const m = slice.match(/[:#-]?\s*\$?([0-9,]+(?:\.\d{2})?)/);
+      if (m) return m[0].replace(/^\s*[:#-]?\s*/, '');
+      // fallback: return the rest of the slice
+      return slice.replace(new RegExp(label, 'i'), '').trim();
+    }
+  }
+  return '';
+}
+
 // =========================
 // MAIN
 // =========================
 (async () => {
   console.log('📥 Loading URLs...');
-  const urls = await loadTargetUrls();
+  let urls = [];
+  try {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!${URL_RANGE}`,
+    });
+    urls = (res.data.values || []).flat().map(v => v.trim()).filter(v => v.startsWith('http'));
+  } catch (err) {
+    console.error('❌ Failed to load URLs from spreadsheet:', err.message);
+    process.exit(1);
+  }
 
   const browser = await puppeteer.launch({
     headless: 'new',
@@ -432,7 +454,7 @@ async function inspectAndParse(browser, url) {
   }
 
   console.log(`✅ Saved ${allElements.length} elements → ${OUTPUT_ELEMENTS_FILE}`);
-  console.log(`✅ Saved ${finalRows.length} SOLD auctions → ${OUTPUT_ROWS_FILE}`);
+  console.log(`✅ Saved ${finalRows.length} auctions → ${OUTPUT_ROWS_FILE}`);
   console.log(`📊 Saved summary → ${OUTPUT_SUMMARY_FILE}`);
   console.log('🏁 Done');
 })();
