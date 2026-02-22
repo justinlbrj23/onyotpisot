@@ -1,11 +1,13 @@
 playwright==1.42.0
 playwright-stealth==1.0.6
 beautifulsoup4==4.12.3
-google-api-python-client==2.92.0
-google-auth==2.29.0
-google-auth-oauthlib==1.2.0
-google-auth-httplib2==0.2.0
 requests==2.31.0
 setuptools==69.5.1
 nest-asyncio==1.6.0
 wheel==0.43.0
+selenium
+webdriver-manager
+google-api-python-client
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
