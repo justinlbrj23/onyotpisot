@@ -50,7 +50,7 @@ const LABEL_ALIASES = {
 };
 
 function normalizeLabel(raw) {
-  return raw.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
+  return String(raw || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
 }
 
 function findCanonicalKey(labelRaw) {
@@ -58,7 +58,6 @@ function findCanonicalKey(labelRaw) {
   for (const [canon, variants] of Object.entries(LABEL_ALIASES)) {
     if (variants.includes(nl) || nl === canon) return canon;
   }
-  // fallback: return normalized label as-is
   return nl;
 }
 
@@ -66,7 +65,7 @@ function findCanonicalKey(labelRaw) {
 // UTILITIES
 // =========================
 function parseCurrency(str) {
-  if (!str) return null;
+  if (!str && str !== 0) return null;
   const n = parseFloat(String(str).replace(/[^0-9.-]/g, ''));
   return isNaN(n) ? null : n;
 }
@@ -119,6 +118,16 @@ function largestCurrencyInText(text) {
   return sorted.length ? sorted[0].s : '';
 }
 
+// Cross-version sleep helper: pass page instance when available
+async function sleep(ms, pageInstance) {
+  if (!ms || ms <= 0) return;
+  if (pageInstance && typeof pageInstance.waitForTimeout === 'function') {
+    await pageInstance.waitForTimeout(ms);
+    return;
+  }
+  await new Promise(r => setTimeout(r, ms));
+}
+
 // =========================
 // BUILD LABEL→VALUE MAP
 // =========================
@@ -141,7 +150,6 @@ function buildLabelValueMap($container) {
     }
   }
 
-  // Also expose raw joined text for diagnostics
   return { map, text: textNodes.join(' | ') };
 }
 
@@ -153,6 +161,24 @@ function validateRow(row) {
   const hasSale = row.salePrice && row.salePrice.trim();
   const paidStatus = /paid in full|paid prior to sale|paid/i.test(row.auctionStatus || '');
   return !!(hasId && (hasSale || paidStatus));
+}
+
+// =========================
+// Helper: extractBetweenFallback for labels not in kv
+// =========================
+function extractBetweenFallback(text, labels, window = 80) {
+  if (!text) return '';
+  const lower = text.toLowerCase();
+  for (const label of labels) {
+    const idx = lower.indexOf(label.toLowerCase());
+    if (idx !== -1) {
+      const slice = text.slice(idx, Math.min(text.length, idx + window));
+      const m = slice.match(/[:#-]?\s*\$?([0-9,]+(?:\.\d{2})?)/);
+      if (m) return m[0].replace(/^\s*[:#-]?\s*/, '');
+      return slice.replace(new RegExp(label, 'i'), '').trim();
+    }
+  }
+  return '';
 }
 
 // =========================
@@ -187,7 +213,7 @@ async function inspectAndParse(browser, url) {
       const pageUrl = pageIndex === 1 ? url : `${url}&page=${pageIndex}`;
       console.log(`🌐 Visiting ${pageUrl}`);
       await page.goto(pageUrl, { waitUntil: 'networkidle2', timeout: NAV_TIMEOUT });
-      await page.waitForTimeout(PAGE_WAIT_MS);
+      await sleep(PAGE_WAIT_MS, page);
 
       const html = await page.content();
       if (
@@ -355,23 +381,6 @@ async function inspectAndParse(browser, url) {
   } finally {
     await page.close();
   }
-}
-
-// Helper: extractBetweenFallback for labels not in kv
-function extractBetweenFallback(text, labels, window = 80) {
-  if (!text) return '';
-  const lower = text.toLowerCase();
-  for (const label of labels) {
-    const idx = lower.indexOf(label.toLowerCase());
-    if (idx !== -1) {
-      const slice = text.slice(idx, Math.min(text.length, idx + window));
-      const m = slice.match(/[:#-]?\s*\$?([0-9,]+(?:\.\d{2})?)/);
-      if (m) return m[0].replace(/^\s*[:#-]?\s*/, '');
-      // fallback: return the rest of the slice
-      return slice.replace(new RegExp(label, 'i'), '').trim();
-    }
-  }
-  return '';
 }
 
 // =========================
