@@ -122,6 +122,7 @@ async function findNextHandle(dom) {
       '.pagination-next a',
       '.pagination .next a',
       'a.next',
+      '.PageRight_HVR img',
       'button.next',
     ].join(', ')
   );
