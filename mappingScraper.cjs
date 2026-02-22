@@ -116,11 +116,21 @@ function parseCurrency(str) {
 }
 
 // =========================
-// Map parsed auction row → TSSF headers
+// Map parsed auction row → TSSF headers (patched)
 // =========================
 function mapRow(raw, urlMapping, anomalies) {
-  // allow case-insensitive Sold and trim whitespace
-  if (!raw || String(raw.auctionStatus || '').trim().toLowerCase() !== 'sold') return null;
+  if (!raw) return null;
+
+  // Normalize auctionStatus for checks
+  const statusRaw = String(raw.auctionStatus || raw.status || raw.statusNote || '').trim();
+  const statusNorm = statusRaw.toLowerCase();
+
+  // Treat explicit 'sold' OR paid/completed statuses as acceptable for mapping.
+  const isSold = statusNorm === 'sold';
+  const isPaidStatus = /paid in full|paid prior to sale|paid/i.test(statusNorm);
+
+  // If neither sold nor paid/completed, skip (preserves original behavior of filtering non-finalized)
+  if (!isSold && !isPaidStatus) return null;
 
   const mapped = {};
   HEADERS.forEach(h => (mapped[h] = ""));
@@ -148,6 +158,7 @@ function mapRow(raw, urlMapping, anomalies) {
   const openingBidRaw = raw.openingBid || "";
   const assessedRaw = raw.assessedValue || raw.assessed || "";
 
+  // If salePrice is missing but status indicates paid, keep the row and record a statusNote
   mapped["Sale Price"] = salePriceRaw;
   mapped["Opening / Minimum Bid"] = openingBidRaw;
 
@@ -172,9 +183,9 @@ function mapRow(raw, urlMapping, anomalies) {
     }
   }
 
-  // anomalies: only push when we truly cannot determine sale or surplus
+  // Anomaly logic: only push MissingSalePrice when there is no numeric sale AND no paid status
   const saleNum = parseCurrency(salePriceRaw);
-  if (saleNum === null) {
+  if (saleNum === null && !isPaidStatus) {
     anomalies.push({
       type: "MissingSalePrice",
       message: "Sold auction missing sale price (parser output or extracted).",
@@ -202,7 +213,7 @@ function mapRow(raw, urlMapping, anomalies) {
   if (raw.meetsMinimumSurplus !== undefined && raw.meetsMinimumSurplus !== null) {
     meetsMinimum = String(raw.meetsMinimumSurplus).trim().toLowerCase() === "yes";
   } else if (estimatedSurplus !== null) {
-    meetsMinimum = estimatedSurplus >= 25000;
+    meetsMinimum = estimatedSurplus >= MIN_SURPLUS;
   }
 
   mapped["Meets Minimum Surplus? (Yes/No)"] = meetsMinimum === null ? "" : (meetsMinimum ? "Yes" : "No");
@@ -216,6 +227,11 @@ function mapRow(raw, urlMapping, anomalies) {
   mapped["Tax Assessor Page Collected? (Yes/No)"] = "No";
   mapped["File Complete? (Yes/No)"] = "No";
   mapped["File Submitted? (Yes/No)"] = "No";
+
+  // Preserve status note for manual review: place into Kickback Reason column temporarily
+  if (!salePriceRaw && statusRaw) {
+    mapped["Kickback Reason"] = `status: ${statusRaw}`;
+  }
 
   return mapped;
 }
