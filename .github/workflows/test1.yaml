@@ -1,219 +1,139 @@
-name: NMLS Test Flow
+name: Tax Deed Python Scraper
 
 on:
   workflow_dispatch:
 
 jobs:
 
-  tda_pipeline:
+  scraper:
 
     runs-on: ubuntu-latest
 
     steps:
 
-      # --------------------------------------------------
-      # Checkout repository
-      # --------------------------------------------------
+    # --------------------------------------------------
+    # Checkout repository
+    # --------------------------------------------------
 
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-
-      # --------------------------------------------------
-      # Setup Node.js
-      # --------------------------------------------------
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
 
-      # --------------------------------------------------
-      # Install Chrome + dependencies (Ubuntu 24.04 compatible)
-      # --------------------------------------------------
+    # --------------------------------------------------
+    # Setup Python
+    # --------------------------------------------------
 
-      - name: Install Chrome dependencies
-        run: |
-
-          sudo apt-get update
-
-          sudo apt-get install -y \
-            google-chrome-stable \
-            xvfb \
-            fonts-liberation \
-            libatk-bridge2.0-0 \
-            libatk1.0-0 \
-            libgtk-3-0 \
-            libx11-xcb1 \
-            libxcomposite1 \
-            libxdamage1 \
-            libxrandr2 \
-            libgbm1 \
-            libasound2t64 \
-            libnss3 \
-            libxss1 \
-            libappindicator3-1 \
-            libu2f-udev \
-            chromium-browser \
-            curl
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
 
 
-      # --------------------------------------------------
-      # Install Node dependencies
-      # --------------------------------------------------
+    # --------------------------------------------------
+    # Install browser + system dependencies
+    # --------------------------------------------------
 
-      - name: Install dependencies
-        run: |
+    - name: Install browser dependencies
+      run: |
 
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            npm install
-          fi
+        sudo apt-get update
 
-
-      # --------------------------------------------------
-      # Write Service Account JSON
-      # --------------------------------------------------
-
-      - name: Write Service Account JSON
-        run: |
-
-          echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
-
-
-      # --------------------------------------------------
-      # Validate Service Account JSON
-      # --------------------------------------------------
-
-      - name: Validate service account JSON
-        run: |
-
-          node -e "
-          const fs = require('fs');
-
-          const j = JSON.parse(
-            fs.readFileSync('service-account.json','utf8')
-          );
-
-          if (!j.private_key || !j.client_email) {
-
-            throw new Error('Invalid service account JSON');
-
-          }
-
-          console.log(
-            'Service account OK:',
-            j.client_email
-          );
-          "
-
-
-      # --------------------------------------------------
-      # Run scraper (virtual display required)
-      # --------------------------------------------------
-
-      - name: Run nmls_elements.cjs
-        run: |
-
-          xvfb-run \
-          --auto-servernum \
-          --server-args='-screen 0 1920x1080x24' \
-          node nmls_elements.cjs
-
-
-      # --------------------------------------------------
-      # Capture debug snapshot (headless Chrome + parse inputs)
-      # --------------------------------------------------
-
-      - name: Capture debug snapshot (headless)
-        env:
-          TARGET_URL: 'https://www.nmlsconsumeraccess.org/'
-        run: |
-          set -e
-
-          TS=$(date +%s)
-          HTML_FILE="debug-${TS}.html"
-          JSON_FILE="debug-${TS}-inputs.json"
-          META_FILE="debug-${TS}-meta.json"
-
-          echo "🔎 Capturing rendered DOM to ${HTML_FILE} using headless Chrome..."
-          # Use headless Chrome to render the page and dump the DOM
+        sudo apt-get install -y \
+          microsoft-edge-stable \
           google-chrome-stable \
-            --headless \
-            --disable-gpu \
-            --no-sandbox \
-            --disable-dev-shm-usage \
-            --virtual-time-budget=15000 \
-            --run-all-compositor-stages-before-draw \
-            --dump-dom "$TARGET_URL" > "$HTML_FILE" || true
-
-          # If chrome failed or produced empty output, try chromium-browser as fallback
-          if [ ! -s "$HTML_FILE" ]; then
-            echo "⚠️ chrome dump failed or empty; trying chromium-browser..."
-            chromium-browser --headless --disable-gpu --no-sandbox --disable-dev-shm-usage --dump-dom "$TARGET_URL" > "$HTML_FILE" || true
-          fi
-
-          # Save a small metadata file
-          echo "{ \"captured_at\": $(date +%s), \"url\": \"$TARGET_URL\", \"html_file\": \"$HTML_FILE\" }" > "$META_FILE"
-
-          # Parse candidate inputs from the saved HTML using Node + cheerio
-          echo "🧩 Extracting input candidates to ${JSON_FILE}..."
-          node -e "
-            const fs = require('fs');
-            const cheerio = require('cheerio');
-            try {
-              const html = fs.readFileSync('$HTML_FILE','utf8');
-              const $ = cheerio.load(html);
-              const inputs = Array.from($('input')).map(i => {
-                const attribs = i.attribs || {};
-                return {
-                  id: attribs.id || null,
-                  name: attribs.name || null,
-                  type: attribs.type || null,
-                  placeholder: attribs.placeholder || null,
-                  class: attribs.class || null,
-                  value: attribs.value || null
-                };
-              });
-              const out = { url: '$TARGET_URL', captured_at: Date.now(), inputs };
-              fs.writeFileSync('$JSON_FILE', JSON.stringify(out, null, 2), 'utf8');
-              console.log('✅ wrote', '$JSON_FILE');
-            } catch (e) {
-              console.error('❌ parse failed', e && e.message);
-              fs.writeFileSync('$JSON_FILE', JSON.stringify({ error: String(e) }, null, 2), 'utf8');
-            }
-          "
-
-          echo "📦 Debug files: $HTML_FILE, $JSON_FILE, $META_FILE"
+          xvfb \
+          curl \
+          unzip \
+          fonts-liberation \
+          libatk-bridge2.0-0 \
+          libatk1.0-0 \
+          libgtk-3-0 \
+          libx11-xcb1 \
+          libxcomposite1 \
+          libxdamage1 \
+          libxrandr2 \
+          libgbm1 \
+          libasound2t64 \
+          libnss3 \
+          libxss1 \
+          libappindicator3-1 \
+          libu2f-udev
 
 
-      # --------------------------------------------------
-      # Upload artifacts
-      # --------------------------------------------------
+    # --------------------------------------------------
+    # Install Python dependencies
+    # --------------------------------------------------
 
-      - name: Upload inspector artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: inspector-artifacts
-          path: |
-            raw-elements.json
-            parsed-auctions.json
-            errors.json
-            debug-*.html
-            debug-*-inputs.json
-            debug-*-meta.json
-            debug-*.jpg
+    - name: Install Python dependencies
+      run: |
+
+        python -m pip install --upgrade pip
+
+        pip install -r requirements.txt
+
+
+    # --------------------------------------------------
+    # Write Google credentials
+    # --------------------------------------------------
+
+    - name: Write Service Account JSON
+      run: |
+
+        echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
+
+
+    # --------------------------------------------------
+    # Run Python scraper
+    # --------------------------------------------------
+
+    - name: Run Python tax deed scraper
+      run: |
+
+        xvfb-run \
+        --auto-servernum \
+        --server-args='-screen 0 1920x1080x24' \
+        python scrape_taxdeed.py
+
+
+    # --------------------------------------------------
+    # Capture debug snapshot
+    # --------------------------------------------------
+
+    - name: Capture debug snapshot
+      env:
+        TARGET_URL: 'https://www.nmlsconsumeraccess.org/'
+      run: |
+
+        TS=$(date +%s)
+
+        google-chrome-stable \
+          --headless \
+          --no-sandbox \
+          --disable-dev-shm-usage \
+          --dump-dom "$TARGET_URL" > debug-${TS}.html || true
+
+
+    # --------------------------------------------------
+    # Upload artifacts
+    # --------------------------------------------------
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: scraper-artifacts
+        path: |
+          debug-*.html
+          *.json
+          *.log
         continue-on-error: true
 
 
-      # --------------------------------------------------
-      # Cleanup credentials
-      # --------------------------------------------------
+    # --------------------------------------------------
+    # Cleanup secrets
+    # --------------------------------------------------
 
-      - name: Cleanup secrets
-        if: always()
-        run: |
+    - name: Cleanup secrets
+      if: always()
+      run: |
 
-          rm -f service-account.json
+        rm -f service-account.json
