@@ -1,4 +1,4 @@
-name: Sync Cash Buyers List Nationwide 
+name: Fetch Auctions Simon 
 
 on:
   workflow_dispatch:  # Manual trigger only
@@ -59,8 +59,8 @@ jobs:
       # --------------------------------------------------
       # Run Milwaukee scraper via npm script
       # --------------------------------------------------
-      - name: Run Cash Buyers scraper
-        run: npm run fetch:cashBuyers
+      - name: Run Auction Scraper
+        run: npm run fetch:auctions
 
       # --------------------------------------------------
       # Cleanup credentials
