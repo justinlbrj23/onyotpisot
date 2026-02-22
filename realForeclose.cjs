@@ -1,203 +1,217 @@
-const fs = require("fs");
-const puppeteer = require("puppeteer");
-const { google } = require("googleapis");
+// Requires:
+// npm install puppeteer cheerio googleapis
+
+const puppeteer = require('puppeteer');
+const cheerio = require('cheerio');
+const { google } = require('googleapis');
 
 // =========================
-// GOOGLE SHEETS CONFIG
+// CONFIG
 // =========================
+const SERVICE_ACCOUNT_FILE = './service-account.json';
+const SPREADSHEET_ID = '12qESHoxzkSXwUc5Pa1gAzt8-hIw7QyiExkIh6UeDCMM';
+const SHEET_RANGE = 'Property Appraiser!A:I';
 
-const SHEET_ID = "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
-const SHEET_NAME = "Palm Beach - Taxdeed";
-const SCOPES = ["https://www.googleapis.com/auth/spreadsheets"];
-const TOKEN_PATH = "token.json";
-const CREDENTIALS_PATH = "credentials.json";
+const TARGET_URL =
+  'https://dallas.texas.sheriffsaleauctions.com/index.cfm?zaction=AUCTION&Zmethod=PREVIEW&AUCTIONDATE=02/03/2026';
+
+const MAX_PAGES = 50; // safety stop
 
 // =========================
 // GOOGLE AUTH
 // =========================
+const auth = new google.auth.GoogleAuth({
+  keyFile: SERVICE_ACCOUNT_FILE,
+  scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+});
 
-async function authenticateGoogleSheets() {
-  const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH));
-  const { client_secret, client_id, redirect_uris } =
-    credentials.installed || credentials.web;
+const sheets = google.sheets({ version: 'v4', auth });
 
-  const oAuth2Client = new google.auth.OAuth2(
-    client_id,
-    client_secret,
-    redirect_uris[0]
-  );
+// =========================
+// HELPERS
+// =========================
+function clean(text) {
+  if (!text) return '';
+  return text.replace(/\s+/g, ' ').trim();
+}
 
-  if (fs.existsSync(TOKEN_PATH)) {
-    oAuth2Client.setCredentials(JSON.parse(fs.readFileSync(TOKEN_PATH)));
-  } else {
-    const authUrl = oAuth2Client.generateAuthUrl({
-      access_type: "offline",
-      scope: SCOPES,
-    });
-
-    console.log("Authorize this app by visiting this url:", authUrl);
-
-    const readline = require("readline").createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-
-    const code = await new Promise((resolve) => {
-      readline.question("Enter code here: ", (code) => {
-        readline.close();
-        resolve(code);
-      });
-    });
-
-    const token = await oAuth2Client.getToken(code);
-    oAuth2Client.setCredentials(token.tokens);
-    fs.writeFileSync(TOKEN_PATH, JSON.stringify(token.tokens));
-  }
-
-  return google.sheets({ version: "v4", auth: oAuth2Client });
+function extractText($root, selector) {
+  const el = $root.find(selector).first();
+  if (!el.length) return '';
+  return clean(el.text());
 }
 
 // =========================
-// SCRAPER (PUPPETEER)
+// SCRAPER WITH PAGINATION
 // =========================
+async function scrapeAllPages(url) {
+  let browser;
+  const allResults = [];
 
-async function scrapeData(url) {
-  const browser = await puppeteer.launch({
-    headless: false, // set true for headless
-    defaultViewport: null,
-  });
+  try {
+    browser = await puppeteer.launch({
+      headless: 'new',
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+      ],
+    });
 
-  const page = await browser.newPage();
-  await page.goto(url, { waitUntil: "networkidle2" });
+    const page = await browser.newPage();
+    page.setDefaultNavigationTimeout(120000);
 
-  let results = [];
-  let currentPage = 1;
-  let totalPages = 1;
+    await page.goto(url, {
+      waitUntil: 'domcontentloaded',
+      timeout: 120000,
+    });
 
-  while (true) {
-    console.log(`Scraping page ${currentPage}`);
+    let currentPage = 1;
 
-    await page.waitForSelector("div[aid]");
+    while (currentPage <= MAX_PAGES) {
+      console.log(`📄 Scraping page ${currentPage}...`);
 
-    const pageResults = await page.evaluate(() => {
-      const rows = [];
+      await page.waitForSelector('div[aid]', { timeout: 60000 });
 
-      function getValueByHeader(container, headerText) {
-        const ths = Array.from(container.querySelectorAll("th"));
-        const th = ths.find(t => t.textContent.includes(headerText));
-        if (!th) return "";
-        const td = th.nextElementSibling;
-        return td ? td.textContent.trim() : "";
+      const html = await page.content();
+      const $ = cheerio.load(html);
+
+      const pageResults = [];
+
+      $('div[aid]').each((_, item) => {
+        const $item = $(item);
+
+        const record = {
+          caseNumber: extractText($item, "th:contains('Cause Number:') + td"),
+          assessedValue: extractText($item, "th:contains('Adjudged Value:') + td"),
+          openingBid: extractText($item, "th:contains('Est. Min. Bid:') + td"),
+          parcelId: extractText($item, "th:contains('Account Number:') + td"),
+          streetAddress: extractText($item, "th:contains('Property Address:') + td"),
+          cityStateZip: extractText($item, "tr:nth-of-type(8) td"),
+          status: extractText($item, "div.ASTAT_MSGA"),
+          soldAmount: extractText($item, "div.ASTAT_MSGD"),
+        };
+
+        pageResults.push(record);
+      });
+
+      console.log(`   ➜ Found ${pageResults.length} auctions`);
+
+      allResults.push(...pageResults);
+
+      // =========================
+      // PAGINATION DETECTION
+      // =========================
+      const nextButton = await page.$(
+        "a:contains('Next'), input[value='Next'], .pagination-next"
+      );
+
+      if (!nextButton) {
+        console.log('🛑 No more pages detected.');
+        break;
       }
 
-      const items = document.querySelectorAll("div[aid]");
+      const isDisabled = await page.evaluate(el =>
+        el.classList.contains('disabled') || el.disabled === true,
+        nextButton
+      );
 
-      items.forEach(item => {
-        rows.push([
-          getValueByHeader(item, "Cause Number:"),
-          getValueByHeader(item, "Adjudged Value:"),
-          getValueByHeader(item, "Est. Min. Bid:"),
-          getValueByHeader(item, "Account Number:"),
-          getValueByHeader(item, "Property Address:"),
-          item.querySelector("tr:nth-of-type(8) td")?.textContent.trim() || "",
-          item.querySelector("div.ASTAT_MSGA")?.textContent.trim() || "",
-          item.querySelector("div.ASTAT_MSGD")?.textContent.trim() || ""
-        ]);
-      });
+      if (isDisabled) {
+        console.log('🛑 Next button disabled. End of pagination.');
+        break;
+      }
 
-      return rows;
-    });
+      console.log('➡️ Moving to next page...');
 
-    results.push(...pageResults);
+      await Promise.all([
+        page.waitForNavigation({ waitUntil: 'domcontentloaded' }),
+        nextButton.click(),
+      ]);
 
-    // Detect total pages
-    try {
-      const pageText = await page.$eval("span.PageText", el => el.textContent);
-      const match = pageText.match(/Page \d+ of (\d+)/);
-      if (match) totalPages = parseInt(match[1]);
-    } catch {}
-
-    console.log(`Page ${currentPage} of ${totalPages}`);
-
-    if (currentPage >= totalPages) break;
-
-    try {
-      await page.click("span.PageRight");
-      await page.waitForTimeout(3000);
       currentPage++;
-    } catch {
-      break;
+    }
+
+    return allResults;
+  } catch (err) {
+    console.error('❌ Scraping error:', err);
+    return [];
+  } finally {
+    if (browser) {
+      await browser.close();
     }
   }
-
-  await browser.close();
-  return results;
 }
 
 // =========================
-// GOOGLE SHEETS LOGGER
+// GOOGLE SHEETS APPEND
 // =========================
-
-async function logDataToGoogleSheets(data) {
-  const sheets = await authenticateGoogleSheets();
-
-  const headers = [
-    "Case Number",
-    "Adjudged Value",
-    "Opening Bid",
-    "Parcel ID",
-    "Street Address",
-    "City State Zip",
-    "Status",
-    "Sold Amount",
-  ];
-
-  const existing = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range: `${SHEET_NAME}!A1:H1`,
-  });
-
-  if (!existing.data.values) {
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SHEET_ID,
-      range: `${SHEET_NAME}!A1:H1`,
-      valueInputOption: "RAW",
-      requestBody: { values: [headers] },
-    });
+async function appendToSheet(data) {
+  if (!data.length) {
+    console.warn('⚠️ No auction data found.');
+    return;
   }
 
-  const last = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range: `${SHEET_NAME}!A:A`,
-  });
+  const timestamp = new Date().toISOString();
 
-  const lastRow = (last.data.values || []).length + 1;
+  const values = data.map(r => [
+    timestamp,
+    r.caseNumber,
+    r.assessedValue,
+    r.openingBid,
+    r.parcelId,
+    r.streetAddress,
+    r.cityStateZip,
+    r.status,
+    r.soldAmount,
+  ]);
 
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: SHEET_ID,
-    range: `${SHEET_NAME}!A${lastRow}:H${lastRow + data.length - 1}`,
-    valueInputOption: "RAW",
-    requestBody: { values: data },
-  });
+  try {
+    const existing = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: SHEET_RANGE,
+    });
 
-  console.log("Uploaded to Google Sheets");
+    if (!existing.data.values || existing.data.values.length === 0) {
+      values.unshift([
+        'Timestamp',
+        'Case Number',
+        'Assessed Value',
+        'Opening Bid',
+        'Parcel ID',
+        'Street Address',
+        'City State Zip',
+        'Status',
+        'Sold Amount',
+      ]);
+    }
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: SHEET_RANGE,
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: { values },
+    });
+
+    console.log(`✅ Appended ${values.length} rows.`);
+  } catch (err) {
+    console.error('❌ Google Sheets write error:', err);
+  }
 }
 
 // =========================
 // MAIN
 // =========================
-
 (async () => {
-  const url =
-    "https://dallas.texas.sheriffsaleauctions.com/index.cfm?zaction=AUCTION&Zmethod=PREVIEW&AUCTIONDATE=02/03/2026";
+  console.log('🚀 Starting paginated scrape...');
 
-  const data = await scrapeData(url);
+  const auctions = await scrapeAllPages(TARGET_URL);
 
-  console.log("Total records:", data.length);
+  console.log(`📦 Total auctions scraped: ${auctions.length}`);
+  console.log('🧪 Sample:', auctions.slice(0, 2));
 
-  if (data.length > 0) {
-    await logDataToGoogleSheets(data);
-  } else {
-    console.log("No data found");
-  }
+  console.log('📤 Writing to Google Sheets...');
+  await appendToSheet(auctions);
+
+  console.log('🏁 Finished.');
 })();
