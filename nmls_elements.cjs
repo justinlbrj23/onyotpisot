@@ -19,7 +19,7 @@ const path = require('path');
 const SERVICE_ACCOUNT_FILE = './service-account.json';
 const SPREADSHEET_ID = '1CAEdjXisPmgAHmv3qo3y1LBYktQftLKHk-LK04_oKes';
 const SHEET_RANGE = 'Sheet1!A:D';
-const TARGET_URL = 'https://www.nmlsconsumeraccess.org/';
+const TARGET_URL = 'https://www.nmlsconsumeraccess.org/TuringTestPage.aspx?ReturnUrl=/Home.aspx/SubSearch';
 
 // =========================
 // GOOGLE AUTH
