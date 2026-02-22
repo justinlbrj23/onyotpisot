@@ -14,15 +14,19 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 
 
+# =========================
+# GOOGLE SHEETS CONFIG
+# =========================
+
 SHEET_ID = '1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA'
 SHEET_NAME = 'Palm Beach - Taxdeed'
 
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 
 
-# ========================
+# =========================
 # GOOGLE AUTH
-# ========================
+# =========================
 
 def authenticate_google_sheets():
 
@@ -39,7 +43,8 @@ def authenticate_google_sheets():
 
         else:
             flow = InstalledAppFlow.from_client_secrets_file(
-                "credentials.json", SCOPES
+                "credentials.json",
+                SCOPES
             )
 
             creds = flow.run_local_server(port=0)
@@ -52,9 +57,9 @@ def authenticate_google_sheets():
     return service.spreadsheets()
 
 
-# ========================
-# SCRAPER WITH PAGINATION
-# ========================
+# =========================
+# SCRAPER
+# =========================
 
 def scrape_data(url):
 
@@ -65,7 +70,7 @@ def scrape_data(url):
 
     wait = WebDriverWait(driver, 20)
 
-    data = []
+    results = []
 
     driver.get(url)
 
@@ -93,7 +98,10 @@ def scrape_data(url):
             def get_text(selector):
 
                 try:
-                    return item.find_element(By.CSS_SELECTOR, selector).text.strip()
+                    return item.find_element(
+                        By.CSS_SELECTOR,
+                        selector
+                    ).text.strip()
                 except:
                     return ""
 
@@ -108,20 +116,29 @@ def scrape_data(url):
 
             street = get_text("th:contains('Property Address:') + td")
 
-            city_state_zip = get_text("tr:nth-of-type(8) td")
+            city_zip = get_text("tr:nth-of-type(8) td")
+
+            status = get_text("div.ASTAT_MSGA")
+
+            sold_amount = get_text("div.ASTAT_MSGD")
 
 
-            data.append([
+            results.append([
+
                 case_number,
                 assessed_value,
                 opening_bid,
                 parcel_id,
                 street,
-                city_state_zip
+                city_zip,
+                status,
+                sold_amount
+
             ])
 
 
-        # detect total pages
+        # pagination detection
+
         try:
 
             page_text = driver.find_element(
@@ -132,13 +149,14 @@ def scrape_data(url):
             match = re.search(r'Page \d+ of (\d+)', page_text)
 
             if match:
+
                 total_pages = int(match.group(1))
 
         except:
             pass
 
 
-        print(f"Page {current_page} / {total_pages}")
+        print(f"Page {current_page} of {total_pages}")
 
 
         if current_page >= total_pages:
@@ -146,7 +164,6 @@ def scrape_data(url):
             break
 
 
-        # click next
         try:
 
             next_button = driver.find_element(
@@ -170,12 +187,12 @@ def scrape_data(url):
 
     driver.quit()
 
-    return data
+    return results
 
 
-# ========================
-# GOOGLE SHEETS LOG
-# ========================
+# =========================
+# GOOGLE SHEETS LOGGER
+# =========================
 
 def log_data_to_google_sheets(data):
 
@@ -187,15 +204,17 @@ def log_data_to_google_sheets(data):
         "Adjudged Value",
         "Opening Bid",
         "Parcel ID",
-        "Street",
-        "City State Zip"
+        "Street Address",
+        "City State Zip",
+        "Status",
+        "Sold Amount"
 
     ]
 
 
     existing = sheets.values().get(
         spreadsheetId=SHEET_ID,
-        range=f"{SHEET_NAME}!A1:F1"
+        range=f"{SHEET_NAME}!A1:H1"
     ).execute()
 
 
@@ -203,7 +222,7 @@ def log_data_to_google_sheets(data):
 
         sheets.values().update(
             spreadsheetId=SHEET_ID,
-            range=f"{SHEET_NAME}!A1:F1",
+            range=f"{SHEET_NAME}!A1:H1",
             valueInputOption="RAW",
             body={"values": [headers]}
         ).execute()
@@ -220,22 +239,31 @@ def log_data_to_google_sheets(data):
 
     sheets.values().update(
         spreadsheetId=SHEET_ID,
-        range=f"{SHEET_NAME}!A{last_row}:F{last_row + len(data)-1}",
+        range=f"{SHEET_NAME}!A{last_row}:H{last_row+len(data)-1}",
         valueInputOption="RAW",
         body={"values": data}
     ).execute()
 
 
-# ========================
+    print("Uploaded to Google Sheets")
+
+
+# =========================
 # MAIN
-# ========================
+# =========================
 
 if __name__ == "__main__":
 
     url = "https://dallas.texas.sheriffsaleauctions.com/index.cfm?zaction=AUCTION&Zmethod=PREVIEW&AUCTIONDATE=02/03/2026"
 
-    results = scrape_data(url)
+    data = scrape_data(url)
 
-    print("Total records:", len(results))
+    print("Total records:", len(data))
 
-    log_data_to_google_sheets(results)
+    if data:
+
+        log_data_to_google_sheets(data)
+
+    else:
+
+        print("No data found")
