@@ -12,6 +12,8 @@ from selenium.webdriver.support import expected_conditions as EC
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
+from selenium.webdriver.edge.service import Service
+from webdriver_manager.microsoft import EdgeChromiumDriverManager
 
 
 # =========================
@@ -66,7 +68,10 @@ def scrape_data(url):
     options = Options()
     options.add_argument("--start-maximized")
 
-    driver = webdriver.Edge(options=options)
+    driver = webdriver.Edge(
+        service=Service(EdgeChromiumDriverManager().install()),
+        options=options
+    )
 
     wait = WebDriverWait(driver, 20)
 
