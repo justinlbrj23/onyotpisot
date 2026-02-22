@@ -11,7 +11,7 @@ const { google } = require('googleapis');
 // =========================
 const SERVICE_ACCOUNT_FILE = './service-account.json';
 const SPREADSHEET_ID = '1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA';
-const SHEET_RANGE = 'Palm Beach - Taxdeed!A:I';
+const SHEET_RANGE = 'Dallas - Taxdeed!A:I';
 
 // IMPORTANT: Use '&' not '&amp;' in JS strings
 const TARGET_URL =
