@@ -39,7 +39,6 @@ function clean(text) {
 
 /**
  * Extract the TD text that follows a TH containing a given label (case-insensitive).
- * This avoids relying on jQuery-only CSS like :contains().
  */
 function getByLabel($, $ctx, label) {
   let value = '';
@@ -59,24 +58,23 @@ function getByLabel($, $ctx, label) {
 
 /**
  * Resolve the DOM "realm" where the auctions exist. Some sites render inside an iframe,
- * others are top-level. We return an object whose 'dom' can be used like a page/frame.
+ * others are top-level. Return an object whose 'dom' can be used like a page/frame.
  */
 async function resolveAuctionRealm(page) {
-  // First try top-level quickly
+  // Try top-level quickly
   try {
     await page.waitForSelector('div[aid]', { timeout: 2500 });
     return { dom: page, realm: 'page' };
   } catch (_) {}
 
-  // If not found, wait for iframes to appear
+  // If not found, wait for possible iframes/containers
   try {
     await page.waitForSelector('iframe', { timeout: 60000 });
   } catch (_) {
-    // No iframe and no rows at top-level; give one last try for top-level container
-    // (some pages have a container id like BID_WINDOW_CONTAINER)
+    // continue - not all pages show iframes immediately
   }
 
-  // Try to identify the frame that holds the auction rows or a known container
+  // Try to identify a frame that has rows or container
   let candidateFrame = null;
   for (let attempt = 0; attempt < 20 && !candidateFrame; attempt++) {
     const frames = page.frames();
@@ -86,7 +84,7 @@ async function resolveAuctionRealm(page) {
         candidateFrame = f;
         break;
       } catch (_) {
-        // ignore and keep searching
+        // keep looping
       }
     }
     if (!candidateFrame) {
@@ -98,7 +96,7 @@ async function resolveAuctionRealm(page) {
     return { dom: candidateFrame, realm: 'frame' };
   }
 
-  // As a fallback, try top-level container again
+  // Fallback to top-level container
   try {
     await page.waitForSelector('#BID_WINDOW_CONTAINER', { timeout: 3000 });
     return { dom: page, realm: 'page' };
@@ -108,70 +106,78 @@ async function resolveAuctionRealm(page) {
 }
 
 /**
- * Find a clickable "Next" element within the given dom (page or frame).
- * We prefer XPath for text contains, with CSS fallbacks. Filters out disabled.
+ * Find a clickable "Next" element within the given dom (Page or Frame) *without* using $x.
+ * We search common elements and filter by text/value/attributes indicating "next".
  */
 async function findNextHandle(dom) {
-  // Primary: XPath by visible text
-  const xpaths = [
-    "//a[contains(normalize-space(.), 'Next')]",
-    "//button[contains(normalize-space(.), 'Next')]",
-    "//input[translate(@value,'NEXT','next')='next']",
-    "//input[contains(translate(@value,'NEXT','next'), 'next')]",
-  ];
+  // Broad query for likely click targets
+  const candidates = await dom.$$(
+    [
+      'a',
+      'button',
+      'input[type="submit"]',
+      'input[type="button"]',
+      'input[type="image"]',
+      'a[rel="next"]',
+      '.pagination-next a',
+      '.pagination .next a',
+      'a.next',
+      'button.next',
+    ].join(', ')
+  );
 
-  let handles = [];
-  for (const xp of xpaths) {
-    const found = await dom.$x(xp);
-    if (found && found.length) handles.push(...found);
+  if (!candidates || candidates.length === 0) {
+    return null;
   }
 
-  // CSS fallbacks by common patterns
-  const cssCandidates = [
-    'a[rel="next"]',
-    '.pagination-next a',
-    '.pagination .next a',
-    'a.next',
-    'button.next',
-    'input[type="submit"][value*="Next"]',
-  ];
-  for (const sel of cssCandidates) {
-    const found = await dom.$$(sel);
-    if (found && found.length) handles.push(...found);
-  }
+  // Build a scored list based on how likely each is the "Next" control
+  const scored = [];
+  for (const h of candidates) {
+    const info = await dom.evaluate((el) => {
+      const text = (el.innerText || el.textContent || '').trim();
+      const value = (el.getAttribute('value') || '').trim();
+      const rel = (el.getAttribute('rel') || '').toLowerCase();
+      const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
+      const title = (el.getAttribute('title') || '').toLowerCase();
+      const cls = (el.getAttribute('class') || '').toLowerCase();
+      const disabledAttr = el.hasAttribute('disabled') && el.getAttribute('disabled') !== 'false';
+      const ariaDisabled = el.getAttribute('aria-disabled');
+      const style = window.getComputedStyle(el);
+      const hidden =
+        style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0';
+      const clickable = !hidden && !disabledAttr && ariaDisabled !== 'true';
 
-  // Deduplicate by remote object id
-  const unique = [];
-  const ids = new Set();
-  for (const h of handles) {
-    const id = h._remoteObject?.objectId || Math.random().toString(36).slice(2);
-    if (!ids.has(id)) {
-      unique.push(h);
-      ids.add(id);
+      // Normalize text/value for matching
+      const loText = text.toLowerCase();
+      const loValue = value.toLowerCase();
+
+      let score = 0;
+      if (rel === 'next') score += 5;
+      if (cls.includes('next')) score += 3;
+      if (ariaLabel.includes('next')) score += 3;
+      if (title.includes('next')) score += 2;
+      if (loText.includes('next')) score += 4;
+      if (loValue.includes('next')) score += 4;
+
+      return { score, clickable };
+    }, h);
+
+    if (info.clickable && info.score > 0) {
+      scored.push({ handle: h, score: info.score });
     }
   }
 
-  // Filter out disabled or obviously hidden items
-  const usable = [];
-  for (const h of unique) {
-    const isDisabledOrHidden = await dom.evaluate((el) => {
-      const style = window.getComputedStyle(el);
-      const cls = (el.getAttribute('class') || '').toLowerCase();
-      const ariaDisabled = el.getAttribute('aria-disabled');
-      const disabledAttr = el.hasAttribute('disabled') && el.getAttribute('disabled') !== 'false';
-      const hidden = style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0';
-      // Consider class-based disabled markers as well
-      return hidden || disabledAttr || ariaDisabled === 'true' || cls.includes('disabled');
-    }, h);
-
-    if (!isDisabledOrHidden) usable.push(h);
+  if (scored.length === 0) {
+    return null;
   }
 
-  return usable[0] || null;
+  // Prefer the highest score (rel="next" > text/value > class/title)
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0].handle;
 }
 
 /**
- * After clicking "Next", wait for either navigation or DOM change in the list.
+ * After clicking "Next", wait for either navigation or a DOM change in the list.
  */
 async function waitForListChange(dom) {
   const priorFirstRowHtml = await dom.evaluate(() => {
@@ -179,7 +185,7 @@ async function waitForListChange(dom) {
     return first ? first.innerHTML : '';
   });
 
-  // Wait for either navigation or an in-place DOM change
+  // Wait for navigation OR in-place DOM change
   await Promise.race([
     dom.waitForNavigation({ waitUntil: 'networkidle0', timeout: 15000 }).catch(() => {}),
     (async () => {
@@ -195,12 +201,11 @@ async function waitForListChange(dom) {
   ]);
 
   // Small settle to ensure DOM is stable
-  const page = dom.page ? dom.page() : null;
-  if (page && page.waitForTimeout) {
-    await page.waitForTimeout(400);
+  const maybePage = typeof dom.page === 'function' ? dom.page() : dom;
+  if (maybePage && typeof maybePage.waitForTimeout === 'function') {
+    await maybePage.waitForTimeout(400);
   } else {
-    // fallback if 'dom' is a Page without page()
-    await (dom.waitForTimeout ? dom.waitForTimeout(400) : new Promise(r => setTimeout(r, 400)));
+    await new Promise((r) => setTimeout(r, 400));
   }
 }
 
@@ -213,7 +218,7 @@ async function scrapeAllPages(url) {
 
   try {
     browser = await puppeteer.launch({
-      headless: true, // keep true for CI; set false locally to watch it work
+      headless: true, // set false locally to watch
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       args: [
         '--no-sandbox',
@@ -228,19 +233,28 @@ async function scrapeAllPages(url) {
     const page = await browser.newPage();
     page.setDefaultNavigationTimeout(120000);
 
-    // A friendlier UA can reduce gating
+    // Friendlier UA can reduce gating
     await page.setUserAgent(
       'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
     );
 
     await page.goto(url, { waitUntil: 'networkidle0', timeout: 120000 });
 
-    // Handle common disclaimers or cookie banners if present (best-effort)
+    // Handle common disclaimers/cookies if present (best-effort)
     try {
-      const agree = await page.$x("//button[contains(., 'I Agree')] | //input[@value='I Agree']");
-      if (agree && agree[0]) {
-        await agree[0].click();
-        await page.waitForTimeout(800);
+      const agreeBtns = await page.$$(
+        "button, input[type='button'], input[type='submit']"
+      );
+      for (const btn of agreeBtns) {
+        const shouldClick = await page.evaluate((el) => {
+          const t = (el.innerText || el.value || '').toLowerCase();
+          return t.includes('i agree') || t.includes('accept') || t.includes('agree');
+        }, btn);
+        if (shouldClick) {
+          await btn.click();
+          await page.waitForTimeout(800);
+          break;
+        }
       }
     } catch (_) {}
 
@@ -292,12 +306,15 @@ async function scrapeAllPages(url) {
         break;
       }
 
-      // Before we click Next, double-check if it's actually the last page (some UIs leave a dead Next)
+      // Before we click Next, double-check if it's actually disabled
       const isDisabled = await dom.evaluate((el) => {
         const cls = (el.getAttribute('class') || '').toLowerCase();
         const disabledAttr = el.hasAttribute('disabled') && el.getAttribute('disabled') !== 'false';
         const ariaDisabled = el.getAttribute('aria-disabled');
-        return cls.includes('disabled') || disabledAttr || ariaDisabled === 'true';
+        const style = window.getComputedStyle(el);
+        const hidden =
+          style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0';
+        return hidden || cls.includes('disabled') || disabledAttr || ariaDisabled === 'true';
       }, nextHandle);
 
       if (isDisabled) {
@@ -306,16 +323,22 @@ async function scrapeAllPages(url) {
       }
 
       console.log('➡️ Moving to next page...');
+
+      // Scroll into view (helps in headless)
+      try {
+        await dom.evaluate((el) => el.scrollIntoView({ block: 'center', behavior: 'instant' }), nextHandle);
+      } catch (_) {}
+
+      // Click and wait for change
       await Promise.allSettled([
         dom.waitForNavigation({ waitUntil: 'networkidle0', timeout: 15000 }),
         nextHandle.click(),
       ]);
 
-      // Wait for actual list change even if no navigation fired
       try {
         await waitForListChange(dom);
       } catch (_) {
-        // If we couldn’t detect change, assume we’re done to avoid infinite loop
+        // If no change detected, assume end to avoid infinite loop
         console.log('⚠️ Did not detect list change after "Next". Stopping.');
         break;
       }
@@ -423,3 +446,4 @@ async function appendToSheet(data) {
 
   console.log('🏁 Finished.');
 })();
+``
