@@ -45,7 +45,7 @@ async function loadTargetUrls() {
     .flat()
     .map(v => (v || '').trim())
     .filter(v => v.startsWith('http'))
-    // normalize HTML-encoded query separators (web sheets often store &amp;)
+    // normalize HTML-encoded query separators (common in spreadsheets)
     .map(u => u.replace(/&amp;/g, '&'));
 
   return urls;
@@ -68,7 +68,7 @@ function parseCurrency(str) {
 
 /**
  * Extract the TD text that follows a TH containing a given label (case-insensitive).
- * This faithfully reproduces what `th:contains("X") + td` would capture, but is robust.
+ * This reproduces what `th:contains("X") + td` would capture, but robust.
  */
 function getByThLabel($, $ctx, label) {
   let value = '';
@@ -87,10 +87,10 @@ function getByThLabel($, $ctx, label) {
 }
 
 /**
- * Best-effort detection of auction realm (top page or iframe).
+ * Best-effort detection of auction content realm (top page or iframe).
  * Returns { dom } where `dom` is a Page or Frame exposing waitForSelector/content/evaluate APIs.
  */
-async function resolveAuctionRealm(page) {
+async function resolveContentRealm(page) {
   // Quick try at top-level
   try {
     await page.waitForSelector('div[aid]', { timeout: 2500 });
@@ -108,6 +108,8 @@ async function resolveAuctionRealm(page) {
     for (const f of frames) {
       try {
         await f.waitForSelector('div[aid], #BID_WINDOW_CONTAINER', { timeout: 1500 });
+        // confirm actual list rows are reachable
+        await f.waitForSelector('div[aid]', { timeout: 1500 });
         candidateFrame = f;
         break;
       } catch (_) {}
@@ -125,7 +127,45 @@ async function resolveAuctionRealm(page) {
     return { dom: page };
   } catch (_) {}
 
-  throw new Error('Could not locate auction content in page or iframes.');
+  throw new Error('Could not locate auction content (div[aid]) in page or iframes.');
+}
+
+/**
+ * Controls realm: pager indicator + next button may be top-level or a parent frame of content frame.
+ * We try in this order: same realm as content, parentFrame (if any), then top-level page.
+ * Returns { dom } for controls.
+ */
+async function resolveControlsRealm(page, contentDom) {
+  // helper: does this realm contain our controls?
+  async function hasControls(realm) {
+    try {
+      await realm.waitForSelector('.Head_C div:nth-of-type(3) span.PageText', { timeout: 1200 });
+      await realm.waitForSelector('.PageRight_HVR img, .PageRight img', { timeout: 1200 });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // 1) same realm as content
+  if (await hasControls(contentDom)) return { dom: contentDom };
+
+  // 2) parent frame (if content is a Frame)
+  if (typeof contentDom.parentFrame === 'function') {
+    const parent = contentDom.parentFrame();
+    if (parent && (await hasControls(parent))) return { dom: parent };
+  }
+
+  // 3) top-level page
+  if (await hasControls(page)) return { dom: page };
+
+  // 4) last chance: scan all frames for controls
+  for (const f of page.frames()) {
+    if (await hasControls(f)) return { dom: f };
+  }
+
+  // If we didn't find controls, return the original realm; pagination will gracefully stop
+  return { dom: contentDom };
 }
 
 /**
@@ -138,58 +178,79 @@ async function getPageIndicator(dom) {
       (el) => (el.innerText || el.textContent || '').trim()
     );
     const m = text.match(/page\s*:?\s*([0-9]+)\s+of\s+([0-9]+)/i);
-    if (m) return { current: Number(m[1]), total: Number(m[2]) };
+    if (m) return { current: Number(m[1]), total: Number(m[2]), raw: text };
   } catch (_) {}
   return null;
 }
 
-/** Next button handle: `.PageRight_HVR img`  */
-async function findNextHandle(dom) {
+/** 
+ * Next button handle: prefer enabled "hover" class, fallback to generic.
+ * Returns { handle, disabled }
+ */
+async function findNextHandle(controlsDom) {
+  // query image first
+  let h = await controlsDom.$('.PageRight_HVR img');
+  if (!h) h = await controlsDom.$('.PageRight img');
+  if (!h) return { handle: null, disabled: true };
+
+  const disabled = await controlsDom.evaluate((el) => {
+    const style = window.getComputedStyle(el);
+    const hidden = style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0';
+    const box = el.getBoundingClientRect();
+    const invisible = box.width === 0 || box.height === 0;
+    // check parent container class state
+    const p = el.closest('.PageRight_HVR, .PageRight');
+    const cls = (p ? p.getAttribute('class') : el.getAttribute('class') || '').toLowerCase();
+    const ariaDisabled = (p ? p.getAttribute('aria-disabled') : el.getAttribute('aria-disabled')) || '';
+    const looksDisabled = cls.includes('disabled') || cls.includes('dis') || ariaDisabled === 'true';
+    return hidden || invisible || looksDisabled;
+  }, h);
+
+  return { handle: h, disabled };
+}
+
+/**
+ * Click the nearest clickable ancestor (a/button/input) for a given image/icon handle.
+ */
+async function clickNearestClickable(controlsDom, handle) {
   try {
-    const h = await dom.$('.PageRight_HVR img');
-    if (!h) return null;
-    const isClickable = await dom.evaluate((el) => {
-      const style = window.getComputedStyle(el);
-      const hidden =
-        style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0';
-      const p = el.closest('.PageRight_HVR');
-      const cls = (p ? p.getAttribute('class') : el.getAttribute('class') || '').toLowerCase();
-      const ariaDisabled = (p ? p.getAttribute('aria-disabled') : el.getAttribute('aria-disabled')) || '';
-      return !hidden && !cls.includes('disabled') && ariaDisabled !== 'true';
-    }, h);
-    return isClickable ? h : null;
-  } catch (_) {
-    return null;
+    await controlsDom.evaluate((el) => {
+      const clickable = el.closest('a, button, input[type="submit"], input[type="button"]');
+      (clickable || el).click();
+    }, handle);
+    return true;
+  } catch {
+    try {
+      await handle.click({ delay: 20 });
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 
-/** Wait for the list (`div[aid]`) to change after a Next click */
-async function waitForListChange(dom) {
-  const priorFirstRowHtml = await dom.evaluate(() => {
+/** Wait for the list (`div[aid]`) to change after Next click */
+async function waitForListChange(contentDom, timeoutMs = 25000) {
+  const start = Date.now();
+  const priorFirstRowHtml = await contentDom.evaluate(() => {
     const first = document.querySelector('div[aid]');
-    return first ? first.innerHTML : '';
+    return first ? first.innerHTML : '__NONE__';
   });
 
-  await Promise.race([
-    dom.waitForNavigation({ waitUntil: 'networkidle0', timeout: 15000 }).catch(() => {}),
-    (async () => {
-      await dom.waitForFunction(
-        (prev) => {
-          const first = document.querySelector('div[aid]');
-          return first && first.innerHTML !== prev;
-        },
-        { timeout: 20000 },
-        priorFirstRowHtml
-      );
-    })(),
-  ]);
-
-  const maybePage = typeof dom.page === 'function' ? dom.page() : dom;
-  if (maybePage && typeof maybePage.waitForTimeout === 'function') {
-    await maybePage.waitForTimeout(400);
-  } else {
+  // Poll for change (covers AJAX swaps and frame reloads)
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const current = await contentDom.evaluate(() => {
+        const first = document.querySelector('div[aid]');
+        return first ? first.innerHTML : '__NONE__';
+      });
+      if (current !== priorFirstRowHtml) return true;
+    } catch {
+      // if the frame navigated/reloaded, a short delay then continue
+    }
     await new Promise((r) => setTimeout(r, 400));
   }
+  return false;
 }
 
 // =========================
@@ -203,27 +264,25 @@ function parseAuctionsFromHtml_SitemapAccurate(html, pageUrl) {
   $('div[aid]').each((_, item) => {
     const $item = $(item);
 
-    // Capture for diagnostics: text + attrs if it looks relevant
+    // Capture for diagnostics
     const blockText = clean($item.text());
     if (blockText) {
       relevant.push({
         sourceUrl: pageUrl,
         tag: 'div',
         attrs: $item.attr() || {},
-        text: blockText.slice(0, 2000), // cap to keep files manageable
+        text: blockText.slice(0, 2000),
       });
     }
 
-    // Map selectors from your sitemap to robust extractors
+    // Map selectors from sitemap to robust extractors
     const caseNumber = getByThLabel($, $item, 'Cause Number:');
     const assessedValue = getByThLabel($, $item, 'Adjudged Value:');
     const openingBid = getByThLabel($, $item, 'Est. Min. Bid:');
     const parcelId = getByThLabel($, $item, 'Account Number:');
     const streetAddress = getByThLabel($, $item, 'Property Address:');
 
-    // The sitemap used a positional selector for city/state/zip
     let cityStateZip = clean($item.find('tr:nth-of-type(8) td').first().text());
-    // fallback if empty (some templates differ)
     if (!cityStateZip) {
       cityStateZip =
         getByThLabel($, $item, 'City, State Zip:') ||
@@ -235,15 +294,13 @@ function parseAuctionsFromHtml_SitemapAccurate(html, pageUrl) {
     const soldAmount = clean($item.find('div.ASTAT_MSGD').first().text());
 
     // SOLD-only filter
-    const statusLower = status.toLowerCase();
     const looksSold =
-      statusLower.includes('sold') ||
-      statusLower.includes('sold amount') ||
+      status.toLowerCase().includes('sold') ||
       (!!soldAmount && parseCurrency(soldAmount) !== null);
 
-    if (!looksSold) return; // skip non-sold cards
+    if (!looksSold) return;
 
-    // Build row consistent with your downstream usage
+    // Build row
     const openingBidNum = parseCurrency(openingBid);
     const assessedNum = parseCurrency(assessedValue);
     const salePriceNum = parseCurrency(soldAmount);
@@ -256,14 +313,14 @@ function parseAuctionsFromHtml_SitemapAccurate(html, pageUrl) {
       parcelId: clean(parcelId),
       propertyAddress: clean(streetAddress),
       openingBid: clean(openingBid),
-      salePrice: clean(soldAmount), // sale price is the sold amount in this template
+      salePrice: clean(soldAmount),
       assessedValue: clean(assessedValue),
-      auctionDate: '', // not present on these cards; left blank unless found elsewhere
+      auctionDate: '',
       cityStateZip: clean(cityStateZip),
       status: clean(status),
     };
 
-    // validation similar to your original
+    // validation akin to your original
     const valid =
       row.caseNumber &&
       row.parcelId &&
@@ -289,7 +346,7 @@ function parseAuctionsFromHtml_SitemapAccurate(html, pageUrl) {
 }
 
 // =========================
-// Inspect + Parse Page (SOLD only) with iframe + pagination support
+// Inspect + Parse Page (SOLD only) with iframe + robust pagination
 // =========================
 async function inspectAndParse(browser, url) {
   const page = await browser.newPage();
@@ -315,30 +372,33 @@ async function inspectAndParse(browser, url) {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
-    // Normalize any &amp; in URL (in case)
+    // Normalize &amp; in URL
     const normalizedUrl = url.replace(/&amp;/g, '&');
-
     await page.goto(normalizedUrl, { waitUntil: 'networkidle0', timeout: 120000 });
 
-    // Resolve target DOM (page or iframe)
-    const { dom } = await resolveAuctionRealm(page);
+    // Resolve realms
+    let { dom: contentDom } = await resolveContentRealm(page);
+    const { dom: controlsDom } = await resolveControlsRealm(page, contentDom);
 
     // Wait for list
-    await dom.waitForSelector('div[aid]', { timeout: 60000 });
+    await contentDom.waitForSelector('div[aid]', { timeout: 60000 });
 
-    // Track pagination using indicator and Next button
-    let indicator = await getPageIndicator(dom);
-    let currentPage = indicator?.current || 1;
-    const totalPagesKnown = indicator?.total || null;
+    let pageCount = 0;
 
-    let pageCounter = 0;
-    while (pageCounter < MAX_PAGES) {
-      console.log(`📄 Parsing page ${currentPage}...`);
+    while (pageCount < MAX_PAGES) {
+      // Log indicator if present
+      const indicator = await getPageIndicator(controlsDom);
+      if (indicator) {
+        console.log(`📄 Page ${indicator.current} of ${indicator.total} (raw: "${indicator.raw}")`);
+      } else {
+        console.log(`📄 Page (indicator not found)`);
+      }
 
-      const html = await dom.content();
+      // Parse current page
+      const html = await contentDom.content();
       const { rows, relevant } = parseAuctionsFromHtml_SitemapAccurate(html, normalizedUrl);
 
-      // Dedupe and collect
+      // Dedupe & collect rows
       for (const row of rows) {
         const key = `${row.sourceUrl}|${row.caseNumber}|${row.parcelId}`;
         if (!seen.has(key)) {
@@ -348,49 +408,49 @@ async function inspectAndParse(browser, url) {
       }
       allRelevantElements.push(...relevant);
 
-      // Stop if known last page
-      indicator = await getPageIndicator(dom);
+      console.log(`   ➜ SOLD rows so far: ${allParsedRows.length}`);
+
+      // Stop if this is the last page per indicator
       if (indicator && indicator.total && indicator.current >= indicator.total) {
-        console.log(`🛑 Reached last page (${indicator.current} of ${indicator.total}).`);
+        console.log(`🛑 Reached last page (${indicator.current}/${indicator.total}).`);
         break;
       }
 
-      // Find & click Next
-      const nextHandle = await findNextHandle(dom);
-      if (!nextHandle) {
-        console.log('🛑 Next button not found (.PageRight_HVR img). End of pagination.');
+      // Find Next
+      const { handle: nextHandle, disabled } = await findNextHandle(controlsDom);
+      if (!nextHandle || disabled) {
+        console.log('🛑 Next not available (missing or disabled). End of pagination.');
         break;
       }
 
       console.log('➡️ Moving to next page...');
+
+      // Scroll and click nearest clickable ancestor
       try {
-        await dom.evaluate((el) => el.scrollIntoView({ block: 'center', behavior: 'instant' }), nextHandle);
+        await controlsDom.evaluate((el) => el.scrollIntoView({ block: 'center', behavior: 'instant' }), nextHandle);
       } catch (_) {}
+      const clicked = await clickNearestClickable(controlsDom, nextHandle);
+      if (!clicked) {
+        console.log('⚠️ Click failed. Stopping to avoid loop.');
+        break;
+      }
 
-      await Promise.allSettled([
-        dom.waitForNavigation({ waitUntil: 'networkidle0', timeout: 15000 }),
-        nextHandle.click(),
-      ]);
-
-      try {
-        await waitForListChange(dom);
-      } catch (_) {
-        // fallback: check if indicator progressed
-        const after = await getPageIndicator(dom);
-        if (!after || after.current === currentPage) {
-          console.log('⚠️ Did not detect list change after Next. Stopping.');
+      // Wait for content to actually change; if it doesn't, try to re-resolve content realm (frame could reload)
+      const changed = await waitForListChange(contentDom, 30000);
+      if (!changed) {
+        console.log('⚠️ No list change detected. Re-resolving content realm...');
+        try {
+          const resolved = await resolveContentRealm(page);
+          contentDom = resolved.dom;
+          await contentDom.waitForSelector('div[aid]', { timeout: 20000 });
+        } catch {
+          console.log('🛑 Could not re-locate content after Next. Ending.');
           break;
         }
       }
 
-      indicator = await getPageIndicator(dom);
-      currentPage = indicator?.current || currentPage + 1;
-      pageCounter += 1;
+      pageCount += 1;
     }
-
-    console.log(
-      `📦 Parsed SOLD auctions so far: ${allParsedRows.length}`
-    );
 
     return { relevantElements: allRelevantElements, parsedRows: allParsedRows };
   } catch (err) {
@@ -410,7 +470,7 @@ async function inspectAndParse(browser, url) {
   console.log(`🔗 Got ${urls.length} URL(s) to process.`);
 
   const browser = await puppeteer.launch({
-    headless: true, // set false locally to observe
+    headless: true, // set to false locally to observe
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
