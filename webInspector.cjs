@@ -24,7 +24,7 @@ const MIN_SURPLUS = 25000;
 const MAX_PAGES = 50; // safety stop per URL
 
 // =========================
-// GOOGLE AUTH
+/** GOOGLE AUTH */
 // =========================
 const auth = new google.auth.GoogleAuth({
   keyFile: SERVICE_ACCOUNT_FILE,
@@ -35,6 +35,15 @@ const sheets = google.sheets({ version: 'v4', auth });
 // =========================
 // Load URLs
 // =========================
+function normalizeAmpersands(u) {
+  // Decode common ampersand encodings coming from spreadsheets or copy/paste
+  // &amp;amp;  -> &amp;  -> &
+  return u
+    .replace(/&amp;amp;/gi, '&amp;')
+    .replace(/&amp;/gi, '&')
+    .replace(/%26amp%3B/gi, '&'); // URL-encoded variant
+}
+
 async function loadTargetUrls() {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
@@ -45,8 +54,7 @@ async function loadTargetUrls() {
     .flat()
     .map(v => (v || '').trim())
     .filter(v => v.startsWith('http'))
-    // normalize HTML-encoded query separators (common in spreadsheets)
-    .map(u => u.replace(/&amp;/g, '&'));
+    .map(normalizeAmpersands);
 
   return urls;
 }
@@ -68,13 +76,13 @@ function parseCurrency(str) {
 
 /**
  * Extract the TD text that follows a TH containing a given label (case-insensitive).
- * This reproduces what `th:contains("X") + td` would capture, but robust.
+ * More robust than :contains(); matches with or without a trailing colon.
  */
 function getByThLabel($, $ctx, label) {
   let value = '';
-  const target = label.toLowerCase();
+  const target = clean(label).toLowerCase().replace(/:\s*$/, ''); // remove trailing colon
   $ctx.find('th').each((_, el) => {
-    const thText = clean($(el).text()).toLowerCase();
+    const thText = clean($(el).text()).toLowerCase().replace(/:\s*$/, '');
     if (thText.includes(target)) {
       const td = $(el).next('td');
       if (td && td.length) {
@@ -91,13 +99,13 @@ function getByThLabel($, $ctx, label) {
  * Returns { dom } where `dom` is a Page or Frame exposing waitForSelector/content/evaluate APIs.
  */
 async function resolveContentRealm(page) {
-  // Quick try at top-level
+  // Try top-level page
   try {
     await page.waitForSelector('div[aid]', { timeout: 2500 });
     return { dom: page };
   } catch (_) {}
 
-  // Wait for iframes, then search each frame
+  // Try frames
   try {
     await page.waitForSelector('iframe', { timeout: 60000 });
   } catch (_) {}
@@ -108,8 +116,7 @@ async function resolveContentRealm(page) {
     for (const f of frames) {
       try {
         await f.waitForSelector('div[aid], #BID_WINDOW_CONTAINER', { timeout: 1500 });
-        // confirm actual list rows are reachable
-        await f.waitForSelector('div[aid]', { timeout: 1500 });
+        await f.waitForSelector('div[aid]', { timeout: 1500 }); // confirm rows exist
         candidateFrame = f;
         break;
       } catch (_) {}
@@ -121,7 +128,7 @@ async function resolveContentRealm(page) {
 
   if (candidateFrame) return { dom: candidateFrame };
 
-  // Fallback to a known container at top-level
+  // Fallback to known container at top-level
   try {
     await page.waitForSelector('#BID_WINDOW_CONTAINER', { timeout: 3000 });
     return { dom: page };
@@ -132,11 +139,10 @@ async function resolveContentRealm(page) {
 
 /**
  * Controls realm: pager indicator + next button may be top-level or a parent frame of content frame.
- * We try in this order: same realm as content, parentFrame (if any), then top-level page.
+ * We try: same realm → parent (if frame) → top page → any frame.
  * Returns { dom } for controls.
  */
 async function resolveControlsRealm(page, contentDom) {
-  // helper: does this realm contain our controls?
   async function hasControls(realm) {
     try {
       await realm.waitForSelector('.Head_C div:nth-of-type(3) span.PageText', { timeout: 1200 });
@@ -159,12 +165,12 @@ async function resolveControlsRealm(page, contentDom) {
   // 3) top-level page
   if (await hasControls(page)) return { dom: page };
 
-  // 4) last chance: scan all frames for controls
+  // 4) any other frame
   for (const f of page.frames()) {
     if (await hasControls(f)) return { dom: f };
   }
 
-  // If we didn't find controls, return the original realm; pagination will gracefully stop
+  // If controls cannot be found, fall back and pagination will gracefully end
   return { dom: contentDom };
 }
 
@@ -188,7 +194,6 @@ async function getPageIndicator(dom) {
  * Returns { handle, disabled }
  */
 async function findNextHandle(controlsDom) {
-  // query image first
   let h = await controlsDom.$('.PageRight_HVR img');
   if (!h) h = await controlsDom.$('.PageRight img');
   if (!h) return { handle: null, disabled: true };
@@ -198,7 +203,7 @@ async function findNextHandle(controlsDom) {
     const hidden = style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0';
     const box = el.getBoundingClientRect();
     const invisible = box.width === 0 || box.height === 0;
-    // check parent container class state
+    // parent container often signals disabled via class
     const p = el.closest('.PageRight_HVR, .PageRight');
     const cls = (p ? p.getAttribute('class') : el.getAttribute('class') || '').toLowerCase();
     const ariaDisabled = (p ? p.getAttribute('aria-disabled') : el.getAttribute('aria-disabled')) || '';
@@ -275,18 +280,18 @@ function parseAuctionsFromHtml_SitemapAccurate(html, pageUrl) {
       });
     }
 
-    // Map selectors from sitemap to robust extractors
-    const caseNumber = getByThLabel($, $item, 'Cause Number:');
-    const assessedValue = getByThLabel($, $item, 'Adjudged Value:');
-    const openingBid = getByThLabel($, $item, 'Est. Min. Bid:');
-    const parcelId = getByThLabel($, $item, 'Account Number:');
-    const streetAddress = getByThLabel($, $item, 'Property Address:');
+    // Map selectors from the sitemap to robust extractors
+    const caseNumber      = getByThLabel($, $item, 'Cause Number');
+    const assessedValue   = getByThLabel($, $item, 'Adjudged Value');
+    const openingBid      = getByThLabel($, $item, 'Est. Min. Bid');
+    const parcelId        = getByThLabel($, $item, 'Account Number');
+    const streetAddress   = getByThLabel($, $item, 'Property Address');
 
     let cityStateZip = clean($item.find('tr:nth-of-type(8) td').first().text());
     if (!cityStateZip) {
       cityStateZip =
-        getByThLabel($, $item, 'City, State Zip:') ||
-        getByThLabel($, $item, 'City/State/Zip:') ||
+        getByThLabel($, $item, 'City, State Zip') ||
+        getByThLabel($, $item, 'City/State/Zip') ||
         '';
     }
 
@@ -302,8 +307,8 @@ function parseAuctionsFromHtml_SitemapAccurate(html, pageUrl) {
 
     // Build row
     const openingBidNum = parseCurrency(openingBid);
-    const assessedNum = parseCurrency(assessedValue);
-    const salePriceNum = parseCurrency(soldAmount);
+    const assessedNum   = parseCurrency(assessedValue);
+    const salePriceNum  = parseCurrency(soldAmount);
 
     const row = {
       sourceUrl: pageUrl,
@@ -372,8 +377,7 @@ async function inspectAndParse(browser, url) {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
-    // Normalize &amp; in URL
-    const normalizedUrl = url.replace(/&amp;/g, '&');
+    const normalizedUrl = normalizeAmpersands(url);
     await page.goto(normalizedUrl, { waitUntil: 'networkidle0', timeout: 120000 });
 
     // Resolve realms
@@ -394,7 +398,7 @@ async function inspectAndParse(browser, url) {
         console.log(`📄 Page (indicator not found)`);
       }
 
-      // Parse current page
+      // Parse current page (from content realm)
       const html = await contentDom.content();
       const { rows, relevant } = parseAuctionsFromHtml_SitemapAccurate(html, normalizedUrl);
 
