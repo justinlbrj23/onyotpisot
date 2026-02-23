@@ -19,6 +19,7 @@ const OUTPUT_ELEMENTS_FILE = 'raw-elements.json';
 const OUTPUT_ROWS_FILE = 'parsed-auctions.json';
 const OUTPUT_ERRORS_FILE = 'errors.json';
 const OUTPUT_SUMMARY_FILE = 'summary.json';
+const OUTPUT_PAGER_DEBUG = 'pager-sniff.json';
 
 const MIN_SURPLUS = 25000;
 const MAX_PAGES = 50; // safety stop per URL
@@ -138,34 +139,87 @@ async function resolveContentRealm(page) {
 }
 
 /**
- * Controls realm: pager container could be in the same realm, parent frame, top page, or another frame.
- * We scan for a visible element whose text matches /page <num> (of|/) <num>/.
- * Returns { dom, container } where container is the pager element handle (or null).
+ * Serialize visible text of an element, **including inputs/selects** by inlining their values.
+ * Helps us reconstruct strings like "page 1 of 5".
+ */
+function serializeWithControlValuesFn() {
+  return (el) => {
+    const visible = (n) => {
+      const s = getComputedStyle(n);
+      const r = n.getBoundingClientRect();
+      return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+    };
+
+    // DFS with input/select value injection
+    const walk = (n, acc) => {
+      if (!n || !visible(n)) return acc;
+      const tag = (n.tagName || '').toLowerCase();
+
+      if (tag === 'input') {
+        const t = (n.type || '').toLowerCase();
+        if (t === 'text' || t === 'number' || t === '' || t === 'search') {
+          acc.push(n.value || '');
+        } else if (t === 'submit' || t === 'button') {
+          acc.push(n.value || '');
+        }
+      } else if (tag === 'select') {
+        const opt = n.options && n.options[n.selectedIndex];
+        acc.push(opt ? (opt.text || opt.value || '') : (n.value || ''));
+      } else if (tag === 'img') {
+        acc.push(n.alt || n.title || '');
+      } else {
+        // text node content
+        const txt = (n.innerText || n.textContent || '');
+        if (txt) acc.push(txt);
+      }
+
+      // Recurse children
+      for (const c of Array.from(n.children || [])) {
+        walk(c, acc);
+      }
+      return acc;
+    };
+
+    return walk(el, []).join(' ').replace(/\s+/g, ' ').trim();
+  };
+}
+
+/**
+ * Controls realm: find a pager container anywhere (same realm, parent, top page, or any frame),
+ * by scanning for visible nodes whose **serialized text** matches /page X of|/ Y/.
+ * Returns { dom, container } (container is an ElementHandle or null if not found).
  */
 async function resolveControlsRealm(page, contentDom) {
   async function locatePagerContainer(realm) {
-    const handle = await realm.evaluateHandle(() => {
+    const serialize = serializeWithControlValuesFn();
+    const handle = await realm.evaluateHandle((fn) => {
       const isVisible = (el) => {
         const s = getComputedStyle(el);
         const r = el.getBoundingClientRect();
-        if (!el || !el.ownerDocument) return false;
         return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
       };
-      const re = /\bpage\b\s*\d+\s*(?:of|\/)\s*\d+/i;
+
       const nodes = Array.from(document.querySelectorAll('*')).filter(isVisible);
-      // Prefer smaller text blocks (avoid picking huge sections)
-      let best = null;
+      const scored = [];
+
       for (const el of nodes) {
-        const t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
-        if (!t) continue;
-        if (re.test(t)) {
-          if (!best || (el.innerText || '').length < (best.innerText || '').length) {
-            best = el;
-          }
+        const text = fn(el); // serialized with inputs/selects
+        if (!text) continue;
+
+        // Normalize; common patterns:
+        // "page 1 of 5", "Page: 1 of 5", "page 1 / 5"
+        const m = text.match(/\bpage\b\s*:?\s*([0-9]+)\s*(?:of|\/)\s*([0-9]+)/i);
+        if (m) {
+          // Prefer concise containers (avoid large sections)
+          const score = Math.max(1, 1000 - text.length);
+          scored.push({ el, score });
         }
       }
-      return best || null;
-    });
+
+      if (!scored.length) return null;
+      scored.sort((a, b) => b.score - a.score);
+      return scored[0].el;
+    }, serialize);
     return handle.asElement();
   }
 
@@ -192,27 +246,27 @@ async function resolveControlsRealm(page, contentDom) {
     if (container) return { dom: f, container };
   }
 
-  // Last resort: no container found (we'll gracefully stop pagination)
+  // Last resort: no container found
   return { dom: contentDom, container: null };
 }
 
-/** Read "Page X of Y" (or "page X / Y") from the given container */
+/** Read "Page X of Y" (or "page X / Y") from the given container (with inputs/selects) */
 async function getPageIndicatorFromContainer(dom, container) {
   if (!container) return null;
   try {
-    const data = await dom.evaluate((el) => {
-      const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+    const data = await dom.evaluate((el, serializerFn) => {
+      const serializer = eval(`(${serializerFn})`);
+      const text = serializer(el); // includes input/select values
 
-      // Try to read current from a nearby input/select if present
+      // Try to extract current from an input/select within the container
       let current = null;
-      const inputs = Array.from(el.querySelectorAll('input, select'))
-        .filter(n => {
-          const s = getComputedStyle(n);
-          const r = n.getBoundingClientRect();
-          return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
-        });
+      const controls = Array.from(el.querySelectorAll('input, select'));
+      for (const n of controls) {
+        const s = getComputedStyle(n);
+        const r = n.getBoundingClientRect();
+        const visible = s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+        if (!visible) continue;
 
-      for (const n of inputs) {
         if (n.tagName === 'INPUT') {
           const v = (n.value || '').trim();
           if (/^\d+$/.test(v)) { current = Number(v); break; }
@@ -229,14 +283,14 @@ async function getPageIndicatorFromContainer(dom, container) {
       if (current == null && m) current = Number(m[1]);
 
       return { raw: text, current, total };
-    }, container);
+    }, container, serializeWithControlValuesFn().toString());
 
     if (data && (data.current || data.total)) return data;
   } catch (_) {}
   return null;
 }
 
-/** Find Next button INSIDE the pager container */
+/** Find Next inside pager container; prefer single-step (">", "Next") over fast-forward (">>") */
 async function findNextInContainer(dom, container) {
   if (!container) return { handle: null, disabled: true };
 
@@ -247,8 +301,8 @@ async function findNextInContainer(dom, container) {
       return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
     };
 
+    const all = el.querySelectorAll('a, button, input, img, span, i');
     const candidates = [];
-    const all = el.querySelectorAll('a, button, input, img, span');
 
     for (const node of all) {
       if (!isVisible(node)) continue;
@@ -259,25 +313,24 @@ async function findNextInContainer(dom, container) {
         (node.getAttribute('title') || '').trim().toLowerCase() ||
         (node.getAttribute('value') || '').trim().toLowerCase();
 
+      const cls = (node.getAttribute('class') || '').toLowerCase();
       const src = (node.getAttribute('src') || '').toLowerCase();
 
       const looksNext =
-        txt === '>' ||
-        txt === '>>' ||
+        txt === '>' || txt === '›' || txt === '»' ||
         txt.includes('next') ||
-        txt.includes('›') ||
-        txt.includes('»') ||
-        src.includes('next') ||
-        src.includes('right') ||
-        src.includes('arrow');
+        cls.includes('next') || cls.includes('pageright') || cls.includes('page_right') ||
+        src.includes('next') || src.includes('right') || src.includes('arrow');
 
       if (!looksNext) continue;
 
-      // Skip obvious "fast-forward" >> unless no other choice
-      const score =
-        txt === '>' || txt.includes('next') || txt.includes('›') || txt.includes('»') ? 2 :
-        txt === '>>' ? 1 :
-        1;
+      // Score: prefer explicit "next" or single right arrow; de-prioritize ">>"
+      let score = 0;
+      if (txt.includes('next')) score += 5;
+      if (txt === '>' || txt === '›' || txt === '»') score += 4;
+      if (cls.includes('pageright')) score += 3;
+      if (src.includes('right') || src.includes('arrow')) score += 2;
+      if (txt === '>>') score -= 2; // fast-forward less preferred
 
       candidates.push({ node, score });
     }
@@ -291,12 +344,79 @@ async function findNextInContainer(dom, container) {
   if (!handle) return { handle: null, disabled: true };
 
   const disabled = await dom.evaluate((el) => {
-    const style = getComputedStyle(el);
+    const s = getComputedStyle(el);
     const r = el.getBoundingClientRect();
-    const hidden = style.display === 'none' || style.visibility === 'hidden' || r.width === 0 || r.height === 0;
+    const hidden = s.display === 'none' || s.visibility === 'hidden' || r.width === 0 || r.height === 0;
     const p = el.closest('.disabled, .PageRight_DIS, [aria-disabled="true"]');
     const cls = (el.getAttribute('class') || '').toLowerCase();
-    return hidden || !!p || cls.includes('disabled') || style.pointerEvents === 'none';
+    return hidden || !!p || cls.includes('disabled') || s.pointerEvents === 'none';
+  }, handle);
+
+  return { handle, disabled };
+}
+
+/** Fallback: find a Next control near the pager container (siblings/parent), if not inside it */
+async function findNextNearContainer(dom, container) {
+  if (!container) return { handle: null, disabled: true };
+
+  const h = await dom.evaluateHandle((el) => {
+    const isVisible = (n) => {
+      const s = getComputedStyle(n);
+      const r = n.getBoundingClientRect();
+      return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+    };
+
+    const region = el.closest('*'); // parent region
+    const scope = region || el;
+
+    const all = scope.querySelectorAll('a, button, input, img, span, i');
+    const candidates = [];
+
+    for (const node of all) {
+      if (!isVisible(node)) continue;
+
+      const txt =
+        (node.innerText || node.textContent || '').trim().toLowerCase() ||
+        (node.getAttribute('alt') || '').trim().toLowerCase() ||
+        (node.getAttribute('title') || '').trim().toLowerCase() ||
+        (node.getAttribute('value') || '').trim().toLowerCase();
+
+      const cls = (node.getAttribute('class') || '').toLowerCase();
+      const src = (node.getAttribute('src') || '').toLowerCase();
+
+      const looksNext =
+        txt === '>' || txt === '›' || txt === '»' ||
+        txt.includes('next') ||
+        cls.includes('next') || cls.includes('pageright') || cls.includes('page_right') ||
+        src.includes('next') || src.includes('right') || src.includes('arrow');
+
+      if (!looksNext) continue;
+
+      let score = 0;
+      if (txt.includes('next')) score += 5;
+      if (txt === '>' || txt === '›' || txt === '»') score += 4;
+      if (cls.includes('pageright')) score += 3;
+      if (src.includes('right') || src.includes('arrow')) score += 2;
+      if (txt === '>>') score -= 2;
+
+      candidates.push({ node, score });
+    }
+
+    if (!candidates.length) return null;
+    candidates.sort((a, b) => b.score - a.score);
+    return candidates[0].node;
+  }, container);
+
+  const handle = h.asElement();
+  if (!handle) return { handle: null, disabled: true };
+
+  const disabled = await dom.evaluate((el) => {
+    const s = getComputedStyle(el);
+    const r = el.getBoundingClientRect();
+    const hidden = s.display === 'none' || s.visibility === 'hidden' || r.width === 0 || r.height === 0;
+    const p = el.closest('.disabled, .PageRight_DIS, [aria-disabled="true"]');
+    const cls = (el.getAttribute('class') || '').toLowerCase();
+    return hidden || !!p || cls.includes('disabled') || s.pointerEvents === 'none';
   }, handle);
 
   return { handle, disabled };
@@ -445,6 +565,7 @@ async function inspectAndParse(browser, url) {
 
   const allRelevantElements = [];
   const allParsedRows = [];
+  const pagerDebug = []; // collect pager discovery facts
   const seen = new Set();
 
   try {
@@ -469,6 +590,19 @@ async function inspectAndParse(browser, url) {
     // Resolve realms
     let { dom: contentDom } = await resolveContentRealm(page);
     let { dom: controlsDom, container: pagerContainer } = await resolveControlsRealm(page, contentDom);
+
+    // Pager sniff (debug)
+    if (pagerContainer) {
+      const snap = await controlsDom.evaluate((el, serializerFn) => {
+        const serializer = eval(`(${serializerFn})`);
+        const text = serializer(el);
+        const html = el.outerHTML;
+        return { text, htmlSnippet: html.slice(0, 4000) };
+      }, pagerContainer, serializeWithControlValuesFn().toString());
+      pagerDebug.push({ url: normalizedUrl, found: true, ...snap });
+    } else {
+      pagerDebug.push({ url: normalizedUrl, found: false });
+    }
 
     // Wait for list
     await contentDom.waitForSelector('div[aid]', { timeout: 60000 });
@@ -509,13 +643,21 @@ async function inspectAndParse(browser, url) {
       // Find Next in the pager container
       let { handle: nextHandle, disabled } = await findNextInContainer(controlsDom, pagerContainer);
 
-      // If not found (or disabled), try to re-resolve the controls realm (some tenants swap containers after navigation)
+      // If not found inside container, try nearby region
+      if (!nextHandle || disabled) {
+        ({ handle: nextHandle, disabled } = await findNextNearContainer(controlsDom, pagerContainer));
+      }
+
+      // If still not found (or disabled), try to re-resolve the controls realm (some tenants swap containers after navigation)
       if (!nextHandle || disabled) {
         const re = await resolveControlsRealm(page, contentDom);
         controlsDom = re.dom;
         pagerContainer = re.container || pagerContainer;
 
         ({ handle: nextHandle, disabled } = await findNextInContainer(controlsDom, pagerContainer));
+        if (!nextHandle || disabled) {
+          ({ handle: nextHandle, disabled } = await findNextNearContainer(controlsDom, pagerContainer));
+        }
       }
 
       if (!nextHandle || disabled) {
@@ -556,6 +698,11 @@ async function inspectAndParse(browser, url) {
 
       pageCount += 1;
     }
+
+    // Write pager debug artifact for quick tuning if needed
+    try {
+      fs.writeFileSync(OUTPUT_PAGER_DEBUG, JSON.stringify(pagerDebug, null, 2));
+    } catch {}
 
     return { relevantElements: allRelevantElements, parsedRows: allParsedRows };
   } catch (err) {
@@ -644,4 +791,3 @@ async function inspectAndParse(browser, url) {
   console.log(`📊 Saved summary → ${OUTPUT_SUMMARY_FILE}`);
   console.log('🏁 Done');
 })();
-``
