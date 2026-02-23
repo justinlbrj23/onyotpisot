@@ -25,6 +25,11 @@ const MIN_SURPLUS = 25000;
 const MAX_PAGES = 50; // safety stop per URL
 
 // =========================
+// Small cross-version sleep helper (replaces page.waitForTimeout)
+// =========================
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// =========================
 /** GOOGLE AUTH */
 // =========================
 const auth = new google.auth.GoogleAuth({
@@ -115,7 +120,7 @@ async function resolveContentRealm(page) {
         break;
       } catch (_) {}
     }
-    if (!candidateFrame) await page.waitForTimeout(500);
+    if (!candidateFrame) await sleep(500);
   }
 
   if (candidateFrame) return { dom: candidateFrame };
@@ -133,9 +138,6 @@ async function resolveContentRealm(page) {
  * Returns a list of absolute hrefs and a guessed pageParam name if any.
  */
 async function sniffPagerLinks(page) {
-  // Crawl all anchors on the *top-level page* for any href that:
-  //  - contains numeric page-like params (page, pagenum, p, start),
-  //  - or looks like "next" by text/title/alt/src.
   const anchors = await page.evaluate(() => {
     const aTags = Array.from(document.querySelectorAll('a[href]'));
     const rows = [];
@@ -157,7 +159,6 @@ async function sniffPagerLinks(page) {
     return rows;
   });
 
-  // Heuristic to guess param name seen in hrefs (page, PAGE, pagenum, p, start, startrow)
   const urlParamRegex = /\b(page|pagenum|p|pg|pageno|start|startrow|offset)=([0-9]+)/i;
   const paramCounts = {};
   const withParams = [];
@@ -172,14 +173,12 @@ async function sniffPagerLinks(page) {
     }
   }
 
-  // Decide most common page-like parameter
   let guessedParam = null;
   let maxCount = 0;
   for (const [k, c] of Object.entries(paramCounts)) {
     if (c > maxCount) { guessedParam = k; maxCount = c; }
   }
 
-  // Also flag "next-ish" anchors (for scoring when choosing next link)
   const nextish = anchors.map(a => {
     const looksNext =
       a.txt.includes('next') ||
@@ -194,45 +193,36 @@ async function sniffPagerLinks(page) {
 
 /**
  * Build a URL for the next page using a discovered page param and a current index.
- * If no current known, tries to increment based on links seen on the page.
  */
 function buildNextUrlFromParam(currentUrl, paramName, nextIndex) {
   try {
     const url = new URL(currentUrl, 'https://dummy-base.invalid/');
-    // If param absent, append; else replace.
     url.searchParams.set(paramName, String(nextIndex));
-    // Drop dummy base in output if necessary
-    const out = url.href.replace('https://dummy-base.invalid/', '');
-    return out;
+    return url.href.replace('https://dummy-base.invalid/', '');
   } catch {
-    // Fallback: naive append
     const sep = currentUrl.includes('?') ? '&' : '?';
     return `${currentUrl}${sep}${encodeURIComponent(paramName)}=${encodeURIComponent(nextIndex)}`;
   }
 }
 
 /**
- * Choose the next page URL using:
- *  1) Discovered page param (page/pagenum/...), increment index.
- *  2) Else pick a "next-ish" anchor with a higher page value than current.
- *  3) Else naive &page= index+1.
+ * Choose the next page URL by:
+ * 1) Using discovered page param (page/pagenum/...), increment index.
+ * 2) Else pick a "next-ish" anchor with a higher page value than current.
+ * 3) Else naive &page= index+1.
  */
 function chooseNextUrl(currentUrl, pageIndex, pagerSniff) {
-  // 1) Use discovered param if any
   if (pagerSniff.guessedParam) {
     return buildNextUrlFromParam(currentUrl, pagerSniff.guessedParam, pageIndex + 1);
   }
 
-  // 2) If there are anchors with numeric params, pick the smallest href that advances
   const urlParamRegex = /\b(page|pagenum|p|pg|pageno|start|startrow|offset)=([0-9]+)/i;
   const forwards = [];
   for (const a of pagerSniff.anchors) {
     const m = a.href.match(urlParamRegex);
     if (!m) continue;
-    const key = m[1].toLowerCase();
     const val = parseInt(m[2], 10);
     if (Number.isFinite(val) && val > pageIndex) {
-      // prefer "next-ish"
       const score = a.looksNext ? 2 : 1;
       forwards.push({ href: a.href, val, score });
     }
@@ -242,7 +232,6 @@ function chooseNextUrl(currentUrl, pageIndex, pagerSniff) {
     return forwards[0].href;
   }
 
-  // 3) Naive fallback: &page= index+1
   const sep = currentUrl.includes('?') ? '&' : '?';
   return `${currentUrl}${sep}page=${pageIndex + 1}`;
 }
@@ -263,7 +252,7 @@ async function waitForListChange(contentDom, timeoutMs = 25000) {
       });
       if (current !== priorFirstRowHtml) return true;
     } catch { /* frame may reload */ }
-    await new Promise(r => setTimeout(r, 400));
+    await sleep(400);
   }
   return false;
 }
@@ -306,8 +295,7 @@ function parseAuctionsFromHtml_SitemapAccurate(html, pageUrl) {
     }
 
     const status     = clean($item.find('div.ASTAT_MSGA').first().text());
-    theSold = clean($item.find('div.ASTAT_MSGD').first().text());
-    const soldAmount = theSold;
+    const soldAmount = clean($item.find('div.ASTAT_MSGD').first().text());
 
     // SOLD-only filter
     const looksSold =
@@ -316,7 +304,6 @@ function parseAuctionsFromHtml_SitemapAccurate(html, pageUrl) {
 
     if (!looksSold) return;
 
-    // Build row
     const openingBidNum = parseCurrency(openingBid);
     const assessedNum   = parseCurrency(assessedValue);
     const salePriceNum  = parseCurrency(soldAmount);
@@ -336,7 +323,6 @@ function parseAuctionsFromHtml_SitemapAccurate(html, pageUrl) {
       status: clean(status),
     };
 
-    // validation akin to your original
     const valid =
       row.caseNumber &&
       row.parcelId &&
@@ -396,7 +382,7 @@ async function inspectAndParse(browser, url) {
     while (pagesVisited < MAX_PAGES) {
       console.log(`🌐 Visiting ${currentUrl}`);
       await page.goto(currentUrl, { waitUntil: 'networkidle2', timeout: 120000 });
-      await page.waitForTimeout(800); // small settle
+      await sleep(800); // settle
 
       // Discover content realm (list may be in iframe)
       let { dom: contentDom } = await resolveContentRealm(page);
@@ -436,26 +422,22 @@ async function inspectAndParse(browser, url) {
       // Try to pick a next URL
       const nextUrl = chooseNextUrl(currentUrl, pageIndex, sniff);
 
-      // If the next URL equals current or does not actually advance, stop
       if (!nextUrl || nextUrl === currentUrl) {
         console.log('🛑 No usable next URL discovered. End of pagination.');
         break;
       }
 
-      // Naively detect repeated page (avoid loops): load the next URL headlessly to see if list changes
+      // Probe next URL; ensure content changes
       console.log('➡️ Probing next URL...', nextUrl);
 
-      // Navigate and ensure content changes; if not, we stop
       const prevFirstHtml = await contentDom.evaluate(() => {
         const first = document.querySelector('div[aid]');
         return first ? first.innerHTML : '__NONE__';
       });
 
-      // Go to next page
       await page.goto(nextUrl, { waitUntil: 'networkidle2', timeout: 120000 });
-      await page.waitForTimeout(600);
+      await sleep(600);
 
-      // Re-resolve content realm (iframe may be rebuilt)
       try {
         ({ dom: contentDom } = await resolveContentRealm(page));
         await contentDom.waitForSelector('div[aid]', { timeout: 20000 });
@@ -466,7 +448,6 @@ async function inspectAndParse(browser, url) {
 
       const changed = await waitForListChange(contentDom, 8000);
       if (!changed) {
-        // As another check, compare with cached prevFirstHtml
         const nowFirstHtml = await contentDom.evaluate(() => {
           const first = document.querySelector('div[aid]');
           return first ? first.innerHTML : '__NONE__';
@@ -498,7 +479,7 @@ async function inspectAndParse(browser, url) {
 }
 
 // =========================
-// MAIN
+/** MAIN */
 // =========================
 (async () => {
   console.log('📥 Loading URLs...');
