@@ -21,6 +21,7 @@ const OUTPUT_ERRORS_FILE = 'errors.json';
 const OUTPUT_SUMMARY_FILE = 'summary.json';
 
 const MIN_SURPLUS = 25000;
+const MAX_PAGES = 50; // safety stop per URL
 
 // =========================
 // GOOGLE AUTH
@@ -40,159 +41,255 @@ async function loadTargetUrls() {
     range: `${SHEET_NAME}!${URL_RANGE}`,
   });
 
-  return (res.data.values || [])
+  const urls = (res.data.values || [])
     .flat()
-    .map(v => v.trim())
-    .filter(v => v.startsWith('http'));
+    .map(v => (v || '').trim())
+    .filter(v => v.startsWith('http'))
+    // normalize HTML-encoded query separators (web sheets often store &amp;)
+    .map(u => u.replace(/&amp;/g, '&'));
+
+  return urls;
 }
 
 // =========================
-/** Currency parser: accepts $1,234 or $1,234.56 */
+// Utils / Helpers
 // =========================
+function clean(text) {
+  if (!text) return '';
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+/** Currency parser: accepts $1,234 or $1,234.56 */
 function parseCurrency(str) {
   if (!str) return null;
   const n = parseFloat(str.replace(/[^0-9.-]/g, ''));
   return isNaN(n) ? null : n;
 }
 
-// =========================
-// Helpers to extract fields
-// =========================
-function extractBetween(text, startLabel, stopLabels = []) {
-  const idx = text.toLowerCase().indexOf(startLabel.toLowerCase());
-  if (idx === -1) return '';
-
-  let substr = text.slice(idx + startLabel.length).trim();
-
-  let stopIndex = substr.length;
-  for (const stop of stopLabels) {
-    const i = substr.toLowerCase().indexOf(stop.toLowerCase());
-    if (i !== -1 && i < stopIndex) stopIndex = i;
-  }
-
-  return substr.slice(0, stopIndex).trim();
+/**
+ * Extract the TD text that follows a TH containing a given label (case-insensitive).
+ * This faithfully reproduces what `th:contains("X") + td` would capture, but is robust.
+ */
+function getByThLabel($, $ctx, label) {
+  let value = '';
+  const target = label.toLowerCase();
+  $ctx.find('th').each((_, el) => {
+    const thText = clean($(el).text()).toLowerCase();
+    if (thText.includes(target)) {
+      const td = $(el).next('td');
+      if (td && td.length) {
+        value = clean(td.text());
+      }
+      return false; // break
+    }
+  });
+  return value;
 }
 
-/** Flexible date capture across common formats */
-function extractDateFlexible(text) {
-  const patterns = [
-    /Date\s*:?\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)\s*\w*)?)/i,
-    /Auction Date\s*:?\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)\s*\w*)?)/i,
-    /Sale Date\s*:?\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)\s*\w*)?)/i,
-    /Date Sold\s*:?\s*([0-9]{2}\/[0-9]{2}\/[0-9]{4}(?:\s+[0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)\s*\w*)?)/i,
-    /([0-9]{4}-[0-9]{2}-[0-9]{2}(?:\s+[0-9]{2}:[0-9]{2}(?::[0-9]{2})?\s*(?:AM|PM)?\s*\w*)?)/i,
-  ];
-  for (const re of patterns) {
-    const m = text.match(re);
-    if (m && m[1]) return m[1].trim();
-  }
-  return '';
-}
+/**
+ * Best-effort detection of auction realm (top page or iframe).
+ * Returns { dom } where `dom` is a Page or Frame exposing waitForSelector/content/evaluate APIs.
+ */
+async function resolveAuctionRealm(page) {
+  // Quick try at top-level
+  try {
+    await page.waitForSelector('div[aid]', { timeout: 2500 });
+    return { dom: page };
+  } catch (_) {}
 
-/** Currency after label: optional colon, optional cents */
-function extractAmountAfter(text, label) {
-  const regex = new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:?' + '\\s*\\$[\\d,]+(?:\\.\\d{2})?', 'i');
-  const m = text.match(regex);
-  if (!m) return '';
-  const moneyMatch = m[0].match(/\$[\d,]+(?:\.\d{2})?/);
-  return moneyMatch ? moneyMatch[0] : '';
-}
+  // Wait for iframes, then search each frame
+  try {
+    await page.waitForSelector('iframe', { timeout: 60000 });
+  } catch (_) {}
 
-/** Proximity-based currency near any of the labels (within N chars) */
-function extractCurrencyNearLabels(text, labels, window = 60) {
-  const lower = text.toLowerCase();
-  for (const label of labels) {
-    const idx = lower.indexOf(label.toLowerCase());
-    if (idx !== -1) {
-      const slice = text.slice(idx, Math.min(text.length, idx + window));
-      const m = slice.match(/\$[\d,]+(?:\.\d{2})?/);
-      if (m) return m[0];
+  let candidateFrame = null;
+  for (let attempt = 0; attempt < 20 && !candidateFrame; attempt++) {
+    const frames = page.frames();
+    for (const f of frames) {
+      try {
+        await f.waitForSelector('div[aid], #BID_WINDOW_CONTAINER', { timeout: 1500 });
+        candidateFrame = f;
+        break;
+      } catch (_) {}
+    }
+    if (!candidateFrame) {
+      await page.waitForTimeout(500);
     }
   }
-  return '';
+
+  if (candidateFrame) return { dom: candidateFrame };
+
+  // Fallback to a known container at top-level
+  try {
+    await page.waitForSelector('#BID_WINDOW_CONTAINER', { timeout: 3000 });
+    return { dom: page };
+  } catch (_) {}
+
+  throw new Error('Could not locate auction content in page or iframes.');
 }
 
-// =========================
-// Multi-label sale price extractor (robust)
-// =========================
-function extractSalePrice(text) {
-  const labels = [
-    'Amount',
-    'Sale Price',
-    'Sold Price',
-    'Sold Amount',
-    'Sold Amount/Sold Price',
-    'Winning Bid',
-    'Winning Bid Amount',
-    'Sold For',
-    'Final Bid',
-    'Final Sale Price',
-    'Winning Amount',
-    'Winning Offer',
-  ];
+/**
+ * Pager indicator: `.Head_C div:nth-of-type(3) span.PageText` => "Page X of Y"
+ */
+async function getPageIndicator(dom) {
+  try {
+    const text = await dom.$eval(
+      '.Head_C div:nth-of-type(3) span.PageText',
+      (el) => (el.innerText || el.textContent || '').trim()
+    );
+    const m = text.match(/page\s*:?\s*([0-9]+)\s+of\s+([0-9]+)/i);
+    if (m) return { current: Number(m[1]), total: Number(m[2]) };
+  } catch (_) {}
+  return null;
+}
 
-  // 1) Try strict label→amount
-  for (const label of labels) {
-    const v = extractAmountAfter(text, label);
-    if (v) return v;
+/** Next button handle: `.PageRight_HVR img`  */
+async function findNextHandle(dom) {
+  try {
+    const h = await dom.$('.PageRight_HVR img');
+    if (!h) return null;
+    const isClickable = await dom.evaluate((el) => {
+      const style = window.getComputedStyle(el);
+      const hidden =
+        style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0';
+      const p = el.closest('.PageRight_HVR');
+      const cls = (p ? p.getAttribute('class') : el.getAttribute('class') || '').toLowerCase();
+      const ariaDisabled = (p ? p.getAttribute('aria-disabled') : el.getAttribute('aria-disabled')) || '';
+      return !hidden && !cls.includes('disabled') && ariaDisabled !== 'true';
+    }, h);
+    return isClickable ? h : null;
+  } catch (_) {
+    return null;
   }
-  // 2) Try proximity-based fallback
-  const near = extractCurrencyNearLabels(text, labels, 80);
-  if (near) return near;
-
-  // 3) Last resort: pick the largest currency in the block (often sale price)
-  const allMoney = [...text.matchAll(/\$[\d,]+(?:\.\d{2})?/g)].map(m => m[0]);
-  if (allMoney.length) {
-    const sorted = allMoney
-      .map(s => ({ s, n: parseCurrency(s) }))
-      .filter(x => x.n !== null)
-      .sort((a, b) => b.n - a.n);
-    return sorted.length ? sorted[0].s : '';
-  }
-  return '';
 }
 
-// =========================
-// Schema validation
-// =========================
-function validateRow(row) {
-  return (
-    row.caseNumber &&
-    row.parcelId &&
-    row.openingBid &&
-    row.salePrice &&
-    row.assessedValue
-  );
-}
-
-// =========================
-// Build label→value map from container nodes
-// =========================
-function buildLabelValueMap($container) {
-  const map = {};
-  const textNodes = [];
-
-  $container.find('*').each((_, el) => {
-    const t = $container.find(el).text().replace(/\s+/g, ' ').trim();
-    if (t) textNodes.push(t);
+/** Wait for the list (`div[aid]`) to change after a Next click */
+async function waitForListChange(dom) {
+  const priorFirstRowHtml = await dom.evaluate(() => {
+    const first = document.querySelector('div[aid]');
+    return first ? first.innerHTML : '';
   });
 
-  // Heuristic: split on common separators
-  for (const t of textNodes) {
-    const parts = t.split(/[:|-]\s*/);
-    if (parts.length >= 2) {
-      const label = parts[0].trim().toLowerCase();
-      const value = parts.slice(1).join(':').trim();
-      if (label && value) {
-        map[label] = value;
-      }
-    }
+  await Promise.race([
+    dom.waitForNavigation({ waitUntil: 'networkidle0', timeout: 15000 }).catch(() => {}),
+    (async () => {
+      await dom.waitForFunction(
+        (prev) => {
+          const first = document.querySelector('div[aid]');
+          return first && first.innerHTML !== prev;
+        },
+        { timeout: 20000 },
+        priorFirstRowHtml
+      );
+    })(),
+  ]);
+
+  const maybePage = typeof dom.page === 'function' ? dom.page() : dom;
+  if (maybePage && typeof maybePage.waitForTimeout === 'function') {
+    await maybePage.waitForTimeout(400);
+  } else {
+    await new Promise((r) => setTimeout(r, 400));
   }
-  return { map, text: textNodes.join(' | ') };
 }
 
 // =========================
-// Inspect + Parse Page (SOLD only)
+// Sitemap-accurate parser (SOLD only) for div[aid] cards
+// =========================
+function parseAuctionsFromHtml_SitemapAccurate(html, pageUrl) {
+  const $ = cheerio.load(html);
+  const rows = [];
+  const relevant = [];
+
+  $('div[aid]').each((_, item) => {
+    const $item = $(item);
+
+    // Capture for diagnostics: text + attrs if it looks relevant
+    const blockText = clean($item.text());
+    if (blockText) {
+      relevant.push({
+        sourceUrl: pageUrl,
+        tag: 'div',
+        attrs: $item.attr() || {},
+        text: blockText.slice(0, 2000), // cap to keep files manageable
+      });
+    }
+
+    // Map selectors from your sitemap to robust extractors
+    const caseNumber = getByThLabel($, $item, 'Cause Number:');
+    const assessedValue = getByThLabel($, $item, 'Adjudged Value:');
+    const openingBid = getByThLabel($, $item, 'Est. Min. Bid:');
+    const parcelId = getByThLabel($, $item, 'Account Number:');
+    const streetAddress = getByThLabel($, $item, 'Property Address:');
+
+    // The sitemap used a positional selector for city/state/zip
+    let cityStateZip = clean($item.find('tr:nth-of-type(8) td').first().text());
+    // fallback if empty (some templates differ)
+    if (!cityStateZip) {
+      cityStateZip =
+        getByThLabel($, $item, 'City, State Zip:') ||
+        getByThLabel($, $item, 'City/State/Zip:') ||
+        '';
+    }
+
+    const status = clean($item.find('div.ASTAT_MSGA').first().text());
+    const soldAmount = clean($item.find('div.ASTAT_MSGD').first().text());
+
+    // SOLD-only filter
+    const statusLower = status.toLowerCase();
+    const looksSold =
+      statusLower.includes('sold') ||
+      statusLower.includes('sold amount') ||
+      (!!soldAmount && parseCurrency(soldAmount) !== null);
+
+    if (!looksSold) return; // skip non-sold cards
+
+    // Build row consistent with your downstream usage
+    const openingBidNum = parseCurrency(openingBid);
+    const assessedNum = parseCurrency(assessedValue);
+    const salePriceNum = parseCurrency(soldAmount);
+
+    const row = {
+      sourceUrl: pageUrl,
+      auctionStatus: 'Sold',
+      auctionType: 'Tax Sale',
+      caseNumber: clean(caseNumber),
+      parcelId: clean(parcelId),
+      propertyAddress: clean(streetAddress),
+      openingBid: clean(openingBid),
+      salePrice: clean(soldAmount), // sale price is the sold amount in this template
+      assessedValue: clean(assessedValue),
+      auctionDate: '', // not present on these cards; left blank unless found elsewhere
+      cityStateZip: clean(cityStateZip),
+      status: clean(status),
+    };
+
+    // validation similar to your original
+    const valid =
+      row.caseNumber &&
+      row.parcelId &&
+      row.openingBid &&
+      row.salePrice &&
+      row.assessedValue;
+
+    if (!valid) return;
+
+    row.surplusAssessVsSale =
+      assessedNum !== null && salePriceNum !== null ? assessedNum - salePriceNum : null;
+
+    row.surplusSaleVsOpen =
+      salePriceNum !== null && openingBidNum !== null ? salePriceNum - openingBidNum : null;
+
+    row.meetsMinimumSurplus =
+      row.surplusAssessVsSale !== null && row.surplusAssessVsSale >= MIN_SURPLUS ? 'Yes' : 'No';
+
+    rows.push(row);
+  });
+
+  return { rows, relevant };
+}
+
+// =========================
+// Inspect + Parse Page (SOLD only) with iframe + pagination support
 // =========================
 async function inspectAndParse(browser, url) {
   const page = await browser.newPage();
@@ -203,11 +300,11 @@ async function inspectAndParse(browser, url) {
   const seen = new Set();
 
   try {
-    // Anti-bot hardening
+    // Anti-bot & headers
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
         'AppleWebKit/537.36 (KHTML, like Gecko) ' +
-        'Chrome/120.0.0.0 Safari/537.36'
+        'Chrome/121.0.0.0 Safari/537.36'
     );
     await page.setExtraHTTPHeaders({
       'Accept-Language': 'en-US,en;q=0.9',
@@ -218,140 +315,82 @@ async function inspectAndParse(browser, url) {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
-    let pageIndex = 1;
-    while (true) {
-      const pageUrl = pageIndex === 1 ? url : `${url}&page=${pageIndex}`;
-      console.log(`🌐 Visiting ${pageUrl}`);
-      await page.goto(pageUrl, { waitUntil: 'networkidle2', timeout: 120000 });
-      await new Promise(r => setTimeout(r, 8000));
+    // Normalize any &amp; in URL (in case)
+    const normalizedUrl = url.replace(/&amp;/g, '&');
 
-      const html = await page.content();
-      if (
-        html.includes('403 Forbidden') ||
-        html.includes('Access Denied') ||
-        html.toLowerCase().includes('forbidden')
-      ) {
-        throw new Error('Blocked by target website (403)');
+    await page.goto(normalizedUrl, { waitUntil: 'networkidle0', timeout: 120000 });
+
+    // Resolve target DOM (page or iframe)
+    const { dom } = await resolveAuctionRealm(page);
+
+    // Wait for list
+    await dom.waitForSelector('div[aid]', { timeout: 60000 });
+
+    // Track pagination using indicator and Next button
+    let indicator = await getPageIndicator(dom);
+    let currentPage = indicator?.current || 1;
+    const totalPagesKnown = indicator?.total || null;
+
+    let pageCounter = 0;
+    while (pageCounter < MAX_PAGES) {
+      console.log(`📄 Parsing page ${currentPage}...`);
+
+      const html = await dom.content();
+      const { rows, relevant } = parseAuctionsFromHtml_SitemapAccurate(html, normalizedUrl);
+
+      // Dedupe and collect
+      for (const row of rows) {
+        const key = `${row.sourceUrl}|${row.caseNumber}|${row.parcelId}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          allParsedRows.push(row);
+        }
+      }
+      allRelevantElements.push(...relevant);
+
+      // Stop if known last page
+      indicator = await getPageIndicator(dom);
+      if (indicator && indicator.total && indicator.current >= indicator.total) {
+        console.log(`🛑 Reached last page (${indicator.current} of ${indicator.total}).`);
+        break;
       }
 
-      const $ = cheerio.load(html);
+      // Find & click Next
+      const nextHandle = await findNextHandle(dom);
+      if (!nextHandle) {
+        console.log('🛑 Next button not found (.PageRight_HVR img). End of pagination.');
+        break;
+      }
 
-      // (1) FILTER: auction-relevant elements ONLY (for diagnostics)
-      const auctionTextRegex =
-        /(\$\d{1,3}(,\d{3})+)|(\bAPN\b)|(\bParcel\b)|(\bAuction\b)|(\bCase\b)|(\bWinning Bid\b)|(\bSale Price\b)/i;
+      console.log('➡️ Moving to next page...');
+      try {
+        await dom.evaluate((el) => el.scrollIntoView({ block: 'center', behavior: 'instant' }), nextHandle);
+      } catch (_) {}
 
-      $('*').each((_, el) => {
-        const tag = el.tagName;
-        const text = $(el).text().replace(/\s+/g, ' ').trim();
-        const attrs = el.attribs || {};
-        if (text && auctionTextRegex.test(text)) {
-          allRelevantElements.push({ sourceUrl: pageUrl, tag, text, attrs });
+      await Promise.allSettled([
+        dom.waitForNavigation({ waitUntil: 'networkidle0', timeout: 15000 }),
+        nextHandle.click(),
+      ]);
+
+      try {
+        await waitForListChange(dom);
+      } catch (_) {
+        // fallback: check if indicator progressed
+        const after = await getPageIndicator(dom);
+        if (!after || after.current === currentPage) {
+          console.log('⚠️ Did not detect list change after Next. Stopping.');
+          break;
         }
-      });
+      }
 
-      // (2) CARD-BASED AUCTION PARSER (SOLD ONLY)
-      $('div').each((_, container) => {
-        const $container = $(container);
-        const blockText = $container.text().replace(/\s+/g, ' ').trim();
-        if (!/Auction Sold/i.test(blockText)) return;
-
-        const { map: kv, text: joinedText } = buildLabelValueMap($container);
-
-        const auctionStatus = 'Sold';
-        const auctionType =
-          extractBetween(blockText, 'Auction Type:', ['Case #', 'Certificate', 'Opening Bid']) ||
-          (kv['auction type'] || '');
-
-        const rawCase =
-          extractBetween(blockText, 'Case #:', ['Certificate', 'Opening Bid']) ||
-          (kv['case #'] || kv['case'] || '');
-        const caseNumber = rawCase.split(/\s+/)[0].trim();
-
-        const openingBidStr =
-          extractAmountAfter(blockText, 'Opening Bid') ||
-          extractAmountAfter(joinedText, 'Opening Bid') ||
-          (kv['opening bid'] && kv['opening bid'].match(/\$[\d,]+(?:\.\d{2})?/)?.[0]) ||
-          '';
-
-        const assessedValueStr =
-          extractBetween(blockText, 'Assessed Value:', []) ||
-          (kv['assessed value'] || '');
-        const assessedMoneyMatch = assessedValueStr.match(/\$[\d,]+(?:\.\d{2})?/);
-        const assessedValue = assessedMoneyMatch ? assessedMoneyMatch[0] : '';
-
-        const salePriceStr =
-          extractSalePrice(blockText) ||
-          extractSalePrice(joinedText) ||
-          (kv['sale price'] && kv['sale price'].match(/\$[\d,]+(?:\.\d{2})?/)?.[0]) ||
-          (kv['sold price'] && kv['sold price'].match(/\$[\d,]+(?:\.\d{2})?/)?.[0]) ||
-          (kv['winning bid'] && kv['winning bid'].match(/\$[\d,]+(?:\.\d{2})?/)?.[0]) ||
-          (kv['sold amount'] && kv['sold amount'].match(/\$[\d,]+(?:\.\d{2})?/)?.[0]) ||
-          '';
-
-        const parcelRaw =
-          extractBetween(blockText, 'Parcel ID:', ['Property Address', 'Assessed Value']) ||
-          (kv['parcel id'] || kv['apn'] || '');
-        const parcelId = parcelRaw.split('|')[0].trim();
-
-        const propertyAddress =
-          extractBetween(blockText, 'Property Address:', ['Assessed Value']) ||
-          (kv['property address'] || kv['address'] || '');
-
-        const auctionDate =
-          extractDateFlexible(blockText) ||
-          extractDateFlexible(joinedText) ||
-          (kv['auction date'] || kv['date sold'] || kv['sale date'] || kv['date'] || '');
-
-        const row = {
-          sourceUrl: pageUrl,
-          auctionStatus,
-          auctionType: auctionType || 'Tax Sale',
-          caseNumber,
-          parcelId,
-          propertyAddress,
-          openingBid: openingBidStr,
-          salePrice: salePriceStr,
-          assessedValue,
-          auctionDate,
-        };
-
-        if (!validateRow(row)) return;
-
-        const open = parseCurrency(openingBidStr);
-        const assess = parseCurrency(assessedValue);
-        const salePrice = parseCurrency(salePriceStr);
-
-        row.surplusAssessVsSale =
-          assess !== null && salePrice !== null ? assess - salePrice : null;
-
-        row.surplusSaleVsOpen =
-          salePrice !== null && open !== null ? salePrice - open : null;
-
-        row.meetsMinimumSurplus =
-          row.surplusAssessVsSale !== null &&
-          row.surplusAssessVsSale >= MIN_SURPLUS
-            ? 'Yes'
-            : 'No';
-
-        const dedupeKey = `${pageUrl}|${caseNumber}|${parcelId}`;
-        if (seen.has(dedupeKey)) return;
-        seen.add(dedupeKey);
-
-        allParsedRows.push(row);
-      });
-
-      console.log(`📦 Page ${pageIndex}: Elements ${allRelevantElements.length} | SOLD auctions so far ${allParsedRows.length}`);
-
-      // Detect if there is a "Next" link
-      const nextLink = $('a').filter((_, el) => {
-        const txt = $(el).text().trim().toLowerCase();
-        return txt === 'next' || txt.includes('next');
-      }).attr('href');
-
-      if (!nextLink) break;
-      pageIndex++;
-      if (pageIndex > 50) break; // safety cap
+      indicator = await getPageIndicator(dom);
+      currentPage = indicator?.current || currentPage + 1;
+      pageCounter += 1;
     }
+
+    console.log(
+      `📦 Parsed SOLD auctions so far: ${allParsedRows.length}`
+    );
 
     return { relevantElements: allRelevantElements, parsedRows: allParsedRows };
   } catch (err) {
@@ -368,15 +407,19 @@ async function inspectAndParse(browser, url) {
 (async () => {
   console.log('📥 Loading URLs...');
   const urls = await loadTargetUrls();
+  console.log(`🔗 Got ${urls.length} URL(s) to process.`);
 
   const browser = await puppeteer.launch({
-    headless: 'new',
+    headless: true, // set false locally to observe
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-blink-features=AutomationControlled',
       '--ignore-certificate-errors',
+      '--disable-gpu',
+      '--single-process',
+      '--no-zygote',
     ],
   });
 
@@ -428,7 +471,7 @@ async function inspectAndParse(browser, url) {
 
   if (errors.length) {
     fs.writeFileSync(OUTPUT_ERRORS_FILE, JSON.stringify(errors, null, 2));
-    console.log(`⚠️ Saved ${errors.length} errors → ${OUTPUT_ERRORS_FILE}`);
+    console.log(`⚠️ Saved ${errors.length} error(s) → ${OUTPUT_ERRORS_FILE}`);
   }
 
   console.log(`✅ Saved ${allElements.length} elements → ${OUTPUT_ELEMENTS_FILE}`);
