@@ -1,7 +1,3 @@
-// webInspector.cjs (page intelligence + auction parser for SOLD cards only)
-// Requires:
-// npm install puppeteer cheerio googleapis
-
 const puppeteer = require('puppeteer');
 const cheerio = require('cheerio');
 const fs = require('fs');
@@ -20,16 +16,33 @@ const OUTPUT_ROWS_FILE = 'parsed-auctions.json';
 const OUTPUT_ERRORS_FILE = 'errors.json';
 const OUTPUT_SUMMARY_FILE = 'summary.json';
 
+// Your ONLY surplus formula:
 const MIN_SURPLUS = 25000;
-const MAX_PAGES = 50; // safety stop per URL
+const MAX_PAGES = 50;
 
 // =========================
-// Sleep helper (cross-puppeteer)
+// Utilities
 // =========================
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+function clean(text) {
+  return text ? text.replace(/\s+/g, ' ').trim() : '';
+}
+
+function parseCurrency(str) {
+  if (!str) return null;
+  const n = parseFloat(str.replace(/[^0-9.-]/g, ''));
+  return isNaN(n) ? null : n;
+}
+
+// Normalize ampersands
+function normalizeAmpersands(u) {
+  return u
+    .replace(/&amp;amp;/gi, '&amp;')
+    .replace(/&amp;/gi, '&')
+    .replace(/%26amp%3B/gi, '&');
+}
 
 // =========================
-// GOOGLE AUTH
+// Google Sheets Auth
 // =========================
 const auth = new google.auth.GoogleAuth({
   keyFile: SERVICE_ACCOUNT_FILE,
@@ -38,16 +51,8 @@ const auth = new google.auth.GoogleAuth({
 const sheets = google.sheets({ version: 'v4', auth });
 
 // =========================
-// Load URLs
+// Load URLs from sheet
 // =========================
-function normalizeAmpersands(u) {
-  // Normalize & encodings commonly seen coming from Sheets
-  return u
-    .replace(/&amp;amp;/gi, '&amp;')
-    .replace(/&amp;/gi, '&')
-    .replace(/%26amp%3B/gi, '&');
-}
-
 async function loadTargetUrls() {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
@@ -61,122 +66,93 @@ async function loadTargetUrls() {
     .map(normalizeAmpersands);
 }
 
-// =========================
-// Utility helpers
-// =========================
-function clean(text) {
-  if (!text) return '';
-  return text.replace(/\s+/g, ' ').trim();
-}
+/* =========================
+   PAGE SCOPES & PAGINATION
+   ========================= */
 
-function parseCurrency(str) {
-  if (!str) return null;
-  const n = parseFloat(str.replace(/[^0-9.-]/g, ''));
-  return isNaN(n) ? null : n;
-}
-
-/**
- * Extract the TD text that follows a TH containing a given label (case-insensitive).
- */
-function getByThLabel($, $ctx, label) {
-  let value = '';
-  const target = clean(label).toLowerCase().replace(/:\s*$/, '');
-  $ctx.find('th').each((_, el) => {
-    const thText = clean($(el).text()).toLowerCase().replace(/:\s*$/, '');
-    if (thText.includes(target)) {
-      const td = $(el).next('td');
-      if (td && td.length) value = clean(td.text());
-      return false; // break
-    }
-  });
-  return value;
-}
-
-/**
- * Wait for the list to exist and return an object with helpers scoped to the
- * RealForeclose body container (#BID_WINDOW_CONTAINER).
- */
 async function getPageScopes(page) {
-  // Ensure the main auction container exists
+  // Ensure main auction container exists
   await page.waitForSelector('#BID_WINDOW_CONTAINER', { timeout: 60000 });
-
-  // Ensure at least one auction block exists
   await page.waitForSelector('#BID_WINDOW_CONTAINER div[aid]', { timeout: 60000 });
 
-  // Return helpers that operate strictly inside BID_WINDOW_CONTAINER
   return {
+    // HTML snapshot of first auction block
     async firstRowHtml() {
       return await page.$eval('#BID_WINDOW_CONTAINER', (root) => {
         const first = root.querySelector('div[aid]');
         return first ? first.innerHTML : '__NONE__';
       });
     },
+
+    // Detect if list changed (pagination worked)
     async waitForListChange(timeoutMs = 25000) {
       const start = Date.now();
       const prior = await this.firstRowHtml();
       while (Date.now() - start < timeoutMs) {
-        try {
-          const now = await this.firstRowHtml();
-          if (now !== prior) return true;
-        } catch {}
+        const now = await this.firstRowHtml().catch(() => null);
+        if (now && now !== prior) return true;
         await new Promise(r => setTimeout(r, 400));
       }
       return false;
     },
-    /**
-     * Return handles to the pager bar and elements:
-     * - bar:   #BID_WINDOW_CONTAINER .Head_C > div:nth-of-type(3)
-     * - input: first text/number input inside the bar
-     * - text:  span.PageText (for "of N")
-     * - next:  span.PageRight > img  (your recording's target)
-     */
+
+    // Locate pagination controls inside the BID_WINDOW_CONTAINER
     async getPagerPieces() {
       const bar = await page.$('#BID_WINDOW_CONTAINER .Head_C > div:nth-of-type(3)');
       if (!bar) return { bar: null, input: null, text: null, next: null };
 
       const input = await bar.$("input[type='text'], input[type='number'], input:not([type])");
       const text = await bar.$('span.PageText');
-      // Prefer the exact selector you recorded
+
       let next = await bar.$('span.PageRight > img');
       if (!next) {
-        // Fallbacks, just in case markup varies slightly
-        next = await bar.$('.PageRight_HVR > img') || await bar.$('.PageRight img') || await bar.$('img[alt*="next" i], img[title*="next" i]');
+        next =
+          await bar.$('.PageRight_HVR > img') ||
+          await bar.$('.PageRight img') ||
+          await bar.$('img[alt*="next" i], img[title*="next" i]');
       }
 
       return { bar, input, text, next };
     },
-    /**
-     * Parse current/total page from the pager:
-     * - current: value from <input>
-     * - total: from span.PageText (e.g., "of 5")
-     */
+
+    // Extract page number indicator
     async readIndicator(pieces) {
-      if (!pieces || !pieces.bar) return { current: null, total: null, raw: '' };
+      if (!pieces || !pieces.bar) {
+        return { current: null, total: null, raw: '' };
+      }
+
       const [current, total, raw] = await page.evaluate((bar) => {
         const inp = bar.querySelector('input');
         const txt = bar.querySelector('span.PageText');
+
         let cur = null;
         let tot = null;
+
         if (inp && /^\d+$/.test((inp.value || '').trim())) {
           cur = Number((inp.value || '').trim());
         }
-        const rawText = (txt ? (txt.innerText || txt.textContent || '') : '').replace(/\s+/g, ' ').trim();
-        // Expect formats like "page of 5" or just "of 5"
-        const m = rawText.match(/\bof\s*([0-9]+)/i);
+
+        const rawText = txt ? (txt.innerText || txt.textContent || '') : '';
+        const norm = rawText.replace(/\s+/g, ' ').trim();
+
+        const m = norm.match(/\bof\s*([0-9]+)/i);
         if (m) tot = Number(m[1]);
-        return [cur, tot, rawText];
+
+        return [cur, tot, norm];
       }, pieces.bar);
+
       return { current, total, raw };
     },
+
+    // Method 1: enter page number manually
     async setPageInputAndGo(pieces, nextIndex) {
       if (!pieces || (!pieces.input && !pieces.bar)) return false;
 
       let acted = false;
+
       if (pieces.input) {
         try {
           await pieces.input.focus();
-        } catch {}
-        try {
           await page.evaluate((el, val) => {
             el.value = String(val);
             el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -186,15 +162,16 @@ async function getPageScopes(page) {
         } catch {}
       }
 
-      // Try an explicit "Go" control if one exists in the bar
       if (acted) {
+        // Attempt to click any element that looks like a "Go"
         const go = await pieces.bar.$('button, input[type="submit"], input[type="button"], a, span');
         if (go) {
-          const looksGo = await page.evaluate((el) => {
-            const t = ((el.innerText || el.textContent || el.value || el.getAttribute('title') || '') + '').toLowerCase().trim();
+          const looksGo = await page.evaluate(el => {
+            const text = (el.innerText || el.textContent || el.value || '').toLowerCase();
             const cls = (el.getAttribute('class') || '').toLowerCase();
-            return t === 'go' || t.includes('go') || cls.includes('go');
+            return text === 'go' || text.includes('go') || cls.includes('go');
           }, go);
+
           if (looksGo) {
             try {
               await page.evaluate(el => {
@@ -207,37 +184,50 @@ async function getPageScopes(page) {
         }
       }
 
-      // Otherwise press Enter in the page (top-level keyboard events bubble)
+      // Fallback: press Enter
       if (acted) {
-        try { await page.keyboard.press('Enter'); return true; } catch {}
+        try {
+          await page.keyboard.press('Enter');
+          return true;
+        } catch {}
       }
 
       return false;
     },
+
+    // Method 2: use the Right Arrow
     async clickNextArrow(pieces) {
       if (!pieces || !pieces.next) return false;
+
       try {
         await page.evaluate(el => {
           el.scrollIntoView({ block: 'center', behavior: 'instant' });
         }, pieces.next);
       } catch {}
+
       try {
-        // Click the image or its nearest clickable ancestor
         await page.evaluate(el => {
-          const clickable = el.closest('a, button, input[type="submit"], input[type="button"]');
+          const clickable = el.closest('a, button, input[type="button"]');
           (clickable || el).click();
         }, pieces.next);
         return true;
       } catch {
-        try { await pieces.next.click({ delay: 20 }); return true; } catch { return false; }
+        try {
+          await pieces.next.click({ delay: 20 });
+          return true;
+        } catch {
+          return false;
+        }
       }
     },
   };
 }
 
-// =========================
-// Parser (SOLD-only) – sitemap-accurate mapping on div[aid]
-// =========================
+/* =========================
+   PARSER — SOLD ONLY
+   (Single Surplus Formula)
+   ========================= */
+
 function parseAuctionsFromHtml(html, pageUrl) {
   const $ = cheerio.load(html);
   const rows = [];
@@ -246,7 +236,7 @@ function parseAuctionsFromHtml(html, pageUrl) {
   $('#BID_WINDOW_CONTAINER div[aid]').each((_, item) => {
     const $item = $(item);
 
-    // record relevant block for diagnostics
+    // record relevant block for debugging
     const blockText = clean($item.text());
     if (blockText) {
       relevant.push({
@@ -257,33 +247,37 @@ function parseAuctionsFromHtml(html, pageUrl) {
       });
     }
 
-    const caseNumber    = getByThLabel($, $item, 'Cause Number');
-    const assessedValue = getByThLabel($, $item, 'Adjudged Value');
-    const openingBid    = getByThLabel($, $item, 'Est. Min. Bid');
-    const parcelId      = getByThLabel($, $item, 'Account Number');
+    // Extract fields
+    const caseNumber = getByThLabel($, $item, 'Cause Number');
+    const openingBid = getByThLabel($, $item, 'Est. Min. Bid');
+    const parcelId = getByThLabel($, $item, 'Account Number');
     const streetAddress = getByThLabel($, $item, 'Property Address');
 
-    // city/state/zip – template sometimes uses row order
-    let cityStateZip = clean($item.find('tr:nth-of-type(8) td').first().text());
-    if (!cityStateZip) {
-      cityStateZip =
-        getByThLabel($, $item, 'City, State Zip') ||
-        getByThLabel($, $item, 'City/State/Zip') ||
-        '';
-    }
+    const assessedValue = getByThLabel($, $item, 'Adjudged Value'); 
+    // (kept for record only, no longer used in surplus)
 
-    const status     = clean($item.find('div.ASTAT_MSGA').first().text());
+    // City/State/Zip
+    let cityStateZip =
+      clean($item.find('tr:nth-of-type(8) td').first().text()) ||
+      getByThLabel($, $item, 'City, State Zip') ||
+      getByThLabel($, $item, 'City/State/Zip') ||
+      '';
+
+    const status = clean($item.find('div.ASTAT_MSGA').first().text());
     const soldAmount = clean($item.find('div.ASTAT_MSGD').first().text());
 
+    // Determine sold status
     const looksSold =
       status.toLowerCase().includes('sold') ||
-      (!!soldAmount && parseCurrency(soldAmount) !== null);
+      (soldAmount && parseCurrency(soldAmount) !== null);
+
     if (!looksSold) return;
 
+    // Convert to numbers
+    const salePriceNum = parseCurrency(soldAmount);
     const openingBidNum = parseCurrency(openingBid);
-    const assessedNum   = parseCurrency(assessedValue);
-    const salePriceNum  = parseCurrency(soldAmount);
 
+    // Main row object
     const row = {
       sourceUrl: pageUrl,
       auctionStatus: 'Sold',
@@ -299,22 +293,28 @@ function parseAuctionsFromHtml(html, pageUrl) {
       status: clean(status),
     };
 
+    // Validate essential fields
     const valid =
       row.caseNumber &&
       row.parcelId &&
       row.openingBid &&
-      row.salePrice &&
-      row.assessedValue;
+      row.salePrice;
+
     if (!valid) return;
 
-    row.surplusAssessVsSale =
-      assessedNum !== null && salePriceNum !== null ? assessedNum - salePriceNum : null;
+    // ============================
+    // NEW SINGLE SURPLUS FORMULA
+    // Surplus = Sale Price – Opening Bid
+    // ============================
+    if (salePriceNum !== null && openingBidNum !== null) {
+      row.surplus = salePriceNum - openingBidNum;
+    } else {
+      row.surplus = null;
+    }
 
-    row.surplusSaleVsOpen =
-      salePriceNum !== null && openingBidNum !== null ? salePriceNum - openingBidNum : null;
-
+    // Flag if surplus meets threshold
     row.meetsMinimumSurplus =
-      row.surplusAssessVsSale !== null && row.surplusAssessVsSale >= MIN_SURPLUS ? 'Yes' : 'No';
+      row.surplus !== null && row.surplus >= MIN_SURPLUS ? 'Yes' : 'No';
 
     rows.push(row);
   });
@@ -322,9 +322,11 @@ function parseAuctionsFromHtml(html, pageUrl) {
   return { rows, relevant };
 }
 
-// =========================
-// Inspect + Parse Page (SOLD only) – with pager clicking as per your recording
-// =========================
+/* =========================
+   INSPECT + PARSE PAGE
+   (Paginated SOLD-only scraping)
+   ========================= */
+
 async function inspectAndParse(browser, url) {
   const page = await browser.newPage();
   page.setDefaultNavigationTimeout(120000);
@@ -334,16 +336,15 @@ async function inspectAndParse(browser, url) {
   const seen = new Set();
 
   try {
-    // Anti-bot hardening
+    // Anti-bot headers
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
-        'AppleWebKit/537.36 (KHTML, like Gecko) ' +
-        'Chrome/121.0.0.0 Safari/537.36'
+      'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+      'Chrome/121.0.0.0 Safari/537.36'
     );
     await page.setExtraHTTPHeaders({
       'Accept-Language': 'en-US,en;q=0.9',
-      Accept:
-        'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
     });
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
@@ -352,15 +353,17 @@ async function inspectAndParse(browser, url) {
     const normalizedUrl = normalizeAmpersands(url);
     await page.goto(normalizedUrl, { waitUntil: 'networkidle2', timeout: 120000 });
 
-    // Get scoped helpers for the RealForeclose body container
+    // Utilities scoped to BID_WINDOW_CONTAINER
     const scope = await getPageScopes(page);
 
     let pagesVisited = 0;
+
     while (pagesVisited < MAX_PAGES) {
-      // Parse current page
-      const html = await page.content(); // includes #BID_WINDOW_CONTAINER
+      // Parse current page’s content
+      const html = await page.content();
       const { rows, relevant } = parseAuctionsFromHtml(html, normalizedUrl);
 
+      // Dedupe
       for (const row of rows) {
         const key = `${row.sourceUrl}|${row.caseNumber}|${row.parcelId}`;
         if (!seen.has(key)) {
@@ -368,20 +371,21 @@ async function inspectAndParse(browser, url) {
           allParsedRows.push(row);
         }
       }
-      allRelevantElements.push(...relevant);
 
+      allRelevantElements.push(...relevant);
       console.log(`   ➜ SOLD rows so far: ${allParsedRows.length}`);
 
-      // Identify pager pieces inside BID_WINDOW_CONTAINER
+      // Read pagination controls
       const pieces = await scope.getPagerPieces();
       if (!pieces.bar) {
-        console.log('🛑 Pager bar not found (Head_C third div). Ending.');
+        console.log('🛑 Pager bar not found — stopping.');
         break;
       }
 
       const indicator = await scope.readIndicator(pieces);
       const current = indicator.current || (pagesVisited + 1);
-      const total   = indicator.total || null;
+      const total = indicator.total || null;
+
       if (total && current >= total) {
         console.log(`🛑 Reached last page (${current}/${total}).`);
         break;
@@ -389,50 +393,56 @@ async function inspectAndParse(browser, url) {
 
       const nextIndex = current + 1;
 
-      // Try input/set + Go/Enter (some tenants require this)
+      // Method 1: set page number manually
       const acted = await scope.setPageInputAndGo(pieces, nextIndex);
       if (acted) {
         const changed = await scope.waitForListChange(30000);
         if (changed) {
-          pagesVisited += 1;
+          pagesVisited++;
           continue;
         }
       }
 
-      // Click the right arrow image (your recording's selector)
-      if (pieces.next) {
-        console.log('➡️ Clicking pager right arrow (span.PageRight > img)...');
-        const clicked = await scope.clickNextArrow(pieces);
-        if (clicked) {
-          const changed = await scope.waitForListChange(30000);
-          if (changed) {
-            pagesVisited += 1;
-            continue;
-          }
+      // Method 2: click "next" arrow
+      console.log('➡️ Clicking pager right arrow...');
+      const clicked = await scope.clickNextArrow(pieces);
+      if (clicked) {
+        const changed = await scope.waitForListChange(30000);
+        if (changed) {
+          pagesVisited++;
+          continue;
         }
       }
 
-      // If neither action changed the list, stop to avoid looping
-      console.log('🛑 No list change after pager actions. Ending.');
+      console.log('🛑 No list change detected — stopping.');
       break;
     }
 
-    return { relevantElements: allRelevantElements, parsedRows: allParsedRows };
+    return {
+      relevantElements: allRelevantElements,
+      parsedRows: allParsedRows,
+    };
+
   } catch (err) {
     console.error(`❌ Error on ${url}:`, err.message);
-    return { relevantElements: [], parsedRows: [], error: { url, message: err.message } };
+    return {
+      relevantElements: [],
+      parsedRows: [],
+      error: { url, message: err.message },
+    };
   } finally {
     await page.close();
   }
 }
 
-// =========================
-// MAIN
-// =========================
+/* =========================
+   MAIN RUNNER
+   ========================= */
+
 (async () => {
-  console.log('📥 Loading URLs...');
+  console.log('📥 Loading URLs from Google Sheets...');
   const urls = await loadTargetUrls();
-  console.log(`🔗 Got ${urls.length} URL(s) to process.`);
+  console.log(`🔗 Loaded ${urls.length} URL(s).`);
 
   const browser = await puppeteer.launch({
     headless: true,
@@ -454,10 +464,14 @@ async function inspectAndParse(browser, url) {
 
   for (const url of urls) {
     try {
+      console.log(`\n🌐 Processing → ${url}`);
       const { relevantElements, parsedRows, error } = await inspectAndParse(browser, url);
+
       allElements.push(...relevantElements);
       allRows.push(...parsedRows);
+
       if (error) errors.push(error);
+
     } catch (err) {
       console.error(`❌ Fatal error on ${url}:`, err.message);
       errors.push({ url, message: err.message });
@@ -466,15 +480,20 @@ async function inspectAndParse(browser, url) {
 
   await browser.close();
 
-  // Global dedupe
-  const uniqueMap = new Map();
+  // ============================
+  // GLOBAL DEDUPLICATION
+  // ============================
+  const unique = new Map();
   for (const row of allRows) {
     const key = `${row.sourceUrl}|${row.caseNumber}|${row.parcelId}`;
-    if (!uniqueMap.has(key)) uniqueMap.set(key, row);
+    if (!unique.has(key)) unique.set(key, row);
   }
-  const finalRows = [...uniqueMap.values()];
 
-  // Summary artifact
+  const finalRows = [...unique.values()];
+
+  // ============================
+  // SUMMARY FILE
+  // ============================
   const summary = {
     totalUrls: urls.length,
     totalElements: allElements.length,
@@ -489,7 +508,9 @@ async function inspectAndParse(browser, url) {
     },
   };
 
-  // Write artifacts
+  // ============================
+  // WRITE OUTPUT ARTIFACTS
+  // ============================
   fs.writeFileSync(OUTPUT_ELEMENTS_FILE, JSON.stringify(allElements, null, 2));
   fs.writeFileSync(OUTPUT_ROWS_FILE, JSON.stringify(finalRows, null, 2));
   fs.writeFileSync(OUTPUT_SUMMARY_FILE, JSON.stringify(summary, null, 2));
@@ -499,8 +520,8 @@ async function inspectAndParse(browser, url) {
     console.log(`⚠️ Saved ${errors.length} error(s) → ${OUTPUT_ERRORS_FILE}`);
   }
 
-  console.log(`✅ Saved ${allElements.length} elements → ${OUTPUT_ELEMENTS_FILE}`);
+  console.log(`\n✅ Saved ${allElements.length} relevant elements → ${OUTPUT_ELEMENTS_FILE}`);
   console.log(`✅ Saved ${finalRows.length} SOLD auctions → ${OUTPUT_ROWS_FILE}`);
-  console.log(`📊 Saved summary → ${OUTPUT_SUMMARY_FILE}`);
-  console.log('🏁 Done');
+  console.log(`📊 Summary saved → ${OUTPUT_SUMMARY_FILE}`);
+  console.log('🏁 Done.');
 })();
