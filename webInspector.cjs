@@ -138,88 +138,174 @@ async function resolveContentRealm(page) {
 }
 
 /**
- * Controls realm: pager indicator + next button may be top-level or a parent frame of content frame.
- * We try: same realm → parent (if frame) → top page → any frame.
- * Returns { dom } for controls.
+ * Controls realm: pager container could be in the same realm, parent frame, top page, or another frame.
+ * We scan for a visible element whose text matches /page <num> (of|/) <num>/.
+ * Returns { dom, container } where container is the pager element handle (or null).
  */
 async function resolveControlsRealm(page, contentDom) {
-  async function hasControls(realm) {
-    try {
-      await realm.waitForSelector('.Head_C div:nth-of-type(3) span.PageText', { timeout: 1200 });
-      await realm.waitForSelector('.PageRight_HVR img, .PageRight img', { timeout: 1200 });
-      return true;
-    } catch {
-      return false;
+  async function locatePagerContainer(realm) {
+    const handle = await realm.evaluateHandle(() => {
+      const isVisible = (el) => {
+        const s = getComputedStyle(el);
+        const r = el.getBoundingClientRect();
+        if (!el || !el.ownerDocument) return false;
+        return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+      };
+      const re = /\bpage\b\s*\d+\s*(?:of|\/)\s*\d+/i;
+      const nodes = Array.from(document.querySelectorAll('*')).filter(isVisible);
+      // Prefer smaller text blocks (avoid picking huge sections)
+      let best = null;
+      for (const el of nodes) {
+        const t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!t) continue;
+        if (re.test(t)) {
+          if (!best || (el.innerText || '').length < (best.innerText || '').length) {
+            best = el;
+          }
+        }
+      }
+      return best || null;
+    });
+    return handle.asElement();
+  }
+
+  // Try same realm as content
+  let container = await locatePagerContainer(contentDom);
+  if (container) return { dom: contentDom, container };
+
+  // Try parent of content frame
+  if (typeof contentDom.parentFrame === 'function') {
+    const parent = contentDom.parentFrame();
+    if (parent) {
+      container = await locatePagerContainer(parent);
+      if (container) return { dom: parent, container };
     }
   }
 
-  // 1) same realm as content
-  if (await hasControls(contentDom)) return { dom: contentDom };
+  // Try top-level page
+  container = await locatePagerContainer(page);
+  if (container) return { dom: page, container };
 
-  // 2) parent frame (if content is a Frame)
-  if (typeof contentDom.parentFrame === 'function') {
-    const parent = contentDom.parentFrame();
-    if (parent && (await hasControls(parent))) return { dom: parent };
-  }
-
-  // 3) top-level page
-  if (await hasControls(page)) return { dom: page };
-
-  // 4) any other frame
+  // Try any other frame
   for (const f of page.frames()) {
-    if (await hasControls(f)) return { dom: f };
+    container = await locatePagerContainer(f);
+    if (container) return { dom: f, container };
   }
 
-  // If controls cannot be found, fall back and pagination will gracefully end
-  return { dom: contentDom };
+  // Last resort: no container found (we'll gracefully stop pagination)
+  return { dom: contentDom, container: null };
 }
 
-/**
- * Pager indicator: `.Head_C div:nth-of-type(3) span.PageText` => "Page X of Y"
- */
-async function getPageIndicator(dom) {
+/** Read "Page X of Y" (or "page X / Y") from the given container */
+async function getPageIndicatorFromContainer(dom, container) {
+  if (!container) return null;
   try {
-    const text = await dom.$eval(
-      '.Head_C div:nth-of-type(3) span.PageText',
-      (el) => (el.innerText || el.textContent || '').trim()
-    );
-    const m = text.match(/page\s*:?\s*([0-9]+)\s+of\s+([0-9]+)/i);
-    if (m) return { current: Number(m[1]), total: Number(m[2]), raw: text };
+    const data = await dom.evaluate((el) => {
+      const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+
+      // Try to read current from a nearby input/select if present
+      let current = null;
+      const inputs = Array.from(el.querySelectorAll('input, select'))
+        .filter(n => {
+          const s = getComputedStyle(n);
+          const r = n.getBoundingClientRect();
+          return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+        });
+
+      for (const n of inputs) {
+        if (n.tagName === 'INPUT') {
+          const v = (n.value || '').trim();
+          if (/^\d+$/.test(v)) { current = Number(v); break; }
+        } else if (n.tagName === 'SELECT') {
+          let v = n.value;
+          if (!v && n.selectedIndex >= 0) v = String(n.selectedIndex + 1);
+          if (v && /^\d+$/.test(v)) { current = Number(v); break; }
+        }
+      }
+
+      // Parse "page 1 of 5" or "page 1 / 5"
+      const m = text.match(/\bpage\b\s*:?\s*([0-9]+)\s*(?:of|\/)\s*([0-9]+)/i);
+      const total = m ? Number(m[2]) : null;
+      if (current == null && m) current = Number(m[1]);
+
+      return { raw: text, current, total };
+    }, container);
+
+    if (data && (data.current || data.total)) return data;
   } catch (_) {}
   return null;
 }
 
-/** 
- * Next button handle: prefer enabled "hover" class, fallback to generic.
- * Returns { handle, disabled }
- */
-async function findNextHandle(controlsDom) {
-  let h = await controlsDom.$('.PageRight_HVR img');
-  if (!h) h = await controlsDom.$('.PageRight img');
-  if (!h) return { handle: null, disabled: true };
+/** Find Next button INSIDE the pager container */
+async function findNextInContainer(dom, container) {
+  if (!container) return { handle: null, disabled: true };
 
-  const disabled = await controlsDom.evaluate((el) => {
-    const style = window.getComputedStyle(el);
-    const hidden = style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0';
-    const box = el.getBoundingClientRect();
-    const invisible = box.width === 0 || box.height === 0;
-    // parent container often signals disabled via class
-    const p = el.closest('.PageRight_HVR, .PageRight');
-    const cls = (p ? p.getAttribute('class') : el.getAttribute('class') || '').toLowerCase();
-    const ariaDisabled = (p ? p.getAttribute('aria-disabled') : el.getAttribute('aria-disabled')) || '';
-    const looksDisabled = cls.includes('disabled') || cls.includes('dis') || ariaDisabled === 'true';
-    return hidden || invisible || looksDisabled;
-  }, h);
+  const h = await dom.evaluateHandle((el) => {
+    const isVisible = (n) => {
+      const s = getComputedStyle(n);
+      const r = n.getBoundingClientRect();
+      return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+    };
 
-  return { handle: h, disabled };
+    const candidates = [];
+    const all = el.querySelectorAll('a, button, input, img, span');
+
+    for (const node of all) {
+      if (!isVisible(node)) continue;
+
+      const txt =
+        (node.innerText || node.textContent || '').trim().toLowerCase() ||
+        (node.getAttribute('alt') || '').trim().toLowerCase() ||
+        (node.getAttribute('title') || '').trim().toLowerCase() ||
+        (node.getAttribute('value') || '').trim().toLowerCase();
+
+      const src = (node.getAttribute('src') || '').toLowerCase();
+
+      const looksNext =
+        txt === '>' ||
+        txt === '>>' ||
+        txt.includes('next') ||
+        txt.includes('›') ||
+        txt.includes('»') ||
+        src.includes('next') ||
+        src.includes('right') ||
+        src.includes('arrow');
+
+      if (!looksNext) continue;
+
+      // Skip obvious "fast-forward" >> unless no other choice
+      const score =
+        txt === '>' || txt.includes('next') || txt.includes('›') || txt.includes('»') ? 2 :
+        txt === '>>' ? 1 :
+        1;
+
+      candidates.push({ node, score });
+    }
+
+    if (!candidates.length) return null;
+    candidates.sort((a, b) => b.score - a.score);
+    return candidates[0].node;
+  }, container);
+
+  const handle = h.asElement();
+  if (!handle) return { handle: null, disabled: true };
+
+  const disabled = await dom.evaluate((el) => {
+    const style = getComputedStyle(el);
+    const r = el.getBoundingClientRect();
+    const hidden = style.display === 'none' || style.visibility === 'hidden' || r.width === 0 || r.height === 0;
+    const p = el.closest('.disabled, .PageRight_DIS, [aria-disabled="true"]');
+    const cls = (el.getAttribute('class') || '').toLowerCase();
+    return hidden || !!p || cls.includes('disabled') || style.pointerEvents === 'none';
+  }, handle);
+
+  return { handle, disabled };
 }
 
-/**
- * Click the nearest clickable ancestor (a/button/input) for a given image/icon handle.
- */
-async function clickNearestClickable(controlsDom, handle) {
+/** Click the nearest clickable ancestor (a/button/input) for a given handle */
+async function clickNearestClickable(dom, handle) {
   try {
-    await controlsDom.evaluate((el) => {
+    await dom.evaluate((el) => {
       const clickable = el.closest('a, button, input[type="submit"], input[type="button"]');
       (clickable || el).click();
     }, handle);
@@ -251,7 +337,7 @@ async function waitForListChange(contentDom, timeoutMs = 25000) {
       });
       if (current !== priorFirstRowHtml) return true;
     } catch {
-      // if the frame navigated/reloaded, a short delay then continue
+      // frame may be reloading; brief pause then retry
     }
     await new Promise((r) => setTimeout(r, 400));
   }
@@ -259,7 +345,7 @@ async function waitForListChange(contentDom, timeoutMs = 25000) {
 }
 
 // =========================
-// Sitemap-accurate parser (SOLD only) for div[aid] cards
+/** Sitemap-accurate parser (SOLD only) for div[aid] cards */
 // =========================
 function parseAuctionsFromHtml_SitemapAccurate(html, pageUrl) {
   const $ = cheerio.load(html);
@@ -281,11 +367,11 @@ function parseAuctionsFromHtml_SitemapAccurate(html, pageUrl) {
     }
 
     // Map selectors from the sitemap to robust extractors
-    const caseNumber      = getByThLabel($, $item, 'Cause Number');
-    const assessedValue   = getByThLabel($, $item, 'Adjudged Value');
-    const openingBid      = getByThLabel($, $item, 'Est. Min. Bid');
-    const parcelId        = getByThLabel($, $item, 'Account Number');
-    const streetAddress   = getByThLabel($, $item, 'Property Address');
+    const caseNumber    = getByThLabel($, $item, 'Cause Number');
+    const assessedValue = getByThLabel($, $item, 'Adjudged Value');
+    const openingBid    = getByThLabel($, $item, 'Est. Min. Bid');
+    const parcelId      = getByThLabel($, $item, 'Account Number');
+    const streetAddress = getByThLabel($, $item, 'Property Address');
 
     let cityStateZip = clean($item.find('tr:nth-of-type(8) td').first().text());
     if (!cityStateZip) {
@@ -295,7 +381,7 @@ function parseAuctionsFromHtml_SitemapAccurate(html, pageUrl) {
         '';
     }
 
-    const status = clean($item.find('div.ASTAT_MSGA').first().text());
+    const status     = clean($item.find('div.ASTAT_MSGA').first().text());
     const soldAmount = clean($item.find('div.ASTAT_MSGD').first().text());
 
     // SOLD-only filter
@@ -351,7 +437,7 @@ function parseAuctionsFromHtml_SitemapAccurate(html, pageUrl) {
 }
 
 // =========================
-// Inspect + Parse Page (SOLD only) with iframe + robust pagination
+/** Inspect + Parse Page (SOLD only) with iframe + robust pagination */
 // =========================
 async function inspectAndParse(browser, url) {
   const page = await browser.newPage();
@@ -382,7 +468,7 @@ async function inspectAndParse(browser, url) {
 
     // Resolve realms
     let { dom: contentDom } = await resolveContentRealm(page);
-    const { dom: controlsDom } = await resolveControlsRealm(page, contentDom);
+    let { dom: controlsDom, container: pagerContainer } = await resolveControlsRealm(page, contentDom);
 
     // Wait for list
     await contentDom.waitForSelector('div[aid]', { timeout: 60000 });
@@ -390,10 +476,10 @@ async function inspectAndParse(browser, url) {
     let pageCount = 0;
 
     while (pageCount < MAX_PAGES) {
-      // Log indicator if present
-      const indicator = await getPageIndicator(controlsDom);
+      // Indicator (from pager container if found)
+      let indicator = await getPageIndicatorFromContainer(controlsDom, pagerContainer);
       if (indicator) {
-        console.log(`📄 Page ${indicator.current} of ${indicator.total} (raw: "${indicator.raw}")`);
+        console.log(`📄 Page ${indicator.current ?? '?'} of ${indicator.total ?? '?'} (raw: "${indicator.raw}")`);
       } else {
         console.log(`📄 Page (indicator not found)`);
       }
@@ -415,13 +501,23 @@ async function inspectAndParse(browser, url) {
       console.log(`   ➜ SOLD rows so far: ${allParsedRows.length}`);
 
       // Stop if this is the last page per indicator
-      if (indicator && indicator.total && indicator.current >= indicator.total) {
+      if (indicator && indicator.total && indicator.current && indicator.current >= indicator.total) {
         console.log(`🛑 Reached last page (${indicator.current}/${indicator.total}).`);
         break;
       }
 
-      // Find Next
-      const { handle: nextHandle, disabled } = await findNextHandle(controlsDom);
+      // Find Next in the pager container
+      let { handle: nextHandle, disabled } = await findNextInContainer(controlsDom, pagerContainer);
+
+      // If not found (or disabled), try to re-resolve the controls realm (some tenants swap containers after navigation)
+      if (!nextHandle || disabled) {
+        const re = await resolveControlsRealm(page, contentDom);
+        controlsDom = re.dom;
+        pagerContainer = re.container || pagerContainer;
+
+        ({ handle: nextHandle, disabled } = await findNextInContainer(controlsDom, pagerContainer));
+      }
+
       if (!nextHandle || disabled) {
         console.log('🛑 Next not available (missing or disabled). End of pagination.');
         break;
@@ -452,6 +548,11 @@ async function inspectAndParse(browser, url) {
           break;
         }
       }
+
+      // Re-locate pager after navigation (some sites rebuild the toolbar)
+      const re = await resolveControlsRealm(page, contentDom);
+      controlsDom = re.dom;
+      pagerContainer = re.container || pagerContainer;
 
       pageCount += 1;
     }
@@ -543,3 +644,4 @@ async function inspectAndParse(browser, url) {
   console.log(`📊 Saved summary → ${OUTPUT_SUMMARY_FILE}`);
   console.log('🏁 Done');
 })();
+``
