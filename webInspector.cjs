@@ -168,12 +168,10 @@ function serializeWithControlValuesFn() {
       } else if (tag === 'img') {
         acc.push(n.alt || n.title || '');
       } else {
-        // text node content
         const txt = (n.innerText || n.textContent || '');
         if (txt) acc.push(txt);
       }
 
-      // Recurse children
       for (const c of Array.from(n.children || [])) {
         walk(c, acc);
       }
@@ -188,11 +186,15 @@ function serializeWithControlValuesFn() {
  * Controls realm: find a pager container anywhere (same realm, parent, top page, or any frame),
  * by scanning for visible nodes whose **serialized text** matches /page X of|/ Y/.
  * Returns { dom, container } (container is an ElementHandle or null if not found).
+ *
+ * 🔧 FIX: pass serializer into the page context as a STRING and reconstruct it with eval,
+ * to avoid "fn is not a function" errors.
  */
 async function resolveControlsRealm(page, contentDom) {
   async function locatePagerContainer(realm) {
-    const serialize = serializeWithControlValuesFn();
-    const handle = await realm.evaluateHandle((fn) => {
+    const serializerStr = serializeWithControlValuesFn().toString();
+    const handle = await realm.evaluateHandle((serializerStrInner) => {
+      const serializer = eval('(' + serializerStrInner + ')'); // reconstruct function in page
       const isVisible = (el) => {
         const s = getComputedStyle(el);
         const r = el.getBoundingClientRect();
@@ -203,11 +205,10 @@ async function resolveControlsRealm(page, contentDom) {
       const scored = [];
 
       for (const el of nodes) {
-        const text = fn(el); // serialized with inputs/selects
+        const text = serializer(el); // serialized with inputs/selects
         if (!text) continue;
 
-        // Normalize; common patterns:
-        // "page 1 of 5", "Page: 1 of 5", "page 1 / 5"
+        // Normalize; common patterns: "page 1 of 5", "Page: 1 of 5", "page 1 / 5"
         const m = text.match(/\bpage\b\s*:?\s*([0-9]+)\s*(?:of|\/)\s*([0-9]+)/i);
         if (m) {
           // Prefer concise containers (avoid large sections)
@@ -219,7 +220,7 @@ async function resolveControlsRealm(page, contentDom) {
       if (!scored.length) return null;
       scored.sort((a, b) => b.score - a.score);
       return scored[0].el;
-    }, serialize);
+    }, serializerStr);
     return handle.asElement();
   }
 
@@ -254,8 +255,8 @@ async function resolveControlsRealm(page, contentDom) {
 async function getPageIndicatorFromContainer(dom, container) {
   if (!container) return null;
   try {
-    const data = await dom.evaluate((el, serializerFn) => {
-      const serializer = eval(`(${serializerFn})`);
+    const data = await dom.evaluate((el, serializerStrInner) => {
+      const serializer = eval('(' + serializerStrInner + ')');
       const text = serializer(el); // includes input/select values
 
       // Try to extract current from an input/select within the container
@@ -593,8 +594,8 @@ async function inspectAndParse(browser, url) {
 
     // Pager sniff (debug)
     if (pagerContainer) {
-      const snap = await controlsDom.evaluate((el, serializerFn) => {
-        const serializer = eval(`(${serializerFn})`);
+      const snap = await controlsDom.evaluate((el, serializerStrInner) => {
+        const serializer = eval('(' + serializerStrInner + ')');
         const text = serializer(el);
         const html = el.outerHTML;
         return { text, htmlSnippet: html.slice(0, 4000) };
