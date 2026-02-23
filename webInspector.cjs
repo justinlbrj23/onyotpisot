@@ -37,12 +37,11 @@ const sheets = google.sheets({ version: 'v4', auth });
 // Load URLs
 // =========================
 function normalizeAmpersands(u) {
-  // Decode common ampersand encodings coming from spreadsheets or copy/paste
-  // &amp;amp;  -> &amp;  -> &
+  // Sheets/copy often double-encodes & ... normalize to real '&'
   return u
     .replace(/&amp;amp;/gi, '&amp;')
     .replace(/&amp;/gi, '&')
-    .replace(/%26amp%3B/gi, '&'); // URL-encoded variant
+    .replace(/%26amp%3B/gi, '&');
 }
 
 async function loadTargetUrls() {
@@ -51,13 +50,11 @@ async function loadTargetUrls() {
     range: `${SHEET_NAME}!${URL_RANGE}`,
   });
 
-  const urls = (res.data.values || [])
+  return (res.data.values || [])
     .flat()
     .map(v => (v || '').trim())
     .filter(v => v.startsWith('http'))
     .map(normalizeAmpersands);
-
-  return urls;
 }
 
 // =========================
@@ -77,18 +74,16 @@ function parseCurrency(str) {
 
 /**
  * Extract the TD text that follows a TH containing a given label (case-insensitive).
- * More robust than :contains(); matches with or without a trailing colon.
+ * Robust vs. :contains(); matches with or without trailing colon.
  */
 function getByThLabel($, $ctx, label) {
   let value = '';
-  const target = clean(label).toLowerCase().replace(/:\s*$/, ''); // remove trailing colon
+  const target = clean(label).toLowerCase().replace(/:\s*$/, '');
   $ctx.find('th').each((_, el) => {
     const thText = clean($(el).text()).toLowerCase().replace(/:\s*$/, '');
     if (thText.includes(target)) {
       const td = $(el).next('td');
-      if (td && td.length) {
-        value = clean(td.text());
-      }
+      if (td && td.length) value = clean(td.text());
       return false; // break
     }
   });
@@ -96,17 +91,15 @@ function getByThLabel($, $ctx, label) {
 }
 
 /**
- * Best-effort detection of auction content realm (top page or iframe).
- * Returns { dom } where `dom` is a Page or Frame exposing waitForSelector/content/evaluate APIs.
+ * Find realm (page or iframe) that contains the auction list (div[aid]).
+ * Returns { dom } exposing waitForSelector/content/evaluate APIs.
  */
 async function resolveContentRealm(page) {
-  // Try top-level page
   try {
     await page.waitForSelector('div[aid]', { timeout: 2500 });
     return { dom: page };
   } catch (_) {}
 
-  // Try frames
   try {
     await page.waitForSelector('iframe', { timeout: 60000 });
   } catch (_) {}
@@ -117,19 +110,16 @@ async function resolveContentRealm(page) {
     for (const f of frames) {
       try {
         await f.waitForSelector('div[aid], #BID_WINDOW_CONTAINER', { timeout: 1500 });
-        await f.waitForSelector('div[aid]', { timeout: 1500 }); // confirm rows exist
+        await f.waitForSelector('div[aid]', { timeout: 1500 });
         candidateFrame = f;
         break;
       } catch (_) {}
     }
-    if (!candidateFrame) {
-      await page.waitForTimeout(500);
-    }
+    if (!candidateFrame) await page.waitForTimeout(500);
   }
 
   if (candidateFrame) return { dom: candidateFrame };
 
-  // Fallback to known container at top-level
   try {
     await page.waitForSelector('#BID_WINDOW_CONTAINER', { timeout: 3000 });
     return { dom: page };
@@ -139,309 +129,125 @@ async function resolveContentRealm(page) {
 }
 
 /**
- * Serialize visible text of an element, **including inputs/selects** by inlining their values.
- * Helps us reconstruct strings like "page 1 of 5".
+ * Discover "pager links" on the top page (controls realm).
+ * Returns a list of absolute hrefs and a guessed pageParam name if any.
  */
-function serializeWithControlValuesFn() {
-  return (el) => {
-    const visible = (n) => {
-      const s = getComputedStyle(n);
-      const r = n.getBoundingClientRect();
-      return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
-    };
+async function sniffPagerLinks(page) {
+  // Crawl all anchors on the *top-level page* for any href that:
+  //  - contains numeric page-like params (page, pagenum, p, start),
+  //  - or looks like "next" by text/title/alt/src.
+  const anchors = await page.evaluate(() => {
+    const aTags = Array.from(document.querySelectorAll('a[href]'));
+    const rows = [];
+    for (const a of aTags) {
+      const href = a.href;
+      const txt  = (a.innerText || a.textContent || '').trim();
+      const title = (a.getAttribute('title') || '').trim();
+      const alt = (a.getAttribute('alt') || '').trim();
+      const img = a.querySelector('img');
+      const imgSrc = img ? (img.getAttribute('src') || '').toLowerCase() : '';
+      rows.push({
+        href,
+        txt: txt.toLowerCase(),
+        title: title.toLowerCase(),
+        alt: alt.toLowerCase(),
+        imgSrc,
+      });
+    }
+    return rows;
+  });
 
-    // DFS with input/select value injection
-    const walk = (n, acc) => {
-      if (!n || !visible(n)) return acc;
-      const tag = (n.tagName || '').toLowerCase();
+  // Heuristic to guess param name seen in hrefs (page, PAGE, pagenum, p, start, startrow)
+  const urlParamRegex = /\b(page|pagenum|p|pg|pageno|start|startrow|offset)=([0-9]+)/i;
+  const paramCounts = {};
+  const withParams = [];
 
-      if (tag === 'input') {
-        const t = (n.type || '').toLowerCase();
-        if (t === 'text' || t === 'number' || t === '' || t === 'search') {
-          acc.push(n.value || '');
-        } else if (t === 'submit' || t === 'button') {
-          acc.push(n.value || '');
-        }
-      } else if (tag === 'select') {
-        const opt = n.options && n.options[n.selectedIndex];
-        acc.push(opt ? (opt.text || opt.value || '') : (n.value || ''));
-      } else if (tag === 'img') {
-        acc.push(n.alt || n.title || '');
-      } else {
-        const txt = (n.innerText || n.textContent || '');
-        if (txt) acc.push(txt);
-      }
+  for (const a of anchors) {
+    const m = a.href.match(urlParamRegex);
+    if (m) {
+      const key = m[1];
+      const val = parseInt(m[2], 10);
+      paramCounts[key.toLowerCase()] = (paramCounts[key.toLowerCase()] || 0) + 1;
+      withParams.push({ ...a, key: key.toLowerCase(), val });
+    }
+  }
 
-      for (const c of Array.from(n.children || [])) {
-        walk(c, acc);
-      }
-      return acc;
-    };
+  // Decide most common page-like parameter
+  let guessedParam = null;
+  let maxCount = 0;
+  for (const [k, c] of Object.entries(paramCounts)) {
+    if (c > maxCount) { guessedParam = k; maxCount = c; }
+  }
 
-    return walk(el, []).join(' ').replace(/\s+/g, ' ').trim();
-  };
+  // Also flag "next-ish" anchors (for scoring when choosing next link)
+  const nextish = anchors.map(a => {
+    const looksNext =
+      a.txt.includes('next') ||
+      a.title.includes('next') ||
+      a.alt.includes('next') ||
+      a.imgSrc.includes('right') || a.imgSrc.includes('arrow') || a.imgSrc.includes('next');
+    return { ...a, looksNext };
+  });
+
+  return { anchors: nextish, withParams, guessedParam };
 }
 
 /**
- * Controls realm: find a pager container anywhere (same realm, parent, top page, or any frame),
- * by scanning for visible nodes whose **serialized text** matches /page X of|/ Y/.
- * Returns { dom, container } (container is an ElementHandle or null if not found).
- *
- * 🔧 FIX: pass serializer into the page context as a STRING and reconstruct it with eval,
- * to avoid "fn is not a function" errors.
+ * Build a URL for the next page using a discovered page param and a current index.
+ * If no current known, tries to increment based on links seen on the page.
  */
-async function resolveControlsRealm(page, contentDom) {
-  async function locatePagerContainer(realm) {
-    const serializerStr = serializeWithControlValuesFn().toString();
-    const handle = await realm.evaluateHandle((serializerStrInner) => {
-      const serializer = eval('(' + serializerStrInner + ')'); // reconstruct function in page
-      const isVisible = (el) => {
-        const s = getComputedStyle(el);
-        const r = el.getBoundingClientRect();
-        return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
-      };
-
-      const nodes = Array.from(document.querySelectorAll('*')).filter(isVisible);
-      const scored = [];
-
-      for (const el of nodes) {
-        const text = serializer(el); // serialized with inputs/selects
-        if (!text) continue;
-
-        // Normalize; common patterns: "page 1 of 5", "Page: 1 of 5", "page 1 / 5"
-        const m = text.match(/\bpage\b\s*:?\s*([0-9]+)\s*(?:of|\/)\s*([0-9]+)/i);
-        if (m) {
-          // Prefer concise containers (avoid large sections)
-          const score = Math.max(1, 1000 - text.length);
-          scored.push({ el, score });
-        }
-      }
-
-      if (!scored.length) return null;
-      scored.sort((a, b) => b.score - a.score);
-      return scored[0].el;
-    }, serializerStr);
-    return handle.asElement();
-  }
-
-  // Try same realm as content
-  let container = await locatePagerContainer(contentDom);
-  if (container) return { dom: contentDom, container };
-
-  // Try parent of content frame
-  if (typeof contentDom.parentFrame === 'function') {
-    const parent = contentDom.parentFrame();
-    if (parent) {
-      container = await locatePagerContainer(parent);
-      if (container) return { dom: parent, container };
-    }
-  }
-
-  // Try top-level page
-  container = await locatePagerContainer(page);
-  if (container) return { dom: page, container };
-
-  // Try any other frame
-  for (const f of page.frames()) {
-    container = await locatePagerContainer(f);
-    if (container) return { dom: f, container };
-  }
-
-  // Last resort: no container found
-  return { dom: contentDom, container: null };
-}
-
-/** Read "Page X of Y" (or "page X / Y") from the given container (with inputs/selects) */
-async function getPageIndicatorFromContainer(dom, container) {
-  if (!container) return null;
+function buildNextUrlFromParam(currentUrl, paramName, nextIndex) {
   try {
-    const data = await dom.evaluate((el, serializerStrInner) => {
-      const serializer = eval('(' + serializerStrInner + ')');
-      const text = serializer(el); // includes input/select values
-
-      // Try to extract current from an input/select within the container
-      let current = null;
-      const controls = Array.from(el.querySelectorAll('input, select'));
-      for (const n of controls) {
-        const s = getComputedStyle(n);
-        const r = n.getBoundingClientRect();
-        const visible = s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
-        if (!visible) continue;
-
-        if (n.tagName === 'INPUT') {
-          const v = (n.value || '').trim();
-          if (/^\d+$/.test(v)) { current = Number(v); break; }
-        } else if (n.tagName === 'SELECT') {
-          let v = n.value;
-          if (!v && n.selectedIndex >= 0) v = String(n.selectedIndex + 1);
-          if (v && /^\d+$/.test(v)) { current = Number(v); break; }
-        }
-      }
-
-      // Parse "page 1 of 5" or "page 1 / 5"
-      const m = text.match(/\bpage\b\s*:?\s*([0-9]+)\s*(?:of|\/)\s*([0-9]+)/i);
-      const total = m ? Number(m[2]) : null;
-      if (current == null && m) current = Number(m[1]);
-
-      return { raw: text, current, total };
-    }, container, serializeWithControlValuesFn().toString());
-
-    if (data && (data.current || data.total)) return data;
-  } catch (_) {}
-  return null;
-}
-
-/** Find Next inside pager container; prefer single-step (">", "Next") over fast-forward (">>") */
-async function findNextInContainer(dom, container) {
-  if (!container) return { handle: null, disabled: true };
-
-  const h = await dom.evaluateHandle((el) => {
-    const isVisible = (n) => {
-      const s = getComputedStyle(n);
-      const r = n.getBoundingClientRect();
-      return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
-    };
-
-    const all = el.querySelectorAll('a, button, input, img, span, i');
-    const candidates = [];
-
-    for (const node of all) {
-      if (!isVisible(node)) continue;
-
-      const txt =
-        (node.innerText || node.textContent || '').trim().toLowerCase() ||
-        (node.getAttribute('alt') || '').trim().toLowerCase() ||
-        (node.getAttribute('title') || '').trim().toLowerCase() ||
-        (node.getAttribute('value') || '').trim().toLowerCase();
-
-      const cls = (node.getAttribute('class') || '').toLowerCase();
-      const src = (node.getAttribute('src') || '').toLowerCase();
-
-      const looksNext =
-        txt === '>' || txt === '›' || txt === '»' ||
-        txt.includes('next') ||
-        cls.includes('next') || cls.includes('pageright') || cls.includes('page_right') ||
-        src.includes('next') || src.includes('right') || src.includes('arrow');
-
-      if (!looksNext) continue;
-
-      // Score: prefer explicit "next" or single right arrow; de-prioritize ">>"
-      let score = 0;
-      if (txt.includes('next')) score += 5;
-      if (txt === '>' || txt === '›' || txt === '»') score += 4;
-      if (cls.includes('pageright')) score += 3;
-      if (src.includes('right') || src.includes('arrow')) score += 2;
-      if (txt === '>>') score -= 2; // fast-forward less preferred
-
-      candidates.push({ node, score });
-    }
-
-    if (!candidates.length) return null;
-    candidates.sort((a, b) => b.score - a.score);
-    return candidates[0].node;
-  }, container);
-
-  const handle = h.asElement();
-  if (!handle) return { handle: null, disabled: true };
-
-  const disabled = await dom.evaluate((el) => {
-    const s = getComputedStyle(el);
-    const r = el.getBoundingClientRect();
-    const hidden = s.display === 'none' || s.visibility === 'hidden' || r.width === 0 || r.height === 0;
-    const p = el.closest('.disabled, .PageRight_DIS, [aria-disabled="true"]');
-    const cls = (el.getAttribute('class') || '').toLowerCase();
-    return hidden || !!p || cls.includes('disabled') || s.pointerEvents === 'none';
-  }, handle);
-
-  return { handle, disabled };
-}
-
-/** Fallback: find a Next control near the pager container (siblings/parent), if not inside it */
-async function findNextNearContainer(dom, container) {
-  if (!container) return { handle: null, disabled: true };
-
-  const h = await dom.evaluateHandle((el) => {
-    const isVisible = (n) => {
-      const s = getComputedStyle(n);
-      const r = n.getBoundingClientRect();
-      return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
-    };
-
-    const region = el.closest('*'); // parent region
-    const scope = region || el;
-
-    const all = scope.querySelectorAll('a, button, input, img, span, i');
-    const candidates = [];
-
-    for (const node of all) {
-      if (!isVisible(node)) continue;
-
-      const txt =
-        (node.innerText || node.textContent || '').trim().toLowerCase() ||
-        (node.getAttribute('alt') || '').trim().toLowerCase() ||
-        (node.getAttribute('title') || '').trim().toLowerCase() ||
-        (node.getAttribute('value') || '').trim().toLowerCase();
-
-      const cls = (node.getAttribute('class') || '').toLowerCase();
-      const src = (node.getAttribute('src') || '').toLowerCase();
-
-      const looksNext =
-        txt === '>' || txt === '›' || txt === '»' ||
-        txt.includes('next') ||
-        cls.includes('next') || cls.includes('pageright') || cls.includes('page_right') ||
-        src.includes('next') || src.includes('right') || src.includes('arrow');
-
-      if (!looksNext) continue;
-
-      let score = 0;
-      if (txt.includes('next')) score += 5;
-      if (txt === '>' || txt === '›' || txt === '»') score += 4;
-      if (cls.includes('pageright')) score += 3;
-      if (src.includes('right') || src.includes('arrow')) score += 2;
-      if (txt === '>>') score -= 2;
-
-      candidates.push({ node, score });
-    }
-
-    if (!candidates.length) return null;
-    candidates.sort((a, b) => b.score - a.score);
-    return candidates[0].node;
-  }, container);
-
-  const handle = h.asElement();
-  if (!handle) return { handle: null, disabled: true };
-
-  const disabled = await dom.evaluate((el) => {
-    const s = getComputedStyle(el);
-    const r = el.getBoundingClientRect();
-    const hidden = s.display === 'none' || s.visibility === 'hidden' || r.width === 0 || r.height === 0;
-    const p = el.closest('.disabled, .PageRight_DIS, [aria-disabled="true"]');
-    const cls = (el.getAttribute('class') || '').toLowerCase();
-    return hidden || !!p || cls.includes('disabled') || s.pointerEvents === 'none';
-  }, handle);
-
-  return { handle, disabled };
-}
-
-/** Click the nearest clickable ancestor (a/button/input) for a given handle */
-async function clickNearestClickable(dom, handle) {
-  try {
-    await dom.evaluate((el) => {
-      const clickable = el.closest('a, button, input[type="submit"], input[type="button"]');
-      (clickable || el).click();
-    }, handle);
-    return true;
+    const url = new URL(currentUrl, 'https://dummy-base.invalid/');
+    // If param absent, append; else replace.
+    url.searchParams.set(paramName, String(nextIndex));
+    // Drop dummy base in output if necessary
+    const out = url.href.replace('https://dummy-base.invalid/', '');
+    return out;
   } catch {
-    try {
-      await handle.click({ delay: 20 });
-      return true;
-    } catch {
-      return false;
-    }
+    // Fallback: naive append
+    const sep = currentUrl.includes('?') ? '&' : '?';
+    return `${currentUrl}${sep}${encodeURIComponent(paramName)}=${encodeURIComponent(nextIndex)}`;
   }
 }
 
-/** Wait for the list (`div[aid]`) to change after Next click */
+/**
+ * Choose the next page URL using:
+ *  1) Discovered page param (page/pagenum/...), increment index.
+ *  2) Else pick a "next-ish" anchor with a higher page value than current.
+ *  3) Else naive &page= index+1.
+ */
+function chooseNextUrl(currentUrl, pageIndex, pagerSniff) {
+  // 1) Use discovered param if any
+  if (pagerSniff.guessedParam) {
+    return buildNextUrlFromParam(currentUrl, pagerSniff.guessedParam, pageIndex + 1);
+  }
+
+  // 2) If there are anchors with numeric params, pick the smallest href that advances
+  const urlParamRegex = /\b(page|pagenum|p|pg|pageno|start|startrow|offset)=([0-9]+)/i;
+  const forwards = [];
+  for (const a of pagerSniff.anchors) {
+    const m = a.href.match(urlParamRegex);
+    if (!m) continue;
+    const key = m[1].toLowerCase();
+    const val = parseInt(m[2], 10);
+    if (Number.isFinite(val) && val > pageIndex) {
+      // prefer "next-ish"
+      const score = a.looksNext ? 2 : 1;
+      forwards.push({ href: a.href, val, score });
+    }
+  }
+  if (forwards.length) {
+    forwards.sort((a, b) => (b.score - a.score) || (a.val - b.val));
+    return forwards[0].href;
+  }
+
+  // 3) Naive fallback: &page= index+1
+  const sep = currentUrl.includes('?') ? '&' : '?';
+  return `${currentUrl}${sep}page=${pageIndex + 1}`;
+}
+
+/** Wait for the list (`div[aid]`) to change after a navigation */
 async function waitForListChange(contentDom, timeoutMs = 25000) {
   const start = Date.now();
   const priorFirstRowHtml = await contentDom.evaluate(() => {
@@ -449,7 +255,6 @@ async function waitForListChange(contentDom, timeoutMs = 25000) {
     return first ? first.innerHTML : '__NONE__';
   });
 
-  // Poll for change (covers AJAX swaps and frame reloads)
   while (Date.now() - start < timeoutMs) {
     try {
       const current = await contentDom.evaluate(() => {
@@ -457,10 +262,8 @@ async function waitForListChange(contentDom, timeoutMs = 25000) {
         return first ? first.innerHTML : '__NONE__';
       });
       if (current !== priorFirstRowHtml) return true;
-    } catch {
-      // frame may be reloading; brief pause then retry
-    }
-    await new Promise((r) => setTimeout(r, 400));
+    } catch { /* frame may reload */ }
+    await new Promise(r => setTimeout(r, 400));
   }
   return false;
 }
@@ -503,7 +306,8 @@ function parseAuctionsFromHtml_SitemapAccurate(html, pageUrl) {
     }
 
     const status     = clean($item.find('div.ASTAT_MSGA').first().text());
-    const soldAmount = clean($item.find('div.ASTAT_MSGD').first().text());
+    theSold = clean($item.find('div.ASTAT_MSGD').first().text());
+    const soldAmount = theSold;
 
     // SOLD-only filter
     const looksSold =
@@ -558,7 +362,7 @@ function parseAuctionsFromHtml_SitemapAccurate(html, pageUrl) {
 }
 
 // =========================
-/** Inspect + Parse Page (SOLD only) with iframe + robust pagination */
+/** Inspect + Parse Page (SOLD only) — URL-driven pagination */
 // =========================
 async function inspectAndParse(browser, url) {
   const page = await browser.newPage();
@@ -566,7 +370,7 @@ async function inspectAndParse(browser, url) {
 
   const allRelevantElements = [];
   const allParsedRows = [];
-  const pagerDebug = []; // collect pager discovery facts
+  const pagerDebug = [];
   const seen = new Set();
 
   try {
@@ -585,45 +389,35 @@ async function inspectAndParse(browser, url) {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
-    const normalizedUrl = normalizeAmpersands(url);
-    await page.goto(normalizedUrl, { waitUntil: 'networkidle0', timeout: 120000 });
+    let currentUrl = normalizeAmpersands(url);
+    let pageIndex = 1;
+    let pagesVisited = 0;
 
-    // Resolve realms
-    let { dom: contentDom } = await resolveContentRealm(page);
-    let { dom: controlsDom, container: pagerContainer } = await resolveControlsRealm(page, contentDom);
+    while (pagesVisited < MAX_PAGES) {
+      console.log(`🌐 Visiting ${currentUrl}`);
+      await page.goto(currentUrl, { waitUntil: 'networkidle2', timeout: 120000 });
+      await page.waitForTimeout(800); // small settle
 
-    // Pager sniff (debug)
-    if (pagerContainer) {
-      const snap = await controlsDom.evaluate((el, serializerStrInner) => {
-        const serializer = eval('(' + serializerStrInner + ')');
-        const text = serializer(el);
-        const html = el.outerHTML;
-        return { text, htmlSnippet: html.slice(0, 4000) };
-      }, pagerContainer, serializeWithControlValuesFn().toString());
-      pagerDebug.push({ url: normalizedUrl, found: true, ...snap });
-    } else {
-      pagerDebug.push({ url: normalizedUrl, found: false });
-    }
+      // Discover content realm (list may be in iframe)
+      let { dom: contentDom } = await resolveContentRealm(page);
+      await contentDom.waitForSelector('div[aid]', { timeout: 60000 });
 
-    // Wait for list
-    await contentDom.waitForSelector('div[aid]', { timeout: 60000 });
+      // Parse current page
+      const html = await contentDom.content();
 
-    let pageCount = 0;
-
-    while (pageCount < MAX_PAGES) {
-      // Indicator (from pager container if found)
-      let indicator = await getPageIndicatorFromContainer(controlsDom, pagerContainer);
-      if (indicator) {
-        console.log(`📄 Page ${indicator.current ?? '?'} of ${indicator.total ?? '?'} (raw: "${indicator.raw}")`);
-      } else {
-        console.log(`📄 Page (indicator not found)`);
+      // quick block check (top-level only)
+      const topHtml = await page.content();
+      if (
+        topHtml.includes('403 Forbidden') ||
+        topHtml.includes('Access Denied') ||
+        topHtml.toLowerCase().includes('forbidden')
+      ) {
+        throw new Error('Blocked by target website (403)');
       }
 
-      // Parse current page (from content realm)
-      const html = await contentDom.content();
-      const { rows, relevant } = parseAuctionsFromHtml_SitemapAccurate(html, normalizedUrl);
+      const { rows, relevant } = parseAuctionsFromHtml_SitemapAccurate(html, currentUrl);
 
-      // Dedupe & collect rows
+      // Dedupe & collect
       for (const row of rows) {
         const key = `${row.sourceUrl}|${row.caseNumber}|${row.parcelId}`;
         if (!seen.has(key)) {
@@ -635,72 +429,61 @@ async function inspectAndParse(browser, url) {
 
       console.log(`   ➜ SOLD rows so far: ${allParsedRows.length}`);
 
-      // Stop if this is the last page per indicator
-      if (indicator && indicator.total && indicator.current && indicator.current >= indicator.total) {
-        console.log(`🛑 Reached last page (${indicator.current}/${indicator.total}).`);
+      // Sniff pager links on the top page and decide next URL
+      const sniff = await sniffPagerLinks(page);
+      pagerDebug.push({ url: currentUrl, guessedParam: sniff.guessedParam });
+
+      // Try to pick a next URL
+      const nextUrl = chooseNextUrl(currentUrl, pageIndex, sniff);
+
+      // If the next URL equals current or does not actually advance, stop
+      if (!nextUrl || nextUrl === currentUrl) {
+        console.log('🛑 No usable next URL discovered. End of pagination.');
         break;
       }
 
-      // Find Next in the pager container
-      let { handle: nextHandle, disabled } = await findNextInContainer(controlsDom, pagerContainer);
+      // Naively detect repeated page (avoid loops): load the next URL headlessly to see if list changes
+      console.log('➡️ Probing next URL...', nextUrl);
 
-      // If not found inside container, try nearby region
-      if (!nextHandle || disabled) {
-        ({ handle: nextHandle, disabled } = await findNextNearContainer(controlsDom, pagerContainer));
-      }
+      // Navigate and ensure content changes; if not, we stop
+      const prevFirstHtml = await contentDom.evaluate(() => {
+        const first = document.querySelector('div[aid]');
+        return first ? first.innerHTML : '__NONE__';
+      });
 
-      // If still not found (or disabled), try to re-resolve the controls realm (some tenants swap containers after navigation)
-      if (!nextHandle || disabled) {
-        const re = await resolveControlsRealm(page, contentDom);
-        controlsDom = re.dom;
-        pagerContainer = re.container || pagerContainer;
+      // Go to next page
+      await page.goto(nextUrl, { waitUntil: 'networkidle2', timeout: 120000 });
+      await page.waitForTimeout(600);
 
-        ({ handle: nextHandle, disabled } = await findNextInContainer(controlsDom, pagerContainer));
-        if (!nextHandle || disabled) {
-          ({ handle: nextHandle, disabled } = await findNextNearContainer(controlsDom, pagerContainer));
-        }
-      }
-
-      if (!nextHandle || disabled) {
-        console.log('🛑 Next not available (missing or disabled). End of pagination.');
-        break;
-      }
-
-      console.log('➡️ Moving to next page...');
-
-      // Scroll and click nearest clickable ancestor
+      // Re-resolve content realm (iframe may be rebuilt)
       try {
-        await controlsDom.evaluate((el) => el.scrollIntoView({ block: 'center', behavior: 'instant' }), nextHandle);
-      } catch (_) {}
-      const clicked = await clickNearestClickable(controlsDom, nextHandle);
-      if (!clicked) {
-        console.log('⚠️ Click failed. Stopping to avoid loop.');
+        ({ dom: contentDom } = await resolveContentRealm(page));
+        await contentDom.waitForSelector('div[aid]', { timeout: 20000 });
+      } catch {
+        console.log('🛑 Could not find list on next page. Ending.');
         break;
       }
 
-      // Wait for content to actually change; if it doesn't, try to re-resolve content realm (frame could reload)
-      const changed = await waitForListChange(contentDom, 30000);
+      const changed = await waitForListChange(contentDom, 8000);
       if (!changed) {
-        console.log('⚠️ No list change detected. Re-resolving content realm...');
-        try {
-          const resolved = await resolveContentRealm(page);
-          contentDom = resolved.dom;
-          await contentDom.waitForSelector('div[aid]', { timeout: 20000 });
-        } catch {
-          console.log('🛑 Could not re-locate content after Next. Ending.');
+        // As another check, compare with cached prevFirstHtml
+        const nowFirstHtml = await contentDom.evaluate(() => {
+          const first = document.querySelector('div[aid]');
+          return first ? first.innerHTML : '__NONE__';
+        });
+        if (nowFirstHtml === prevFirstHtml) {
+          console.log('🛑 No list change after navigating to next URL. Ending.');
           break;
         }
       }
 
-      // Re-locate pager after navigation (some sites rebuild the toolbar)
-      const re = await resolveControlsRealm(page, contentDom);
-      controlsDom = re.dom;
-      pagerContainer = re.container || pagerContainer;
-
-      pageCount += 1;
+      // Advance counters
+      currentUrl = nextUrl;
+      pageIndex += 1;
+      pagesVisited += 1;
     }
 
-    // Write pager debug artifact for quick tuning if needed
+    // Dump pager debug to help future tuning
     try {
       fs.writeFileSync(OUTPUT_PAGER_DEBUG, JSON.stringify(pagerDebug, null, 2));
     } catch {}
@@ -723,7 +506,7 @@ async function inspectAndParse(browser, url) {
   console.log(`🔗 Got ${urls.length} URL(s) to process.`);
 
   const browser = await puppeteer.launch({
-    headless: true, // set to false locally to observe
+    headless: true,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
