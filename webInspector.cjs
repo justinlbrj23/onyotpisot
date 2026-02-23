@@ -19,18 +19,17 @@ const OUTPUT_ELEMENTS_FILE = 'raw-elements.json';
 const OUTPUT_ROWS_FILE = 'parsed-auctions.json';
 const OUTPUT_ERRORS_FILE = 'errors.json';
 const OUTPUT_SUMMARY_FILE = 'summary.json';
-const OUTPUT_PAGER_DEBUG = 'pager-sniff.json';
 
 const MIN_SURPLUS = 25000;
 const MAX_PAGES = 50; // safety stop per URL
 
 // =========================
-// Small cross-version sleep helper (replaces page.waitForTimeout)
+// Sleep helper (cross-puppeteer)
 // =========================
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 // =========================
-/** GOOGLE AUTH */
+// GOOGLE AUTH
 // =========================
 const auth = new google.auth.GoogleAuth({
   keyFile: SERVICE_ACCOUNT_FILE,
@@ -42,7 +41,7 @@ const sheets = google.sheets({ version: 'v4', auth });
 // Load URLs
 // =========================
 function normalizeAmpersands(u) {
-  // Sheets/copy often double-encodes & ... normalize to real '&'
+  // Normalize & encodings commonly seen coming from Sheets
   return u
     .replace(/&amp;amp;/gi, '&amp;')
     .replace(/&amp;/gi, '&')
@@ -63,14 +62,13 @@ async function loadTargetUrls() {
 }
 
 // =========================
-// Utils / Helpers
+// Utility helpers
 // =========================
 function clean(text) {
   if (!text) return '';
   return text.replace(/\s+/g, ' ').trim();
 }
 
-/** Currency parser: accepts $1,234 or $1,234.56 */
 function parseCurrency(str) {
   if (!str) return null;
   const n = parseFloat(str.replace(/[^0-9.-]/g, ''));
@@ -79,7 +77,6 @@ function parseCurrency(str) {
 
 /**
  * Extract the TD text that follows a TH containing a given label (case-insensitive).
- * Robust vs. :contains(); matches with or without trailing colon.
  */
 function getByThLabel($, $ctx, label) {
   let value = '';
@@ -96,179 +93,160 @@ function getByThLabel($, $ctx, label) {
 }
 
 /**
- * Find realm (page or iframe) that contains the auction list (div[aid]).
- * Returns { dom } exposing waitForSelector/content/evaluate APIs.
+ * Wait for the list to exist and return an object with helpers scoped to the
+ * RealForeclose body container (#BID_WINDOW_CONTAINER).
  */
-async function resolveContentRealm(page) {
-  try {
-    await page.waitForSelector('div[aid]', { timeout: 2500 });
-    return { dom: page };
-  } catch (_) {}
+async function getPageScopes(page) {
+  // Ensure the main auction container exists
+  await page.waitForSelector('#BID_WINDOW_CONTAINER', { timeout: 60000 });
 
-  try {
-    await page.waitForSelector('iframe', { timeout: 60000 });
-  } catch (_) {}
+  // Ensure at least one auction block exists
+  await page.waitForSelector('#BID_WINDOW_CONTAINER div[aid]', { timeout: 60000 });
 
-  let candidateFrame = null;
-  for (let attempt = 0; attempt < 20 && !candidateFrame; attempt++) {
-    const frames = page.frames();
-    for (const f of frames) {
-      try {
-        await f.waitForSelector('div[aid], #BID_WINDOW_CONTAINER', { timeout: 1500 });
-        await f.waitForSelector('div[aid]', { timeout: 1500 });
-        candidateFrame = f;
-        break;
-      } catch (_) {}
-    }
-    if (!candidateFrame) await sleep(500);
-  }
-
-  if (candidateFrame) return { dom: candidateFrame };
-
-  try {
-    await page.waitForSelector('#BID_WINDOW_CONTAINER', { timeout: 3000 });
-    return { dom: page };
-  } catch (_) {}
-
-  throw new Error('Could not locate auction content (div[aid]) in page or iframes.');
-}
-
-/**
- * Discover "pager links" on the top page (controls realm).
- * Returns a list of absolute hrefs and a guessed pageParam name if any.
- */
-async function sniffPagerLinks(page) {
-  const anchors = await page.evaluate(() => {
-    const aTags = Array.from(document.querySelectorAll('a[href]'));
-    const rows = [];
-    for (const a of aTags) {
-      const href = a.href;
-      const txt  = (a.innerText || a.textContent || '').trim();
-      const title = (a.getAttribute('title') || '').trim();
-      const alt = (a.getAttribute('alt') || '').trim();
-      const img = a.querySelector('img');
-      const imgSrc = img ? (img.getAttribute('src') || '').toLowerCase() : '';
-      rows.push({
-        href,
-        txt: txt.toLowerCase(),
-        title: title.toLowerCase(),
-        alt: alt.toLowerCase(),
-        imgSrc,
-      });
-    }
-    return rows;
-  });
-
-  const urlParamRegex = /\b(page|pagenum|p|pg|pageno|start|startrow|offset)=([0-9]+)/i;
-  const paramCounts = {};
-  const withParams = [];
-
-  for (const a of anchors) {
-    const m = a.href.match(urlParamRegex);
-    if (m) {
-      const key = m[1];
-      const val = parseInt(m[2], 10);
-      paramCounts[key.toLowerCase()] = (paramCounts[key.toLowerCase()] || 0) + 1;
-      withParams.push({ ...a, key: key.toLowerCase(), val });
-    }
-  }
-
-  let guessedParam = null;
-  let maxCount = 0;
-  for (const [k, c] of Object.entries(paramCounts)) {
-    if (c > maxCount) { guessedParam = k; maxCount = c; }
-  }
-
-  const nextish = anchors.map(a => {
-    const looksNext =
-      a.txt.includes('next') ||
-      a.title.includes('next') ||
-      a.alt.includes('next') ||
-      a.imgSrc.includes('right') || a.imgSrc.includes('arrow') || a.imgSrc.includes('next');
-    return { ...a, looksNext };
-  });
-
-  return { anchors: nextish, withParams, guessedParam };
-}
-
-/**
- * Build a URL for the next page using a discovered page param and a current index.
- */
-function buildNextUrlFromParam(currentUrl, paramName, nextIndex) {
-  try {
-    const url = new URL(currentUrl, 'https://dummy-base.invalid/');
-    url.searchParams.set(paramName, String(nextIndex));
-    return url.href.replace('https://dummy-base.invalid/', '');
-  } catch {
-    const sep = currentUrl.includes('?') ? '&' : '?';
-    return `${currentUrl}${sep}${encodeURIComponent(paramName)}=${encodeURIComponent(nextIndex)}`;
-  }
-}
-
-/**
- * Choose the next page URL by:
- * 1) Using discovered page param (page/pagenum/...), increment index.
- * 2) Else pick a "next-ish" anchor with a higher page value than current.
- * 3) Else naive &page= index+1.
- */
-function chooseNextUrl(currentUrl, pageIndex, pagerSniff) {
-  if (pagerSniff.guessedParam) {
-    return buildNextUrlFromParam(currentUrl, pagerSniff.guessedParam, pageIndex + 1);
-  }
-
-  const urlParamRegex = /\b(page|pagenum|p|pg|pageno|start|startrow|offset)=([0-9]+)/i;
-  const forwards = [];
-  for (const a of pagerSniff.anchors) {
-    const m = a.href.match(urlParamRegex);
-    if (!m) continue;
-    const val = parseInt(m[2], 10);
-    if (Number.isFinite(val) && val > pageIndex) {
-      const score = a.looksNext ? 2 : 1;
-      forwards.push({ href: a.href, val, score });
-    }
-  }
-  if (forwards.length) {
-    forwards.sort((a, b) => (b.score - a.score) || (a.val - b.val));
-    return forwards[0].href;
-  }
-
-  const sep = currentUrl.includes('?') ? '&' : '?';
-  return `${currentUrl}${sep}page=${pageIndex + 1}`;
-}
-
-/** Wait for the list (`div[aid]`) to change after a navigation */
-async function waitForListChange(contentDom, timeoutMs = 25000) {
-  const start = Date.now();
-  const priorFirstRowHtml = await contentDom.evaluate(() => {
-    const first = document.querySelector('div[aid]');
-    return first ? first.innerHTML : '__NONE__';
-  });
-
-  while (Date.now() - start < timeoutMs) {
-    try {
-      const current = await contentDom.evaluate(() => {
-        const first = document.querySelector('div[aid]');
+  // Return helpers that operate strictly inside BID_WINDOW_CONTAINER
+  return {
+    async firstRowHtml() {
+      return await page.$eval('#BID_WINDOW_CONTAINER', (root) => {
+        const first = root.querySelector('div[aid]');
         return first ? first.innerHTML : '__NONE__';
       });
-      if (current !== priorFirstRowHtml) return true;
-    } catch { /* frame may reload */ }
-    await sleep(400);
-  }
-  return false;
+    },
+    async waitForListChange(timeoutMs = 25000) {
+      const start = Date.now();
+      const prior = await this.firstRowHtml();
+      while (Date.now() - start < timeoutMs) {
+        try {
+          const now = await this.firstRowHtml();
+          if (now !== prior) return true;
+        } catch {}
+        await new Promise(r => setTimeout(r, 400));
+      }
+      return false;
+    },
+    /**
+     * Return handles to the pager bar and elements:
+     * - bar:   #BID_WINDOW_CONTAINER .Head_C > div:nth-of-type(3)
+     * - input: first text/number input inside the bar
+     * - text:  span.PageText (for "of N")
+     * - next:  span.PageRight > img  (your recording's target)
+     */
+    async getPagerPieces() {
+      const bar = await page.$('#BID_WINDOW_CONTAINER .Head_C > div:nth-of-type(3)');
+      if (!bar) return { bar: null, input: null, text: null, next: null };
+
+      const input = await bar.$("input[type='text'], input[type='number'], input:not([type])");
+      const text = await bar.$('span.PageText');
+      // Prefer the exact selector you recorded
+      let next = await bar.$('span.PageRight > img');
+      if (!next) {
+        // Fallbacks, just in case markup varies slightly
+        next = await bar.$('.PageRight_HVR > img') || await bar.$('.PageRight img') || await bar.$('img[alt*="next" i], img[title*="next" i]');
+      }
+
+      return { bar, input, text, next };
+    },
+    /**
+     * Parse current/total page from the pager:
+     * - current: value from <input>
+     * - total: from span.PageText (e.g., "of 5")
+     */
+    async readIndicator(pieces) {
+      if (!pieces || !pieces.bar) return { current: null, total: null, raw: '' };
+      const [current, total, raw] = await page.evaluate((bar) => {
+        const inp = bar.querySelector('input');
+        const txt = bar.querySelector('span.PageText');
+        let cur = null;
+        let tot = null;
+        if (inp && /^\d+$/.test((inp.value || '').trim())) {
+          cur = Number((inp.value || '').trim());
+        }
+        const rawText = (txt ? (txt.innerText || txt.textContent || '') : '').replace(/\s+/g, ' ').trim();
+        // Expect formats like "page of 5" or just "of 5"
+        const m = rawText.match(/\bof\s*([0-9]+)/i);
+        if (m) tot = Number(m[1]);
+        return [cur, tot, rawText];
+      }, pieces.bar);
+      return { current, total, raw };
+    },
+    async setPageInputAndGo(pieces, nextIndex) {
+      if (!pieces || (!pieces.input && !pieces.bar)) return false;
+
+      let acted = false;
+      if (pieces.input) {
+        try {
+          await pieces.input.focus();
+        } catch {}
+        try {
+          await page.evaluate((el, val) => {
+            el.value = String(val);
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          }, pieces.input, nextIndex);
+          acted = true;
+        } catch {}
+      }
+
+      // Try an explicit "Go" control if one exists in the bar
+      if (acted) {
+        const go = await pieces.bar.$('button, input[type="submit"], input[type="button"], a, span');
+        if (go) {
+          const looksGo = await page.evaluate((el) => {
+            const t = ((el.innerText || el.textContent || el.value || el.getAttribute('title') || '') + '').toLowerCase().trim();
+            const cls = (el.getAttribute('class') || '').toLowerCase();
+            return t === 'go' || t.includes('go') || cls.includes('go');
+          }, go);
+          if (looksGo) {
+            try {
+              await page.evaluate(el => {
+                const clickable = el.closest('a, button, input[type="submit"], input[type="button"]');
+                (clickable || el).click();
+              }, go);
+              return true;
+            } catch {}
+          }
+        }
+      }
+
+      // Otherwise press Enter in the page (top-level keyboard events bubble)
+      if (acted) {
+        try { await page.keyboard.press('Enter'); return true; } catch {}
+      }
+
+      return false;
+    },
+    async clickNextArrow(pieces) {
+      if (!pieces || !pieces.next) return false;
+      try {
+        await page.evaluate(el => {
+          el.scrollIntoView({ block: 'center', behavior: 'instant' });
+        }, pieces.next);
+      } catch {}
+      try {
+        // Click the image or its nearest clickable ancestor
+        await page.evaluate(el => {
+          const clickable = el.closest('a, button, input[type="submit"], input[type="button"]');
+          (clickable || el).click();
+        }, pieces.next);
+        return true;
+      } catch {
+        try { await pieces.next.click({ delay: 20 }); return true; } catch { return false; }
+      }
+    },
+  };
 }
 
 // =========================
-/** Sitemap-accurate parser (SOLD only) for div[aid] cards */
+// Parser (SOLD-only) – sitemap-accurate mapping on div[aid]
 // =========================
-function parseAuctionsFromHtml_SitemapAccurate(html, pageUrl) {
+function parseAuctionsFromHtml(html, pageUrl) {
   const $ = cheerio.load(html);
   const rows = [];
   const relevant = [];
 
-  $('div[aid]').each((_, item) => {
+  $('#BID_WINDOW_CONTAINER div[aid]').each((_, item) => {
     const $item = $(item);
 
-    // Capture for diagnostics
+    // record relevant block for diagnostics
     const blockText = clean($item.text());
     if (blockText) {
       relevant.push({
@@ -279,13 +257,13 @@ function parseAuctionsFromHtml_SitemapAccurate(html, pageUrl) {
       });
     }
 
-    // Map selectors from the sitemap to robust extractors
     const caseNumber    = getByThLabel($, $item, 'Cause Number');
     const assessedValue = getByThLabel($, $item, 'Adjudged Value');
     const openingBid    = getByThLabel($, $item, 'Est. Min. Bid');
     const parcelId      = getByThLabel($, $item, 'Account Number');
     const streetAddress = getByThLabel($, $item, 'Property Address');
 
+    // city/state/zip – template sometimes uses row order
     let cityStateZip = clean($item.find('tr:nth-of-type(8) td').first().text());
     if (!cityStateZip) {
       cityStateZip =
@@ -297,11 +275,9 @@ function parseAuctionsFromHtml_SitemapAccurate(html, pageUrl) {
     const status     = clean($item.find('div.ASTAT_MSGA').first().text());
     const soldAmount = clean($item.find('div.ASTAT_MSGD').first().text());
 
-    // SOLD-only filter
     const looksSold =
       status.toLowerCase().includes('sold') ||
       (!!soldAmount && parseCurrency(soldAmount) !== null);
-
     if (!looksSold) return;
 
     const openingBidNum = parseCurrency(openingBid);
@@ -329,7 +305,6 @@ function parseAuctionsFromHtml_SitemapAccurate(html, pageUrl) {
       row.openingBid &&
       row.salePrice &&
       row.assessedValue;
-
     if (!valid) return;
 
     row.surplusAssessVsSale =
@@ -348,7 +323,7 @@ function parseAuctionsFromHtml_SitemapAccurate(html, pageUrl) {
 }
 
 // =========================
-/** Inspect + Parse Page (SOLD only) — URL-driven pagination */
+// Inspect + Parse Page (SOLD only) – with pager clicking as per your recording
 // =========================
 async function inspectAndParse(browser, url) {
   const page = await browser.newPage();
@@ -356,11 +331,10 @@ async function inspectAndParse(browser, url) {
 
   const allRelevantElements = [];
   const allParsedRows = [];
-  const pagerDebug = [];
   const seen = new Set();
 
   try {
-    // Anti-bot & headers
+    // Anti-bot hardening
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
         'AppleWebKit/537.36 (KHTML, like Gecko) ' +
@@ -375,35 +349,18 @@ async function inspectAndParse(browser, url) {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
-    let currentUrl = normalizeAmpersands(url);
-    let pageIndex = 1;
+    const normalizedUrl = normalizeAmpersands(url);
+    await page.goto(normalizedUrl, { waitUntil: 'networkidle2', timeout: 120000 });
+
+    // Get scoped helpers for the RealForeclose body container
+    const scope = await getPageScopes(page);
+
     let pagesVisited = 0;
-
     while (pagesVisited < MAX_PAGES) {
-      console.log(`🌐 Visiting ${currentUrl}`);
-      await page.goto(currentUrl, { waitUntil: 'networkidle2', timeout: 120000 });
-      await sleep(800); // settle
-
-      // Discover content realm (list may be in iframe)
-      let { dom: contentDom } = await resolveContentRealm(page);
-      await contentDom.waitForSelector('div[aid]', { timeout: 60000 });
-
       // Parse current page
-      const html = await contentDom.content();
+      const html = await page.content(); // includes #BID_WINDOW_CONTAINER
+      const { rows, relevant } = parseAuctionsFromHtml(html, normalizedUrl);
 
-      // quick block check (top-level only)
-      const topHtml = await page.content();
-      if (
-        topHtml.includes('403 Forbidden') ||
-        topHtml.includes('Access Denied') ||
-        topHtml.toLowerCase().includes('forbidden')
-      ) {
-        throw new Error('Blocked by target website (403)');
-      }
-
-      const { rows, relevant } = parseAuctionsFromHtml_SitemapAccurate(html, currentUrl);
-
-      // Dedupe & collect
       for (const row of rows) {
         const key = `${row.sourceUrl}|${row.caseNumber}|${row.parcelId}`;
         if (!seen.has(key)) {
@@ -415,59 +372,50 @@ async function inspectAndParse(browser, url) {
 
       console.log(`   ➜ SOLD rows so far: ${allParsedRows.length}`);
 
-      // Sniff pager links on the top page and decide next URL
-      const sniff = await sniffPagerLinks(page);
-      pagerDebug.push({ url: currentUrl, guessedParam: sniff.guessedParam });
-
-      // Try to pick a next URL
-      const nextUrl = chooseNextUrl(currentUrl, pageIndex, sniff);
-
-      if (!nextUrl || nextUrl === currentUrl) {
-        console.log('🛑 No usable next URL discovered. End of pagination.');
+      // Identify pager pieces inside BID_WINDOW_CONTAINER
+      const pieces = await scope.getPagerPieces();
+      if (!pieces.bar) {
+        console.log('🛑 Pager bar not found (Head_C third div). Ending.');
         break;
       }
 
-      // Probe next URL; ensure content changes
-      console.log('➡️ Probing next URL...', nextUrl);
-
-      const prevFirstHtml = await contentDom.evaluate(() => {
-        const first = document.querySelector('div[aid]');
-        return first ? first.innerHTML : '__NONE__';
-      });
-
-      await page.goto(nextUrl, { waitUntil: 'networkidle2', timeout: 120000 });
-      await sleep(600);
-
-      try {
-        ({ dom: contentDom } = await resolveContentRealm(page));
-        await contentDom.waitForSelector('div[aid]', { timeout: 20000 });
-      } catch {
-        console.log('🛑 Could not find list on next page. Ending.');
+      const indicator = await scope.readIndicator(pieces);
+      const current = indicator.current || (pagesVisited + 1);
+      const total   = indicator.total || null;
+      if (total && current >= total) {
+        console.log(`🛑 Reached last page (${current}/${total}).`);
         break;
       }
 
-      const changed = await waitForListChange(contentDom, 8000);
-      if (!changed) {
-        const nowFirstHtml = await contentDom.evaluate(() => {
-          const first = document.querySelector('div[aid]');
-          return first ? first.innerHTML : '__NONE__';
-        });
-        if (nowFirstHtml === prevFirstHtml) {
-          console.log('🛑 No list change after navigating to next URL. Ending.');
-          break;
+      const nextIndex = current + 1;
+
+      // Try input/set + Go/Enter (some tenants require this)
+      const acted = await scope.setPageInputAndGo(pieces, nextIndex);
+      if (acted) {
+        const changed = await scope.waitForListChange(30000);
+        if (changed) {
+          pagesVisited += 1;
+          continue;
         }
       }
 
-      // Advance counters
-      currentUrl = nextUrl;
-      pageIndex += 1;
-      pagesVisited += 1;
-    }
+      // Click the right arrow image (your recording's selector)
+      if (pieces.next) {
+        console.log('➡️ Clicking pager right arrow (span.PageRight > img)...');
+        const clicked = await scope.clickNextArrow(pieces);
+        if (clicked) {
+          const changed = await scope.waitForListChange(30000);
+          if (changed) {
+            pagesVisited += 1;
+            continue;
+          }
+        }
+      }
 
-    // Dump pager debug to help future tuning
-    try {
-      fs.writeFileSync(OUTPUT_PAGER_DEBUG, JSON.stringify(pagerDebug, null, 2));
-    } catch {}
+      // If neither action changed the list, stop to avoid looping
+      console.log('🛑 No list change after pager actions. Ending.');
+      break;
+    }
 
     return { relevantElements: allRelevantElements, parsedRows: allParsedRows };
   } catch (err) {
@@ -479,7 +427,7 @@ async function inspectAndParse(browser, url) {
 }
 
 // =========================
-/** MAIN */
+// MAIN
 // =========================
 (async () => {
   console.log('📥 Loading URLs...');
