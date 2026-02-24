@@ -487,21 +487,22 @@ async function appendRows(rows) {
   let filteredOutCount = 0;
 
   // Process each parsed row
-  for (const raw of rawData) {
-    const baseKey = normalizeBaseUrl(raw.sourceUrl || "");
-    const key = `${baseKey}|${(raw.caseNumber || '').trim()}|${(raw.parcelId || '').trim()}`;
+for (const raw of rawData) {
+  const baseKey = normalizeBaseUrl(raw.sourceUrl || "");
+  const key = `${baseKey}|${(raw.caseNumber || '').trim()}|${(raw.parcelId || '').trim()}`;
 
-    // Deduplicate
-    if (uniqueMap.has(key)) continue;
+  // Deduplicate
+  if (uniqueMap.has(key)) continue;
 
-    const mapped = mapRow(raw, urlMapping, anomalies);
+  const mapped = mapRow(raw, urlMapping, anomalies);
 
-    if (mapped) {
-      uniqueMap.set(key, mapped);
-    } else {
-      filteredOutCount++;
-    }
+  // 💥 FILTER HERE → Only include rows that meet surplus requirement
+  if (mapped && mapped["Meets Minimum Surplus? (Yes/No)"] === "Yes") {
+    uniqueMap.set(key, mapped);
+  } else {
+    filteredOutCount++;
   }
+}
 
   console.log(`ℹ️ Filtered out ${filteredOutCount} non-finalized or invalid rows.`);
 
