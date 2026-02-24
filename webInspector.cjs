@@ -235,6 +235,17 @@ async function getPageScopes(page) {
   };
 }
 
+// Extracts AUCTIONDATE=MM/DD/YYYY from the URL
+function extractAuctionDateFromUrl(url) {
+  try {
+    const u = new URL(url);
+    const d = u.searchParams.get("AUCTIONDATE");
+    return d ? d.trim() : "";
+  } catch {
+    return "";
+  }
+}
+
 // =========================
 // Parser (SOLD-only) – sitemap-accurate mapping on div[aid]
 // =========================
@@ -294,7 +305,7 @@ function parseAuctionsFromHtml(html, pageUrl) {
       openingBid: clean(openingBid),
       salePrice: clean(soldAmount),
       assessedValue: clean(assessedValue),
-      auctionDate: '',
+      auctionDate: extractAuctionDateFromUrl(pageUrl),
       cityStateZip: clean(cityStateZip),
       status: clean(status),
     };
