@@ -1,122 +1,84 @@
-name: Tax Deed Python Scraper
+name: Dallas CAD Scraper
 
 on:
   workflow_dispatch:
 
 jobs:
-
-  scraper:
-
+  run_dac_scraper:
     runs-on: ubuntu-latest
 
     steps:
+      # ---------------------------------------------
+      # Checkout repository
+      # ---------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    # --------------------------------------------------
-    # Checkout repository
-    # --------------------------------------------------
+      # ---------------------------------------------
+      # Install Chrome dependencies for Puppeteer
+      # ---------------------------------------------
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libnss3 \
+            libatk1.0-0 \
+            libatk-bridge2.0-0 \
+            libx11-xcb1 \
+            libxcb1 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxrandr2 \
+            libgbm1 \
+            libasound2 \
+            libpangocairo-1.0-0 \
+            libgtk-3-0
 
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      # ---------------------------------------------
+      # Setup Node.js
+      # ---------------------------------------------
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
+      # ---------------------------------------------
+      # Install dependencies
+      # ---------------------------------------------
+      - name: Install dependencies
+        run: |
+          npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth googleapis
 
-    # --------------------------------------------------
-    # Setup Python
-    # --------------------------------------------------
+      # ---------------------------------------------
+      # Write service-account.json
+      # ---------------------------------------------
+      - name: Write Service Account JSON
+        run: |
+          echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
+      # ---------------------------------------------
+      # Validate service account JSON
+      # ---------------------------------------------
+      - name: Validate Service Account
+        run: |
+          node -e "
+            const fs = require('fs');
+            const j = JSON.parse(fs.readFileSync('service-account.json','utf8'));
+            if (!j.private_key || !j.client_email) {
+              throw new Error('Service account file invalid');
+            }
+            console.log('Service Account Loaded:', j.client_email);
+          "
 
+      # ---------------------------------------------
+      # Run the DAC scraper
+      # ---------------------------------------------
+      - name: Run dac_scraper.cjs
+        run: node dac_scraper.cjs
 
-    # --------------------------------------------------
-    # Install browser + system dependencies
-    # --------------------------------------------------
-
-    - name: Install browser dependencies
-      run: |
-
-        sudo apt-get update
-
-        sudo apt-get install -y \
-          microsoft-edge-stable \
-          google-chrome-stable \
-          xvfb \
-          curl \
-          unzip \
-          fonts-liberation \
-          libatk-bridge2.0-0 \
-          libatk1.0-0 \
-          libgtk-3-0 \
-          libx11-xcb1 \
-          libxcomposite1 \
-          libxdamage1 \
-          libxrandr2 \
-          libgbm1 \
-          libasound2t64 \
-          libnss3 \
-          libxss1 \
-          libappindicator3-1 \
-          libu2f-udev
-
-
-    # --------------------------------------------------
-    # Install Python dependencies
-    # --------------------------------------------------
-
-    - name: Install Python dependencies
-      run: |
-
-        python -m pip install --upgrade pip
-
-        pip install -r requirements.txt
-
-
-    # --------------------------------------------------
-    # Write Google credentials
-    # --------------------------------------------------
-
-    - name: Write Service Account JSON
-      run: |
-
-        echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
-
-
-    # --------------------------------------------------
-    # Run Python scraper
-    # --------------------------------------------------
-
-    - name: Run Python tax deed scraper
-      run: |
-
-        xvfb-run \
-        --auto-servernum \
-        --server-args='-screen 0 1920x1080x24' \
-        python realForeclose.py
-
-
-
-    # --------------------------------------------------
-    # Upload artifacts
-    # --------------------------------------------------
-
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: scraper-artifacts
-        path: |
-          debug-*.html
-          *.json
-          *.log
-        continue-on-error: true
-
-
-    # --------------------------------------------------
-    # Cleanup secrets
-    # --------------------------------------------------
-
-    - name: Cleanup secrets
-      if: always()
-      run: |
-
-        rm -f service-account.json
+      # ---------------------------------------------
+      # Cleanup secrets
+      # ---------------------------------------------
+      - name: Cleanup service-account.json
+        if: always()
+        run: rm -f service-account.json
