@@ -1,4 +1,4 @@
-name: Docket Scraping Pipeline (Artifact Mode)
+name: Test YAML - DALLAS(Artifact Mode)
 
 on:
   workflow_dispatch:
