@@ -1,10 +1,9 @@
 // dac_scraper.cjs
-// Dallas CAD Parcel Scraper (WebInspector-style, year-matched owner extraction)
+// Dallas CAD Parcel Scraper (WebInspector-style, plain Puppeteer, year-matched owner extraction)
 // Requires:
-// npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth googleapis cheerio
+// npm install puppeteer googleapis cheerio
 
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const puppeteer = require('puppeteer');
 const fs = require('fs');
 const cheerio = require('cheerio');
 const { google } = require('googleapis');
@@ -23,8 +22,6 @@ const DRIVE_PARENT_FOLDER = '11c9BxTj6ej-fJNvECJM_oBDz3WfsSkWl';
 
 const TARGET_URL_1 = 'https://www.dallascad.org/AcctDetailRes.aspx?ID=';
 const TARGET_URL_2 = 'https://www.dallascad.org/AcctHistory.aspx?ID=';
-
-puppeteer.use(StealthPlugin());
 
 // =========================
 // GOOGLE AUTH
@@ -109,20 +106,26 @@ function extractOwnerNameForYear(html, auctionYear) {
   const $ = cheerio.load(html);
   let ownerName = '';
 
-  // Find the "Owner / Legal Description" section
+  // Try to find the block for the correct year
+  // Accept both "YYYY" and "MM/DD/YYYY" (from your sheet)
+  let yearPattern = auctionYear;
+  // If auctionYear is a date, extract the year part
+  const yearMatch = auctionYear.match(/\d{4}/);
+  if (yearMatch) yearPattern = yearMatch[0];
+
   const bodyText = $('body').text();
 
   // Regex to find the block for the correct year
   // Looks for: YEAR\nOWNER NAME\nADDRESS
-  const regex = new RegExp(`${auctionYear}\\s*([A-Z\\s]+)\\s*\\d{1,4}`, 'm');
+  const regex = new RegExp(`${yearPattern}\\s*([A-Z\\s]+)\\s*\\d{1,4}`, 'm');
   const match = bodyText.match(regex);
   if (match) {
     ownerName = match[1].trim();
   } else {
     // Fallback: try to find the first uppercase line after the year
-    const yearIdx = bodyText.indexOf(auctionYear);
+    const yearIdx = bodyText.indexOf(yearPattern);
     if (yearIdx !== -1) {
-      const afterYear = bodyText.slice(yearIdx + auctionYear.length).split('\n').map(l => l.trim());
+      const afterYear = bodyText.slice(yearIdx + yearPattern.length).split('\n').map(l => l.trim());
       for (const line of afterYear) {
         if (/^[A-Z\s]+$/.test(line) && line.length > 2) {
           ownerName = line;
@@ -143,7 +146,7 @@ function extractOwnerNameForYear(html, auctionYear) {
   console.log(`🧾 Loaded ${parcelData.length} Parcel IDs`);
 
   const browser = await puppeteer.launch({
-    headless: new,
+    headless: true,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -159,7 +162,7 @@ function extractOwnerNameForYear(html, auctionYear) {
   const page = await browser.newPage();
   page.setDefaultNavigationTimeout(120000);
 
-  // Anti-bot improvements (matching your inspector style)
+  // WebInspector-style anti-bot fingerprinting
   await page.setUserAgent(
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
       'AppleWebKit/537.36 (KHTML, like Gecko) ' +
