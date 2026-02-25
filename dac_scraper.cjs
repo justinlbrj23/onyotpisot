@@ -116,7 +116,7 @@ async function waitForSelectorOrRetry(page, selector, url) {
         console.log(`   ❌ Failed to load required content for: ${url}`);
         throw err;
       }
-      await page.waitForTimeout(3000);
+      await new Promise(r => setTimeout(r, 3000));
     }
   }
 }
@@ -191,7 +191,7 @@ async function waitForSelectorOrRetry(page, selector, url) {
         attempt1++;
         console.log(`⚠️ Navigation failure (${attempt1}/3) for: ${url1}`);
         if (attempt1 >= 3) throw err;
-        await page.waitForTimeout(4000);
+        await new Promise(r => setTimeout(r, 4000));
       }
     }
 
@@ -217,7 +217,7 @@ async function waitForSelectorOrRetry(page, selector, url) {
         attempt2++;
         console.log(`⚠️ Navigation failure (${attempt2}/3) for: ${url2}`);
         if (attempt2 >= 3) throw err;
-        await page.waitForTimeout(4000);
+        await new Promise(r => setTimeout(r, 4000));
       }
     }
 
