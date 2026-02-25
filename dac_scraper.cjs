@@ -13,7 +13,7 @@ const { google } = require('googleapis');
 // =========================
 const SERVICE_ACCOUNT_FILE = './service-account.json';
 const SPREADSHEET_ID = '1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA';
-const SHEET_NAME = 'web_tda';
+const SHEET_NAME = 'raw_main';
 const PARCEL_RANGE = 'F2:F';
 const OWNER_OUTPUT_COL = 'N';
 
