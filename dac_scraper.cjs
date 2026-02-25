@@ -1,11 +1,12 @@
 // dac_scraper.cjs
-// Dallas CAD Parcel Scraper
+// Dallas CAD Parcel Scraper (WebInspector-style, year-matched owner extraction)
 // Requires:
-// npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth googleapis
+// npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth googleapis cheerio
 
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const fs = require('fs');
+const cheerio = require('cheerio');
 const { google } = require('googleapis');
 
 // =========================
@@ -15,6 +16,7 @@ const SERVICE_ACCOUNT_FILE = './service-account.json';
 const SPREADSHEET_ID = '1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA';
 const SHEET_NAME = 'raw_main';
 const PARCEL_RANGE = 'F2:F';
+const YEAR_RANGE = 'H2:H';
 const OWNER_OUTPUT_COL = 'N';
 
 const DRIVE_PARENT_FOLDER = '11c9BxTj6ej-fJNvECJM_oBDz3WfsSkWl';
@@ -39,18 +41,33 @@ const sheets = google.sheets({ version: 'v4', auth });
 const drive = google.drive({ version: 'v3', auth });
 
 // =========================
-// Load Parcel IDs
+// Load Parcel IDs & Auction Years
 // =========================
-async function loadParcelIds() {
-  const res = await sheets.spreadsheets.values.get({
+async function loadParcelData() {
+  const parcelsRes = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
     range: `${SHEET_NAME}!${PARCEL_RANGE}`,
   });
+  const yearsRes = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${SHEET_NAME}!${YEAR_RANGE}`,
+  });
 
-  return (res.data.values || [])
-    .flat()
-    .map(v => (v || '').trim())
-    .filter(Boolean);
+  const parcels = (parcelsRes.data.values || []).flat().map(v => (v || '').trim());
+  const years = (yearsRes.data.values || []).flat().map(v => (v || '').trim());
+
+  // Pair up parcels and years by row index
+  const parcelData = [];
+  for (let i = 0; i < parcels.length; i++) {
+    if (parcels[i]) {
+      parcelData.push({
+        parcelId: parcels[i],
+        auctionYear: years[i] || '',
+        rowNum: i + 2
+      });
+    }
+  }
+  return parcelData;
 }
 
 // =========================
@@ -76,7 +93,7 @@ async function uploadToDrive(parentFolderId, localPath, driveName) {
 async function createSubfolder(parcelId) {
   const folder = await drive.files.create({
     requestBody: {
-      name: parcelId,  // Option A
+      name: parcelId,
       mimeType: 'application/vnd.google-apps.folder',
       parents: [DRIVE_PARENT_FOLDER],
     },
@@ -86,48 +103,44 @@ async function createSubfolder(parcelId) {
 }
 
 // =========================
-// Extract Owner Name
+// Extract Owner Name for Year (Cheerio, WebInspector-style)
 // =========================
-async function extractOwnerName(page) {
-  return await page.evaluate(() => {
-    const cells = Array.from(document.querySelectorAll('table td'));
-    if (cells.length < 2) return '';
+function extractOwnerNameForYear(html, auctionYear) {
+  const $ = cheerio.load(html);
+  let ownerName = '';
 
-    const raw = cells[1].innerText.trim();
-    return raw.split('\n')[0].trim();
-  });
-}
+  // Find the "Owner / Legal Description" section
+  const bodyText = $('body').text();
 
-// =========================
-// Strict Page Load Checker
-// =========================
-async function waitForSelectorOrRetry(page, selector, url) {
-  let attempts = 0;
-
-  while (attempts < 3) {
-    try {
-      console.log(`   ➜ Waiting for selector (${attempts + 1}/3): ${selector}`);
-      await page.waitForSelector(selector, { timeout: 15000 });
-      return true;
-    } catch (err) {
-      attempts++;
-      console.log(`   ⚠️ Selector not found on attempt ${attempts}`);
-      if (attempts >= 3) {
-        console.log(`   ❌ Failed to load required content for: ${url}`);
-        throw err;
+  // Regex to find the block for the correct year
+  // Looks for: YEAR\nOWNER NAME\nADDRESS
+  const regex = new RegExp(`${auctionYear}\\s*([A-Z\\s]+)\\s*\\d{1,4}`, 'm');
+  const match = bodyText.match(regex);
+  if (match) {
+    ownerName = match[1].trim();
+  } else {
+    // Fallback: try to find the first uppercase line after the year
+    const yearIdx = bodyText.indexOf(auctionYear);
+    if (yearIdx !== -1) {
+      const afterYear = bodyText.slice(yearIdx + auctionYear.length).split('\n').map(l => l.trim());
+      for (const line of afterYear) {
+        if (/^[A-Z\s]+$/.test(line) && line.length > 2) {
+          ownerName = line;
+          break;
+        }
       }
-      await new Promise(r => setTimeout(r, 3000));
     }
   }
+  return ownerName;
 }
 
 // =========================
 // MAIN
 // =========================
 (async () => {
-  console.log('📥 Loading PARCEL IDs...');
-  const parcels = await loadParcelIds();
-  console.log(`🧾 Loaded ${parcels.length} Parcel IDs`);
+  console.log('📥 Loading PARCEL IDs and Auction Years...');
+  const parcelData = await loadParcelData();
+  console.log(`🧾 Loaded ${parcelData.length} Parcel IDs`);
 
   const browser = await puppeteer.launch({
     headless: true,
@@ -163,29 +176,28 @@ async function waitForSelectorOrRetry(page, selector, url) {
   // ======================================
   // MAIN LOOP
   // ======================================
-  for (let i = 0; i < parcels.length; i++) {
-    const parcel = parcels[i];
-    const rowNum = i + 2;
-
+  for (const { parcelId, auctionYear, rowNum } of parcelData) {
     console.log('\n==============================');
-    console.log(`📌 Processing Parcel: ${parcel}`);
-    console.log(`Row: ${rowNum}`);
+    console.log(`📌 Processing Parcel: ${parcelId}`);
+    console.log(`Row: ${rowNum}, Auction Year: ${auctionYear}`);
 
     // Create Drive folder
-    const folderId = await createSubfolder(parcel);
+    const folderId = await createSubfolder(parcelId);
     console.log(`📁 Created Drive folder: ${folderId}`);
 
     // -------------------------------
     // TARGET URL 1 (DETAIL PAGE)
     // -------------------------------
-    const url1 = TARGET_URL_1 + parcel;
+    const url1 = TARGET_URL_1 + parcelId;
     console.log(`🌐 Navigating to: ${url1}`);
 
     let attempt1 = 0;
+    let html1 = '';
     while (attempt1 < 3) {
       try {
         await page.goto(url1, { waitUntil: 'domcontentloaded', timeout: 120000 });
-        await waitForSelectorOrRetry(page, 'table#MainContent_AccountDetailTable', url1);
+        await new Promise(r => setTimeout(r, 3000));
+        html1 = await page.content();
         break;
       } catch (err) {
         attempt1++;
@@ -195,23 +207,25 @@ async function waitForSelectorOrRetry(page, selector, url) {
       }
     }
 
-    const shot1 = `detail_${parcel}.jpg`;
+    const shot1 = `detail_${parcelId}.jpg`;
     await page.screenshot({ path: shot1, type: 'jpeg', fullPage: true });
-    await uploadToDrive(folderId, shot1, `DETAIL_${parcel}.jpg`);
+    await uploadToDrive(folderId, shot1, `DETAIL_${parcelId}.jpg`);
     fs.unlinkSync(shot1);
     console.log(`📤 Uploaded DETAIL screenshot`);
 
     // -------------------------------
     // TARGET URL 2 (HISTORY PAGE)
     // -------------------------------
-    const url2 = TARGET_URL_2 + parcel;
+    const url2 = TARGET_URL_2 + parcelId;
     console.log(`🌐 Navigating to: ${url2}`);
 
     let attempt2 = 0;
+    let html2 = '';
     while (attempt2 < 3) {
       try {
         await page.goto(url2, { waitUntil: 'domcontentloaded', timeout: 120000 });
-        await waitForSelectorOrRetry(page, 'table#MainContent_HistoryGridView', url2);
+        await new Promise(r => setTimeout(r, 3000));
+        html2 = await page.content();
         break;
       } catch (err) {
         attempt2++;
@@ -221,17 +235,17 @@ async function waitForSelectorOrRetry(page, selector, url) {
       }
     }
 
-    const shot2 = `history_${parcel}.jpg`;
+    const shot2 = `history_${parcelId}.jpg`;
     await page.screenshot({ path: shot2, type: 'jpeg', fullPage: true });
-    await uploadToDrive(folderId, shot2, `HISTORY_${parcel}.jpg`);
+    await uploadToDrive(folderId, shot2, `HISTORY_${parcelId}.jpg`);
     fs.unlinkSync(shot2);
     console.log(`📤 Uploaded HISTORY screenshot`);
 
     // -------------------------------
-    // Extract Owner Name
+    // Extract Owner Name for Auction Year
     // -------------------------------
-    const ownerName = await extractOwnerName(page);
-    console.log(`👤 Owner: ${ownerName}`);
+    const ownerName = extractOwnerNameForYear(html2, auctionYear);
+    console.log(`👤 Owner for ${auctionYear}: ${ownerName}`);
 
     // -------------------------------
     // Write back to sheet
