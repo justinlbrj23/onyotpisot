@@ -1,228 +1,204 @@
-/**
- * dac_scraper.cjs
- * FULLY REWRITTEN with the robust architecture used in webInspector.cjs
- *
- * Features:
- *  - Retry navigation
- *  - Scoped DOM intelligence
- *  - Anti-bot protections
- *  - Cheerio parsing
- *  - Stable selectors & fallback mechanisms
- *  - Detailed diagnostics
- *  - GitHub Actions optimized
- */
+// dac_scraper.cjs
+// Dallas CAD Parcel Scraper (Artifact Mode, PDFKit)
+// Requires: npm install puppeteer cheerio googleapis pdfkit
 
-const puppeteer = require('puppeteer');
-const cheerio = require('cheerio');
-const fs = require('fs');
+const puppeteer = require("puppeteer");
+const fs = require("fs");
+const cheerio = require("cheerio");
+const PDFDocument = require("pdfkit");
+const path = require("path");
+const { google } = require("googleapis");
 
 // =========================
 // CONFIG
 // =========================
-const PARCELS_FILE = './parcels.json';          // input list
-const OUTPUT_FILE  = './dac_results.json';      // extracted rows
-const ERRORS_FILE  = './dac_errors.json';
+const SERVICE_ACCOUNT_FILE = "./service-account.json";
+const SPREADSHEET_ID = "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
+const SHEET_NAME = "raw_main";
+const PARCEL_RANGE = "F2:F";
+const YEAR_RANGE = "H2:H";
+const OWNER_OUTPUT_COL = "N";
 
-const MAX_RETRIES = 4;
-const NAV_TIMEOUT = 180000;                    // 3 minutes
-const WAIT_TIMEOUT = 60000;
+const TARGET_URL_1 = "https://www.dallascad.org/AcctDetailRes.aspx?ID=";
+const TARGET_URL_2 = "https://www.dallascad.org/AcctHistory.aspx?ID=";
 
-// Dallas CAD root
-const DAC_URL = "https://www.dallascad.org/AcctDetailRes.aspx?ID=";
-
-// =========================
-// Utilities
-// =========================
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-function clean(txt) {
-  if (!txt) return '';
-  return txt.replace(/\s+/g, ' ').trim();
-}
-
-function parseCurrency(str) {
-  if (!str) return null;
-  const n = parseFloat(str.replace(/[^0-9.-]/g, ''));
-  return isNaN(n) ? null : n;
+// Ensure artifacts directory exists
+if (!fs.existsSync("./artifacts")) {
+  fs.mkdirSync("./artifacts");
 }
 
 // =========================
-// Load Parcel IDs
+// GOOGLE AUTH (Sheets Only)
 // =========================
-function loadParcelIds() {
-  if (!fs.existsSync(PARCELS_FILE)) {
-    console.error(`❌ Missing ${PARCELS_FILE}`);
-    return [];
-  }
-  const arr = JSON.parse(fs.readFileSync(PARCELS_FILE, 'utf8'));
-  return arr.map(v => String(v).trim()).filter(Boolean);
-}
+const auth = new google.auth.GoogleAuth({
+  keyFile: SERVICE_ACCOUNT_FILE,
+  scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+});
+
+const sheets = google.sheets({ version: "v4", auth });
 
 // =========================
-// Anti-bot hardening
+// Load PARCEL IDs + Years
 // =========================
-async function preparePage(page) {
-  await page.setUserAgent(
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
-    'AppleWebKit/537.36 (KHTML, like Gecko) ' +
-    'Chrome/121.0.0.0 Safari/537.36'
-  );
-  await page.setExtraHTTPHeaders({
-    'Accept-Language': 'en-US,en;q=0.9'
+async function loadParcelData() {
+  const parcelsRes = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${SHEET_NAME}!${PARCEL_RANGE}`,
   });
-  await page.evaluateOnNewDocument(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => false });
+  const yearsRes = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${SHEET_NAME}!${YEAR_RANGE}`,
   });
-}
 
-// =========================
-// Retry navigation
-// =========================
-async function gotoWithRetries(page, url, retries = MAX_RETRIES) {
-  for (let i = 0; i < retries; i++) {
-    try {
-      return await page.goto(url, {
-        waitUntil: 'domcontentloaded',
-        timeout: NAV_TIMEOUT
+  const parcels = (parcelsRes.data.values || []).flat().map(v => (v || "").trim());
+  const years = (yearsRes.data.values || []).flat().map(v => (v || "").trim());
+
+  const items = [];
+  for (let i = 0; i < parcels.length; i++) {
+    if (parcels[i]) {
+      items.push({
+        parcelId: parcels[i],
+        auctionYear: years[i] || "",
+        rowNum: i + 2
       });
-    } catch (err) {
-      if (i === retries - 1) throw err;
-      console.log(`   🔁 Navigation retry ${i+1}/${retries}...`);
-      await sleep(1500);
     }
   }
+  return items;
 }
 
 // =========================
-// DallasCAD scoped helpers
+// Owner Extraction Logic
 // =========================
-async function getDACScope(page) {
-  await page.waitForSelector('#MainContent', { timeout: WAIT_TIMEOUT });
-
-  return {
-    async currentHtml() {
-      return await page.$eval('#MainContent', el => el.innerHTML);
-    },
-    async waitForDomChange(prev, timeoutMs = 25000) {
-      const start = Date.now();
-      while (Date.now() - start < timeoutMs) {
-        try {
-          const now = await this.currentHtml();
-          if (now !== prev) return true;
-        } catch {}
-        await sleep(400);
-      }
-      return false;
-    }
-  };
-}
-
-// =========================
-// Parser (Cheerio)
-// =========================
-function parseDallasCAD(html, url) {
+function extractOwnerName(html, auctionYear) {
   const $ = cheerio.load(html);
-  const result = { sourceUrl: url };
+  let owner = "";
 
-  const findVal = (label) => {
-    label = clean(label).toLowerCase();
-    let found = '';
-    $('table').find('tr').each((_, tr) => {
-      const th = clean($(tr).find('th').first().text()).toLowerCase();
-      if (th.includes(label)) {
-        found = clean($(tr).find('td').first().text());
-      }
-    });
-    return found;
-  };
+  let yearPattern = auctionYear;
+  const m = auctionYear.match(/\d{4}/);
+  if (m) yearPattern = m[0];
 
-  result.parcelId       = findVal("account");
-  result.owner          = findVal("owner");
-  result.streetAddress  = findVal("address");
-  result.legalDesc      = findVal("legal");
-  result.cityStateZip   = findVal("city");
-  result.landValue      = findVal("land");
-  result.improveValue   = findVal("improvement");
-  result.totalValue     = findVal("total");
-  result.lastUpdate     = findVal("update");
+  const tableCell = $("table td").filter((i, el) => {
+    return $(el).text().includes(yearPattern);
+  }).first();
 
-  return result;
-}
+  if (tableCell.length) {
+    const fullText = tableCell.text().trim();
+    const lines = fullText.split("\n").map(l => l.trim()).filter(Boolean);
 
-// =========================
-// Main inspector per parcel
-// =========================
-async function inspectParcel(browser, parcelId) {
-  const url = DAC_URL + parcelId;
-  const page = await browser.newPage();
-  page.setDefaultNavigationTimeout(NAV_TIMEOUT);
-
-  try {
-    await preparePage(page);
-    console.log(`🌐 Visiting: ${url}`);
-
-    await gotoWithRetries(page, url);
-    const scope = await getDACScope(page);
-
-    const html = await scope.currentHtml();
-    const parsed = parseDallasCAD(html, url);
-
-    return { parsed, error: null };
-
-  } catch (err) {
-    return { parsed: null, error: { parcelId, url, message: err.message } };
-  } finally {
-    await page.close();
+    // Owner name is typically on second line
+    if (lines.length > 1) {
+      owner = lines[1].replace(/\s+/g, " ").trim();
+    }
   }
+
+  return owner;
 }
 
 // =========================
-// MAIN
+// Build PDF for each parcel
+// =========================
+function createPDF(parcelId, detailScreenshot, historyScreenshot) {
+  const pdfPath = path.join("artifacts", `parcel_${parcelId}.pdf`);
+  const doc = new PDFDocument({ autoFirstPage: false });
+  const stream = fs.createWriteStream(pdfPath);
+  doc.pipe(stream);
+
+  const img1 = doc.openImage(detailScreenshot);
+  doc.addPage({ size: [img1.width, img1.height] });
+  doc.image(img1, 0, 0);
+
+  const img2 = doc.openImage(historyScreenshot);
+  doc.addPage({ size: [img2.width, img2.height] });
+  doc.image(img2, 0, 0);
+
+  doc.end();
+  return pdfPath;
+}
+
+// =========================
+// MAIN PROCESS
 // =========================
 (async () => {
-  console.log('📥 Loading parcel IDs...');
-  const parcels = loadParcelIds();
-  console.log(`🧾 Loaded ${parcels.length} parcels`);
+  console.log("📥 Loading parcel data...");
+  const parcelData = await loadParcelData();
+  console.log(`📄 Found ${parcelData.length} parcels`);
 
   const browser = await puppeteer.launch({
     headless: true,
     args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-blink-features=AutomationControlled',
-      '--ignore-certificate-errors',
-      '--disable-gpu',
-      '--single-process',
-      '--no-zygote'
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-blink-features=AutomationControlled",
+      "--ignore-certificate-errors",
+      "--disable-gpu",
+      "--single-process",
+      "--no-zygote"
     ]
   });
 
-  const finalRows = [];
-  const errors = [];
+  const page = await browser.newPage();
+  page.setDefaultNavigationTimeout(120000);
 
-  for (const parcelId of parcels) {
-    console.log('==============================');
-    console.log(`📌 Processing Parcel: ${parcelId}`);
+  await page.setUserAgent(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+      "AppleWebKit/537.36 (KHTML, like Gecko) " +
+      "Chrome/121.0.0.0 Safari/537.36"
+  );
 
-    const { parsed, error } = await inspectParcel(browser, parcelId);
+  await page.setExtraHTTPHeaders({
+    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9"
+  });
 
-    if (parsed) {
-      finalRows.push(parsed);
-      console.log(`   ✔ Extracted tax data`);
-    } else {
-      errors.push(error);
-      console.log(`   ❌ Error: ${error.message}`);
-    }
+  await page.evaluateOnNewDocument(() => {
+    Object.defineProperty(navigator, "webdriver", { get: () => false });
+  });
+
+  // Process each parcel
+  for (const { parcelId, auctionYear, rowNum } of parcelData) {
+    console.log("\n==============================");
+    console.log(`📌 Parcel: ${parcelId} | Auction Year: ${auctionYear}`);
+
+    // DETAIL PAGE
+    const url1 = TARGET_URL_1 + parcelId;
+    console.log("➡️ Navigating:", url1);
+    await page.goto(url1, { waitUntil: "domcontentloaded" });
+    await new Promise(r => setTimeout(r, 3000));
+    const detailFile = `detail_${parcelId}.jpg`;
+    await page.screenshot({ path: detailFile, fullPage: true });
+
+    // HISTORY PAGE
+    const url2 = TARGET_URL_2 + parcelId;
+    console.log("➡️ Navigating:", url2);
+    await page.goto(url2, { waitUntil: "domcontentloaded" });
+    await new Promise(r => setTimeout(r, 3000));
+    const html2 = await page.content();
+    const historyFile = `history_${parcelId}.jpg`;
+    await page.screenshot({ path: historyFile, fullPage: true });
+
+    // Extract Owner
+    const ownerName = extractOwnerName(html2, auctionYear);
+    console.log(`👤 Owner Extracted: ${ownerName}`);
+
+    // Update Sheet
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!${OWNER_OUTPUT_COL}${rowNum}`,
+      valueInputOption: "RAW",
+      requestBody: { values: [[ownerName]] }
+    });
+    console.log("📌 Sheet updated");
+
+    // PDF
+    const pdfPath = createPDF(parcelId, detailFile, historyFile);
+    console.log("📄 PDF Generated:", pdfPath);
+
+    // Clean temp images
+    fs.unlinkSync(detailFile);
+    fs.unlinkSync(historyFile);
   }
 
   await browser.close();
-
-  fs.writeFileSync(OUTPUT_FILE, JSON.stringify(finalRows, null, 2));
-  fs.writeFileSync(ERRORS_FILE, JSON.stringify(errors, null, 2));
-
-  console.log('==============================');
-  console.log(`✅ Saved results → ${OUTPUT_FILE}`);
-  console.log(`⚠️ Saved errors → ${ERRORS_FILE}`);
-  console.log('🏁 Done.');
+  console.log("\n🏁 DONE — All parcels processed. PDFs ready for GitHub artifacts.");
 })();
