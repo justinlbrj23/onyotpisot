@@ -143,7 +143,7 @@ function extractOwnerNameForYear(html, auctionYear) {
   console.log(`🧾 Loaded ${parcelData.length} Parcel IDs`);
 
   const browser = await puppeteer.launch({
-    headless: true,
+    headless: new,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
