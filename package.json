@@ -27,6 +27,7 @@
     "puppeteer-extra": "^3.3.6",
     "pdfjs-dist": "^3.6.172",
     "pdf-lib": "^1.17.1",
+    "pdfkit": "^0.15.0",
     "pdf-parse": "^1.1.1",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "uuidv4": "^6.2.13",
