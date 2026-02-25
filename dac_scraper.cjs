@@ -1,41 +1,42 @@
 // dac_scraper.cjs
-// Dallas CAD Parcel Scraper (WebInspector-style, plain Puppeteer, year-matched owner extraction)
+// Dallas CAD Parcel Scraper with PDF output + GitHub Artifacts
 // Requires:
-// npm install puppeteer googleapis cheerio
+// npm install puppeteer cheerio googleapis pdfkit
 
-const puppeteer = require('puppeteer');
-const fs = require('fs');
-const cheerio = require('cheerio');
-const { google } = require('googleapis');
+const puppeteer = require("puppeteer");
+const fs = require("fs");
+const cheerio = require("cheerio");
+const PDFDocument = require("pdfkit");
+const { google } = require("googleapis");
+const path = require("path");
 
 // =========================
 // CONFIG
 // =========================
-const SERVICE_ACCOUNT_FILE = './service-account.json';
-const SPREADSHEET_ID = '1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA';
-const SHEET_NAME = 'raw_main';
-const PARCEL_RANGE = 'F2:F';
-const YEAR_RANGE = 'H2:H';
-const OWNER_OUTPUT_COL = 'N';
+const SERVICE_ACCOUNT_FILE = "./service-account.json";
+const SPREADSHEET_ID = "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
+const SHEET_NAME = "raw_main";
+const PARCEL_RANGE = "F2:F";
+const YEAR_RANGE = "H2:H";
+const OWNER_OUTPUT_COL = "N";
 
-const DRIVE_PARENT_FOLDER = '11c9BxTj6ej-fJNvECJM_oBDz3WfsSkWl';
+const TARGET_URL_1 = "https://www.dallascad.org/AcctDetailRes.aspx?ID=";
+const TARGET_URL_2 = "https://www.dallascad.org/AcctHistory.aspx?ID=";
 
-const TARGET_URL_1 = 'https://www.dallascad.org/AcctDetailRes.aspx?ID=';
-const TARGET_URL_2 = 'https://www.dallascad.org/AcctHistory.aspx?ID=';
+// Ensure artifacts directory exists
+if (!fs.existsSync("./artifacts")) {
+  fs.mkdirSync("./artifacts");
+}
 
 // =========================
 // GOOGLE AUTH
 // =========================
 const auth = new google.auth.GoogleAuth({
   keyFile: SERVICE_ACCOUNT_FILE,
-  scopes: [
-    'https://www.googleapis.com/auth/spreadsheets',
-    'https://www.googleapis.com/auth/drive'
-  ]
+  scopes: ["https://www.googleapis.com/auth/spreadsheets"],
 });
 
-const sheets = google.sheets({ version: 'v4', auth });
-const drive = google.drive({ version: 'v3', auth });
+const sheets = google.sheets({ version: "v4", auth });
 
 // =========================
 // Load Parcel IDs & Auction Years
@@ -50,17 +51,16 @@ async function loadParcelData() {
     range: `${SHEET_NAME}!${YEAR_RANGE}`,
   });
 
-  const parcels = (parcelsRes.data.values || []).flat().map(v => (v || '').trim());
-  const years = (yearsRes.data.values || []).flat().map(v => (v || '').trim());
+  const parcels = (parcelsRes.data.values || []).flat().map((v) => (v || "").trim());
+  const years = (yearsRes.data.values || []).flat().map((v) => (v || "").trim());
 
-  // Pair up parcels and years by row index
   const parcelData = [];
   for (let i = 0; i < parcels.length; i++) {
     if (parcels[i]) {
       parcelData.push({
         parcelId: parcels[i],
-        auctionYear: years[i] || '',
-        rowNum: i + 2
+        auctionYear: years[i] || "",
+        rowNum: i + 2,
       });
     }
   }
@@ -68,64 +68,29 @@ async function loadParcelData() {
 }
 
 // =========================
-// Drive Upload Helper
-// =========================
-async function uploadToDrive(parentFolderId, localPath, driveName) {
-  await drive.files.create({
-    requestBody: {
-      name: driveName,
-      parents: [parentFolderId],
-    },
-    media: {
-      mimeType: 'image/jpeg',
-      body: fs.createReadStream(localPath),
-    },
-    fields: 'id',
-  });
-}
-
-// =========================
-// Create Drive Subfolder
-// =========================
-async function createSubfolder(parcelId) {
-  const folder = await drive.files.create({
-    requestBody: {
-      name: parcelId,
-      mimeType: 'application/vnd.google-apps.folder',
-      parents: [DRIVE_PARENT_FOLDER],
-    },
-    fields: 'id',
-  });
-  return folder.data.id;
-}
-
-// =========================
-// Extract Owner Name for Year (Cheerio, WebInspector-style)
+// Extract Owner Name
 // =========================
 function extractOwnerNameForYear(html, auctionYear) {
   const $ = cheerio.load(html);
-  let ownerName = '';
+  let ownerName = "";
 
-  // Try to find the block for the correct year
-  // Accept both "YYYY" and "MM/DD/YYYY" (from your sheet)
   let yearPattern = auctionYear;
-  // If auctionYear is a date, extract the year part
   const yearMatch = auctionYear.match(/\d{4}/);
   if (yearMatch) yearPattern = yearMatch[0];
 
-  const bodyText = $('body').text();
+  const bodyText = $("body").text();
 
-  // Regex to find the block for the correct year
-  // Looks for: YEAR\nOWNER NAME\nADDRESS
-  const regex = new RegExp(`${yearPattern}\\s*([A-Z\\s]+)\\s*\\d{1,4}`, 'm');
+  const regex = new RegExp(`${yearPattern}\\s*([A-Z\\s]+)\\s*\\d{1,4}`, "m");
   const match = bodyText.match(regex);
   if (match) {
     ownerName = match[1].trim();
   } else {
-    // Fallback: try to find the first uppercase line after the year
     const yearIdx = bodyText.indexOf(yearPattern);
     if (yearIdx !== -1) {
-      const afterYear = bodyText.slice(yearIdx + yearPattern.length).split('\n').map(l => l.trim());
+      const afterYear = bodyText
+        .slice(yearIdx + yearPattern.length)
+        .split("\n")
+        .map((l) => l.trim());
       for (const line of afterYear) {
         if (/^[A-Z\s]+$/.test(line) && line.length > 2) {
           ownerName = line;
@@ -138,127 +103,110 @@ function extractOwnerNameForYear(html, auctionYear) {
 }
 
 // =========================
+// Create PDF using PDFKIT
+// =========================
+function createParcelPDF(parcelId, screenshot1, screenshot2) {
+  const pdfPath = path.join("artifacts", `parcel_${parcelId}.pdf`);
+  const doc = new PDFDocument({ autoFirstPage: false });
+
+  const stream = fs.createWriteStream(pdfPath);
+  doc.pipe(stream);
+
+  // Add DETAIL screenshot
+  const img1 = doc.openImage(screenshot1);
+  doc.addPage({ size: [img1.width, img1.height] });
+  doc.image(img1, 0, 0);
+
+  // Add HISTORY screenshot
+  const img2 = doc.openImage(screenshot2);
+  doc.addPage({ size: [img2.width, img2.height] });
+  doc.image(img2, 0, 0);
+
+  doc.end();
+  return pdfPath;
+}
+
+// =========================
 // MAIN
 // =========================
 (async () => {
-  console.log('📥 Loading PARCEL IDs and Auction Years...');
+  console.log("📥 Loading PARCEL IDs and Auction Years...");
   const parcelData = await loadParcelData();
   console.log(`🧾 Loaded ${parcelData.length} Parcel IDs`);
 
   const browser = await puppeteer.launch({
     headless: true,
     args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-blink-features=AutomationControlled',
-      '--ignore-certificate-errors',
-      '--disable-gpu',
-      '--single-process',
-      '--no-zygote',
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-blink-features=AutomationControlled",
+      "--ignore-certificate-errors",
+      "--disable-gpu",
+      "--single-process",
+      "--no-zygote",
     ],
   });
 
   const page = await browser.newPage();
   page.setDefaultNavigationTimeout(120000);
 
-  // WebInspector-style anti-bot fingerprinting
   await page.setUserAgent(
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
-      'AppleWebKit/537.36 (KHTML, like Gecko) ' +
-      'Chrome/121.0.0.0 Safari/537.36'
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+      "AppleWebKit/537.36 (KHTML, like Gecko) " +
+      "Chrome/121.0.0.0 Safari/537.36"
   );
+
   await page.setExtraHTTPHeaders({
-    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.9',
+    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
   });
+
   await page.evaluateOnNewDocument(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => false });
+    Object.defineProperty(navigator, "webdriver", { get: () => false });
   });
 
-  // ======================================
   // MAIN LOOP
-  // ======================================
   for (const { parcelId, auctionYear, rowNum } of parcelData) {
-    console.log('\n==============================');
+    console.log("\n==============================");
     console.log(`📌 Processing Parcel: ${parcelId}`);
-    console.log(`Row: ${rowNum}, Auction Year: ${auctionYear}`);
 
-    // Create Drive folder
-    const folderId = await createSubfolder(parcelId);
-    console.log(`📁 Created Drive folder: ${folderId}`);
-
-    // -------------------------------
-    // TARGET URL 1 (DETAIL PAGE)
-    // -------------------------------
+    // URL 1 - DETAIL
     const url1 = TARGET_URL_1 + parcelId;
     console.log(`🌐 Navigating to: ${url1}`);
+    await page.goto(url1, { waitUntil: "domcontentloaded" });
+    await new Promise((r) => setTimeout(r, 3000));
+    const html1 = await page.content();
+    const detailFile = `detail_${parcelId}.jpg`;
+    await page.screenshot({ path: detailFile, fullPage: true });
 
-    let attempt1 = 0;
-    let html1 = '';
-    while (attempt1 < 3) {
-      try {
-        await page.goto(url1, { waitUntil: 'domcontentloaded', timeout: 120000 });
-        await new Promise(r => setTimeout(r, 3000));
-        html1 = await page.content();
-        break;
-      } catch (err) {
-        attempt1++;
-        console.log(`⚠️ Navigation failure (${attempt1}/3) for: ${url1}`);
-        if (attempt1 >= 3) throw err;
-        await new Promise(r => setTimeout(r, 4000));
-      }
-    }
-
-    const shot1 = `detail_${parcelId}.jpg`;
-    await page.screenshot({ path: shot1, type: 'jpeg', fullPage: true });
-    await uploadToDrive(folderId, shot1, `DETAIL_${parcelId}.jpg`);
-    fs.unlinkSync(shot1);
-    console.log(`📤 Uploaded DETAIL screenshot`);
-
-    // -------------------------------
-    // TARGET URL 2 (HISTORY PAGE)
-    // -------------------------------
+    // URL 2 - HISTORY
     const url2 = TARGET_URL_2 + parcelId;
     console.log(`🌐 Navigating to: ${url2}`);
+    await page.goto(url2, { waitUntil: "domcontentloaded" });
+    await new Promise((r) => setTimeout(r, 3000));
+    const html2 = await page.content();
+    const historyFile = `history_${parcelId}.jpg`;
+    await page.screenshot({ path: historyFile, fullPage: true });
 
-    let attempt2 = 0;
-    let html2 = '';
-    while (attempt2 < 3) {
-      try {
-        await page.goto(url2, { waitUntil: 'domcontentloaded', timeout: 120000 });
-        await new Promise(r => setTimeout(r, 3000));
-        html2 = await page.content();
-        break;
-      } catch (err) {
-        attempt2++;
-        console.log(`⚠️ Navigation failure (${attempt2}/3) for: ${url2}`);
-        if (attempt2 >= 3) throw err;
-        await new Promise(r => setTimeout(r, 4000));
-      }
-    }
-
-    const shot2 = `history_${parcelId}.jpg`;
-    await page.screenshot({ path: shot2, type: 'jpeg', fullPage: true });
-    await uploadToDrive(folderId, shot2, `HISTORY_${parcelId}.jpg`);
-    fs.unlinkSync(shot2);
-    console.log(`📤 Uploaded HISTORY screenshot`);
-
-    // -------------------------------
-    // Extract Owner Name for Auction Year
-    // -------------------------------
+    // Extract owner
     const ownerName = extractOwnerNameForYear(html2, auctionYear);
     console.log(`👤 Owner for ${auctionYear}: ${ownerName}`);
 
-    // -------------------------------
-    // Write back to sheet
-    // -------------------------------
-    const writeRange = `${SHEET_NAME}!${OWNER_OUTPUT_COL}${rowNum}`;
+    // PDF Output
+    const pdfPath = createParcelPDF(parcelId, detailFile, historyFile);
+    console.log(`📄 Created PDF: ${pdfPath}`);
 
+    // Clean temp images
+    fs.unlinkSync(detailFile);
+    fs.unlinkSync(historyFile);
+
+    // Update Google Sheet
+    const writeRange = `${SHEET_NAME}!${OWNER_OUTPUT_COL}${rowNum}`;
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
       range: writeRange,
-      valueInputOption: 'RAW',
+      valueInputOption: "RAW",
       requestBody: { values: [[ownerName]] },
     });
 
@@ -266,5 +214,5 @@ function extractOwnerNameForYear(html, auctionYear) {
   }
 
   await browser.close();
-  console.log('\n🏁 DONE — All parcels processed successfully!');
+  console.log("\n🏁 DONE — All parcels processed successfully!");
 })();
