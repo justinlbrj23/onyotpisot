@@ -7,11 +7,11 @@
  *  - Extracts owner name from URL 2 and writes back to Sheet column N
  */
 
-import puppeteer from "puppeteer-extra";
-import StealthPlugin from "puppeteer-extra-plugin-stealth";
-import { google } from "googleapis";
-import fs from "fs";
-import path from "path";
+const puppeteer = require("puppeteer-extra");
+const StealthPlugin = require("puppeteer-extra-plugin-stealth");
+const { google } = require("googleapis");
+const fs = require("fs");
+const path = require("path");
 
 puppeteer.use(StealthPlugin());
 
