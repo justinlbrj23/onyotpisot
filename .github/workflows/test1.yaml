@@ -1,84 +1,81 @@
-name: Dallas CAD Scraper
+name: Docket Scraping Pipeline (Artifact Mode)
 
 on:
   workflow_dispatch:
 
 jobs:
-  run_dac_scraper:
+  tda_pipeline:
     runs-on: ubuntu-latest
 
     steps:
-      # ---------------------------------------------
+      # --------------------------------------------------
       # Checkout repository
-      # ---------------------------------------------
+      # --------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ---------------------------------------------
-      # Install Chrome dependencies for Puppeteer
-      # ---------------------------------------------
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libnss3 \
-            libatk1.0-0 \
-            libatk-bridge2.0-0 \
-            libx11-xcb1 \
-            libxcb1 \
-            libxcomposite1 \
-            libxdamage1 \
-            libxrandr2 \
-            libgbm1 \
-            libasound2 \
-            libpangocairo-1.0-0 \
-            libgtk-3-0
-
-      # ---------------------------------------------
+      # --------------------------------------------------
       # Setup Node.js
-      # ---------------------------------------------
+      # --------------------------------------------------
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      # ---------------------------------------------
+      # --------------------------------------------------
       # Install dependencies
-      # ---------------------------------------------
+      # --------------------------------------------------
       - name: Install dependencies
         run: |
-          npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth googleapis
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+          # Ensure stealth packages are present
+          npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis
 
-      # ---------------------------------------------
-      # Write service-account.json
-      # ---------------------------------------------
+      # --------------------------------------------------
+      # Write RAW Service Account JSON
+      # --------------------------------------------------
       - name: Write Service Account JSON
         run: |
           echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
 
-      # ---------------------------------------------
-      # Validate service account JSON
-      # ---------------------------------------------
-      - name: Validate Service Account
+      # --------------------------------------------------
+      # Validate Service Account JSON
+      # --------------------------------------------------
+      - name: Validate service account JSON
         run: |
           node -e "
             const fs = require('fs');
             const j = JSON.parse(fs.readFileSync('service-account.json','utf8'));
             if (!j.private_key || !j.client_email) {
-              throw new Error('Service account file invalid');
+              throw new Error('Invalid service account JSON');
             }
-            console.log('Service Account Loaded:', j.client_email);
+            console.log('Service account OK:', j.client_email);
           "
 
-      # ---------------------------------------------
-      # Run the DAC scraper
-      # ---------------------------------------------
+      
+      # --------------------------------------------------
+      # STEP 2 — Run dac_scraper.cjs (Sold-only)
+      # --------------------------------------------------
       - name: Run dac_scraper.cjs
         run: node dac_scraper.cjs
 
-      # ---------------------------------------------
-      # Cleanup secrets
-      # ---------------------------------------------
-      - name: Cleanup service-account.json
+      # Save artifacts from webInspector
+      - name: Upload inspector artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: inspector-artifacts
+          path: |
+            raw-elements.json
+            parsed-auctions.json
+            errors.json
+
+      # --------------------------------------------------
+      # Cleanup credentials
+      # --------------------------------------------------
+      - name: Cleanup secrets
         if: always()
         run: rm -f service-account.json
