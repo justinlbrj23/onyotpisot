@@ -63,15 +63,11 @@ jobs:
       - name: Run dac_scraper.cjs
         run: node dac_scraper.cjs
 
-      # Save artifacts from webInspector
-      - name: Upload inspector artifacts
+      - name: Upload parcel PDFs
         uses: actions/upload-artifact@v4
         with:
-          name: inspector-artifacts
-          path: |
-            raw-elements.json
-            parsed-auctions.json
-            errors.json
+          name: parcel-reports
+          path: artifacts/*.pdf
 
       # --------------------------------------------------
       # Cleanup credentials
