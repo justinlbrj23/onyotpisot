@@ -76,13 +76,12 @@ async function uploadToDrive(parentFolderId, localPath, driveName) {
 async function createSubfolder(parcelId) {
   const folder = await drive.files.create({
     requestBody: {
-      name: `${parcelId}`,
+      name: parcelId,  // Option A
       mimeType: 'application/vnd.google-apps.folder',
       parents: [DRIVE_PARENT_FOLDER],
     },
     fields: 'id',
   });
-
   return folder.data.id;
 }
 
@@ -97,6 +96,29 @@ async function extractOwnerName(page) {
     const raw = cells[1].innerText.trim();
     return raw.split('\n')[0].trim();
   });
+}
+
+// =========================
+// Strict Page Load Checker
+// =========================
+async function waitForSelectorOrRetry(page, selector, url) {
+  let attempts = 0;
+
+  while (attempts < 3) {
+    try {
+      console.log(`   ➜ Waiting for selector (${attempts + 1}/3): ${selector}`);
+      await page.waitForSelector(selector, { timeout: 15000 });
+      return true;
+    } catch (err) {
+      attempts++;
+      console.log(`   ⚠️ Selector not found on attempt ${attempts}`);
+      if (attempts >= 3) {
+        console.log(`   ❌ Failed to load required content for: ${url}`);
+        throw err;
+      }
+      await page.waitForTimeout(3000);
+    }
+  }
 }
 
 // =========================
@@ -124,33 +146,54 @@ async function extractOwnerName(page) {
   const page = await browser.newPage();
   page.setDefaultNavigationTimeout(120000);
 
-  // Anti-bot
+  // Anti-bot improvements (matching your inspector style)
   await page.setUserAgent(
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
       'AppleWebKit/537.36 (KHTML, like Gecko) ' +
       'Chrome/121.0.0.0 Safari/537.36'
   );
   await page.setExtraHTTPHeaders({
-    'Accept-Language': 'en-US,en;q=0.9',
     Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+  });
+  await page.evaluateOnNewDocument(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => false });
   });
 
+  // ======================================
+  // MAIN LOOP
+  // ======================================
   for (let i = 0; i < parcels.length; i++) {
     const parcel = parcels[i];
-    console.log(`\n==============================`);
+    const rowNum = i + 2;
+
+    console.log('\n==============================');
     console.log(`📌 Processing Parcel: ${parcel}`);
-    console.log(`Row: ${i + 2}`);
+    console.log(`Row: ${rowNum}`);
 
     // Create Drive folder
     const folderId = await createSubfolder(parcel);
     console.log(`📁 Created Drive folder: ${folderId}`);
 
-    // ============================
-    // Visit URL 1 (Detail)
-    // ============================
+    // -------------------------------
+    // TARGET URL 1 (DETAIL PAGE)
+    // -------------------------------
     const url1 = TARGET_URL_1 + parcel;
     console.log(`🌐 Navigating to: ${url1}`);
-    await page.goto(url1, { waitUntil: 'networkidle2' });
+
+    let attempt1 = 0;
+    while (attempt1 < 3) {
+      try {
+        await page.goto(url1, { waitUntil: 'domcontentloaded', timeout: 120000 });
+        await waitForSelectorOrRetry(page, 'table#MainContent_AccountDetailTable', url1);
+        break;
+      } catch (err) {
+        attempt1++;
+        console.log(`⚠️ Navigation failure (${attempt1}/3) for: ${url1}`);
+        if (attempt1 >= 3) throw err;
+        await page.waitForTimeout(4000);
+      }
+    }
 
     const shot1 = `detail_${parcel}.jpg`;
     await page.screenshot({ path: shot1, type: 'jpeg', fullPage: true });
@@ -158,12 +201,25 @@ async function extractOwnerName(page) {
     fs.unlinkSync(shot1);
     console.log(`📤 Uploaded DETAIL screenshot`);
 
-    // ============================
-    // Visit URL 2 (History)
-    // ============================
+    // -------------------------------
+    // TARGET URL 2 (HISTORY PAGE)
+    // -------------------------------
     const url2 = TARGET_URL_2 + parcel;
     console.log(`🌐 Navigating to: ${url2}`);
-    await page.goto(url2, { waitUntil: 'networkidle2' });
+
+    let attempt2 = 0;
+    while (attempt2 < 3) {
+      try {
+        await page.goto(url2, { waitUntil: 'domcontentloaded', timeout: 120000 });
+        await waitForSelectorOrRetry(page, 'table#MainContent_HistoryGridView', url2);
+        break;
+      } catch (err) {
+        attempt2++;
+        console.log(`⚠️ Navigation failure (${attempt2}/3) for: ${url2}`);
+        if (attempt2 >= 3) throw err;
+        await page.waitForTimeout(4000);
+      }
+    }
 
     const shot2 = `history_${parcel}.jpg`;
     await page.screenshot({ path: shot2, type: 'jpeg', fullPage: true });
@@ -171,16 +227,17 @@ async function extractOwnerName(page) {
     fs.unlinkSync(shot2);
     console.log(`📤 Uploaded HISTORY screenshot`);
 
-    // ============================
+    // -------------------------------
     // Extract Owner Name
-    // ============================
+    // -------------------------------
     const ownerName = await extractOwnerName(page);
     console.log(`👤 Owner: ${ownerName}`);
 
-    // ============================
-    // Write owner back to sheet
-    // ============================
-    const writeRange = `${SHEET_NAME}!${OWNER_OUTPUT_COL}${i + 2}`;
+    // -------------------------------
+    // Write back to sheet
+    // -------------------------------
+    const writeRange = `${SHEET_NAME}!${OWNER_OUTPUT_COL}${rowNum}`;
+
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
       range: writeRange,
