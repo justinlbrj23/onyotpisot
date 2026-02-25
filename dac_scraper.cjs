@@ -124,18 +124,18 @@ function createPDF(parcelId, detailScreenshot, historyScreenshot) {
   console.log(`📄 Found ${parcelData.length} parcels`);
 
   const browser = await puppeteer.launch({
-    headless: false,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-blink-features=AutomationControlled",
-      "--ignore-certificate-errors",
-      "--disable-gpu",
-      "--single-process",
-      "--no-zygote"
-    ]
-  });
+  headless: "new",   // or true
+  args: [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-blink-features=AutomationControlled",
+    "--ignore-certificate-errors",
+    "--disable-gpu",
+    "--single-process",
+    "--no-zygote"
+  ]
+});
 
   const page = await browser.newPage();
   page.setDefaultNavigationTimeout(120000);
