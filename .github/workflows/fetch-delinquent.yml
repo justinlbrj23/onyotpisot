@@ -57,7 +57,7 @@ jobs:
           "
 
       # --------------------------------------------------
-      # Run Milwaukee scraper via npm script
+      # Run Dallas PA scraper via npm script
       # --------------------------------------------------
       - name: Run Auction Scraper
         run: npm run fetch:auctions
@@ -67,6 +67,14 @@ jobs:
         with:
           name: parcel-reports
           path: artifacts/*.pdf
+      - name: Run Dallas Title Search
+        run: npm run fetch:titleSearch
+
+      - name: Upload Dallas Title Search Screenshot
+        uses: actions/upload-artifact@v4
+        with:
+         name: dallas-title-search
+         path: artifacts/title_search_fullpage.png
 
       # --------------------------------------------------
       # Cleanup credentials
