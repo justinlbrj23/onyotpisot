@@ -1,14 +1,15 @@
 /**
  * titleSearch.cjs
- * Dallas Title Search Automation
- * - Reads values from Google Sheets
- * - Builds title search URL
- * - Opens page using Puppeteer
- * - Captures full‑page screenshot
+ * Dallas Title Search Automation (loop version)
+ * - Reads ALL rows from Google Sheets
+ * - Loops through each row
+ * - Builds title search URL per row
+ * - Opens page via Puppeteer
+ * - Waits 60 seconds
+ * - Saves full‑page screenshot
  */
 
 const { google } = require("googleapis");
-const fetch = require("node-fetch");
 const fs = require("fs");
 const path = require("path");
 const puppeteer = require("puppeteer");
@@ -17,12 +18,10 @@ const puppeteer = require("puppeteer");
 // CONFIG
 // ----------------------------
 const SHEET_ID = "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
-const RANGE_REC = "raw_main!R2:R";
-const RANGE_AUC = "raw_main!H2:H";
-const RANGE_OWNER = "raw_main!N2:N";
+const RANGE = "raw_main!R2:N"; // Pull all columns needed in one go
 
 // ----------------------------
-// 1. Create Google Sheets Client
+// Google Sheets Auth
 // ----------------------------
 async function getSheets() {
   const auth = new google.auth.GoogleAuth({
@@ -34,38 +33,19 @@ async function getSheets() {
 }
 
 // ----------------------------
-// 2. Read values from Google Sheet
-// ----------------------------
-async function getSheetValues(sheets) {
-  async function get(range) {
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId: SHEET_ID,
-      range,
-    });
-    return res.data.values ? res.data.values[0][0] : "";
-  }
-
-  return {
-    recDateRaw: await get(RANGE_REC),
-    aucDateRaw: await get(RANGE_AUC),
-    ownerNameRaw: await get(RANGE_OWNER),
-  };
-}
-
-// ----------------------------
-// 3. Convert "MM/DD/YYYY" → "YYYYMMDD"
+// Convert date mm/dd/yyyy → yyyymmdd
 // ----------------------------
 function formatDate(input) {
   if (!input) return "";
-  const d = new Date(input);
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}${mm}${dd}`;
+  const parts = input.split("/"); // prevents timezone problems
+  if (parts.length !== 3) return "";
+
+  const [mm, dd, yyyy] = parts;
+  return `${yyyy}${mm.padStart(2, "0")}${dd.padStart(2, "0")}`;
 }
 
 // ----------------------------
-// 4. Build Dallas Title Search URL
+// Build URL
 // ----------------------------
 function buildDallasURL(recDate, aucDate, ownerName) {
   return (
@@ -78,9 +58,9 @@ function buildDallasURL(recDate, aucDate, ownerName) {
 }
 
 // ----------------------------
-// 5. Navigate and Screenshot
+// Puppeteer Navigation + Screenshot
 // ----------------------------
-async function captureScreenshot(url) {
+async function captureScreenshot(url, index) {
   const browser = await puppeteer.launch({
     headless: "new",
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
@@ -92,44 +72,69 @@ async function captureScreenshot(url) {
     timeout: 60000,
   });
 
+  // WAIT 60 seconds before screenshot
+  await page.waitForTimeout(60000);
+
   const outDir = "artifacts";
   if (!fs.existsSync(outDir)) fs.mkdirSync(outDir);
 
-  const outPath = path.join(outDir, "title_search_fullpage.png");
+  const filename = `title_search_row_${index + 2}.png`; // row number aligns with sheet
+  const filePath = path.join(outDir, filename);
 
-  await page.screenshot({
-    path: outPath,
-    fullPage: true,
-  });
+  await page.screenshot({ path: filePath, fullPage: true });
 
   await browser.close();
-  return outPath;
+  return filePath;
 }
 
 // ----------------------------
-// MAIN EXECUTION
+// MAIN LOOP
 // ----------------------------
 async function main() {
-  console.log("Loading Google Sheets…");
+  console.log("Reading Google Sheet...");
   const sheets = await getSheets();
-  const { recDateRaw, aucDateRaw, ownerNameRaw } = await getSheetValues(sheets);
 
-  console.log("Raw sheet values:", { recDateRaw, aucDateRaw, ownerNameRaw });
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: RANGE,
+  });
 
-  const recDate = formatDate(recDateRaw);
-  const aucDate = formatDate(aucDateRaw);
-  const ownerName = ownerNameRaw.trim();
+  const rows = res.data.values || [];
+  if (rows.length === 0) {
+    console.log("No data found.");
+    return;
+  }
 
-  const url = buildDallasURL(recDate, aucDate, ownerName);
-  console.log("Generated URL:");
-  console.log(url);
+  console.log(`Found ${rows.length} rows. Processing...`);
 
-  console.log("Navigating and capturing screenshot…");
-  const file = await captureScreenshot(url);
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const recDateRaw = row[0];
+    const aucDateRaw = row[1];
+    const ownerNameRaw = row[2];
 
-  console.log("Screenshot saved:", file);
+    // Stop if all key values are blank
+    if (!recDateRaw && !aucDateRaw && !ownerNameRaw) continue;
+
+    const recDate = formatDate(recDateRaw);
+    const aucDate = formatDate(aucDateRaw);
+    const ownerName = (ownerNameRaw || "").trim();
+
+    const url = buildDallasURL(recDate, aucDate, ownerName);
+
+    console.log(
+      `Row ${i + 2}: Rec=${recDateRaw}, Auc=${aucDateRaw}, Owner=${ownerName}`
+    );
+    console.log(`→ URL: ${url}`);
+
+    const screenshot = await captureScreenshot(url, i);
+    console.log(`Saved screenshot: ${screenshot}`);
+  }
+
+  console.log("All rows processed.");
 }
 
+// Run
 main().catch((err) => {
   console.error("Error:", err);
   process.exit(1);
