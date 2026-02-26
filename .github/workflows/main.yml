@@ -93,21 +93,6 @@ jobs:
           path: mapped-output.json
 
       # --------------------------------------------------
-      # Run Dallas Title Search Scraper
-      # --------------------------------------------------
-      - name: Run Dallas Title Search
-        run: npm run fetch:titleSearch
-
-      # --------------------------------------------------
-      # Upload ALL screenshot artifacts
-      # --------------------------------------------------
-      - name: Upload Dallas Title Search Screenshots
-        uses: actions/upload-artifact@v4
-        with:
-          name: dallas-title-search
-          path: artifacts/**
-
-      # --------------------------------------------------
       # Cleanup credentials
       # --------------------------------------------------
       - name: Cleanup secrets
