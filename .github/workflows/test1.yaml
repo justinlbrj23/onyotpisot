@@ -1,22 +1,15 @@
-name: Fetch Auctions Simon R
+name: Test YAML - DALLAS(Artifact Mode)
 
 on:
   workflow_dispatch:
-  workflow_run:
-    workflows: ["Docket Scraping Pipeline (Artifact Mode)"]
-    types:
-      - completed
 
 jobs:
-  sync:
-    # Run automatically only if Workflow 1 succeeded,
-    # and ALWAYS allow manual workflow_dispatch trigger.
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+  tda_pipeline:
     runs-on: ubuntu-latest
 
     steps:
       # --------------------------------------------------
-      # Checkout Repo
+      # Checkout repository
       # --------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -24,13 +17,13 @@ jobs:
       # --------------------------------------------------
       # Setup Node.js
       # --------------------------------------------------
-      - name: Setup Node.js
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
       # --------------------------------------------------
-      # Install Dependencies
+      # Install dependencies
       # --------------------------------------------------
       - name: Install dependencies
         run: |
@@ -39,8 +32,8 @@ jobs:
           else
             npm install
           fi
-          # Ensure required packages are present
-          npm install googleapis node-fetch puppeteer
+          # Ensure stealth packages are present
+          npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis
 
       # --------------------------------------------------
       # Write RAW Service Account JSON
@@ -63,20 +56,18 @@ jobs:
             console.log('Service account OK:', j.client_email);
           "
 
+      
       # --------------------------------------------------
-      # Run Dallas Title Search Scraper
+      # STEP 2 — Run dac_scraper.cjs (Sold-only)
       # --------------------------------------------------
-      - name: Run Dallas Title Search
-        run: npm run fetch:titleSearch
+      - name: Run dac_scraper.cjs
+        run: node dac_scraper.cjs
 
-      # --------------------------------------------------
-      # Upload ALL screenshot artifacts
-      # --------------------------------------------------
-      - name: Upload Dallas Title Search Screenshots
+      - name: Upload parcel PDFs
         uses: actions/upload-artifact@v4
         with:
-          name: dallas-title-search
-          path: artifacts/**
+          name: parcel-reports
+          path: artifacts/*.pdf
 
       # --------------------------------------------------
       # Cleanup credentials
