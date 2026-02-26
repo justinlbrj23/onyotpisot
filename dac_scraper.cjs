@@ -73,22 +73,19 @@ function extractOwnerNameFromHistoryPage(pageText, auctionYear) {
   const auctionYearNum = auctionYear.match(/\d{4}/) ? auctionYear.match(/\d{4}/)[0] : auctionYear;
 
   // Split into blocks by year (each block starts with a year)
-  const blocks = pageText.split(/(?=\d{4}\n)/); // crude split, adjust as needed
+  const blocks = pageText.split(/(?=\d{4}\n)/);
 
   for (const block of blocks) {
-    // Find Deed Transfer Date line
-    const deedLine = block.split('\n').find(line => line.includes('Deed Transfer Date:'));
+    const lines = block.split('\n').map(l => l.trim()).filter(Boolean);
+
+    // Find Deed Transfer Date line and extract year
+    const deedLine = lines.find(line => line.includes('Deed Transfer Date:'));
     if (deedLine) {
-      // Extract year from Deed Transfer Date
       const deedYearMatch = deedLine.match(/\d{4}/);
       if (deedYearMatch && deedYearMatch[0] === auctionYearNum) {
-        // Owner is the line after the year (first line of block is year, second is owner)
-        const lines = block.split('\n').map(l => l.trim()).filter(Boolean);
+        // Owner is the line immediately after the year line (lines[0] = year, lines[1] = owner)
         if (lines.length > 1) {
-          const ownerLine = lines[1];
-          if (/^[A-Z\s]+$/.test(ownerLine) && ownerLine.length > 2) {
-            return ownerLine;
-          }
+          return lines[1];
         }
       }
     }
@@ -175,7 +172,6 @@ function createPDF(parcelId, detailScreenshot, historyScreenshot) {
     console.log("➡️ Navigating:", url2);
     await page.goto(url2, { waitUntil: "domcontentloaded" });
     await new Promise(r => setTimeout(r, 3000));
-    const html2 = await page.content();
     const historyFile = `history_${parcelId}.jpg`;
     await page.screenshot({ path: historyFile, fullPage: true });
 
