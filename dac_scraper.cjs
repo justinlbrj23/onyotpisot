@@ -38,6 +38,14 @@ const auth = new google.auth.GoogleAuth({
 
 const sheets = google.sheets({ version: "v4", auth });
 
+
+// Helper to extract Deed Transfer Date from an owner cell
+function extractDeedTransferDateFromOwnerCell(ownerCell) {
+  const ownerHtml = ownerCell.html() || '';
+  const deedDateMatch = ownerHtml.match(/Deed Transfer Date:\s*([0-9\/]+)/i);
+  return deedDateMatch ? deedDateMatch[1].trim() : '';
+}
+
 // =========================
 // Load PARCEL IDs + Years
 // =========================
@@ -189,22 +197,56 @@ function createPDF(parcelId, detailScreenshot, historyScreenshot) {
     console.log("➡️ Navigating:", url2);
     await page.goto(url2, { waitUntil: "domcontentloaded" });
     await new Promise(r => setTimeout(r, 3000));
-    const html2 = await page.content();
+    const historyHtml = await page.content();
     const historyFile = `history_${parcelId}.jpg`;
     await page.screenshot({ path: historyFile, fullPage: true });
 
-    // Extract Owner (from plain text)
-    const historyHtml = await page.content();
-const ownerName = extractOwnerNameFromHistoryPage(historyHtml, auctionYear);
+    // Extract Owner Name
+    const ownerName = extractOwnerNameFromHistoryPage(historyHtml, auctionYear);
     console.log(`👤 Owner Extracted: ${ownerName}`);
 
-    // Update Sheet
+    // Extract Deed Transfer Date
+    const $ = cheerio.load(historyHtml);
+    const auctionYearNum = auctionYear.match(/\d{4}/) ? auctionYear.match(/\d{4}/)[0] : auctionYear;
+    const ownerTable = $('#pnlOwnHist table').first();
+    let deedTransferDate = '';
+    if (ownerTable.length) {
+      const rows = ownerTable.find('tr').slice(1);
+      let found = false;
+      rows.each(function () {
+        const yearCell = $(this).find('th').first();
+        const ownerCell = $(this).find('td').first();
+        const yearText = yearCell.text().trim();
+        if (yearText.includes(auctionYearNum)) {
+          deedTransferDate = extractDeedTransferDateFromOwnerCell(ownerCell);
+          found = true;
+          return false;
+        }
+      });
+      // Fallback: use first row if not found
+      if (!found && rows.length > 0) {
+        const ownerCell = $(rows[0]).find('td').first();
+        deedTransferDate = extractDeedTransferDateFromOwnerCell(ownerCell);
+      }
+    }
+    console.log(`📅 Deed Transfer Date: ${deedTransferDate}`);
+
+    // Update Owner in Sheet (column N)
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
       range: `${SHEET_NAME}!${OWNER_OUTPUT_COL}${rowNum}`,
       valueInputOption: "RAW",
       requestBody: { values: [[ownerName]] }
     });
+
+    // Update Deed Transfer Date in Sheet (column R)
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!R${rowNum}`,
+      valueInputOption: "RAW",
+      requestBody: { values: [[deedTransferDate]] }
+    });
+
     console.log("📌 Sheet updated");
 
     // PDF
