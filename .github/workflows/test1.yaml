@@ -1,30 +1,25 @@
-name: Test YAML - DALLAS(Artifact Mode)
+name: Fetch Auctions Simon
 
 on:
-  workflow_dispatch:
+  workflow_run:
+    workflows: ["Docket Scraping Pipeline (Artifact Mode)"]
+    types:
+      - completed
 
 jobs:
-  tda_pipeline:
+  sync:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
 
     steps:
-      # --------------------------------------------------
-      # Checkout repository
-      # --------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # --------------------------------------------------
-      # Setup Node.js
-      # --------------------------------------------------
-      - name: Set up Node.js
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      # --------------------------------------------------
-      # Install dependencies
-      # --------------------------------------------------
       - name: Install dependencies
         run: |
           if [ -f package-lock.json ]; then
@@ -32,19 +27,12 @@ jobs:
           else
             npm install
           fi
-          # Ensure stealth packages are present
-          npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis
+          npm install googleapis node-fetch puppeteer
 
-      # --------------------------------------------------
-      # Write RAW Service Account JSON
-      # --------------------------------------------------
       - name: Write Service Account JSON
         run: |
           echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
 
-      # --------------------------------------------------
-      # Validate Service Account JSON
-      # --------------------------------------------------
       - name: Validate service account JSON
         run: |
           node -e "
@@ -56,22 +44,15 @@ jobs:
             console.log('Service account OK:', j.client_email);
           "
 
-      
-      # --------------------------------------------------
-      # STEP 2 — Run dac_scraper.cjs (Sold-only)
-      # --------------------------------------------------
-      - name: Run dac_scraper.cjs
-        run: node dac_scraper.cjs
+      - name: Run Dallas Title Search
+        run: npm run fetch:titleSearch
 
-      - name: Upload parcel PDFs
+      - name: Upload Dallas Title Search Screenshots
         uses: actions/upload-artifact@v4
         with:
-          name: parcel-reports
-          path: artifacts/*.pdf
+          name: dallas-title-search
+          path: artifacts/**
 
-      # --------------------------------------------------
-      # Cleanup credentials
-      # --------------------------------------------------
       - name: Cleanup secrets
         if: always()
         run: rm -f service-account.json
