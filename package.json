@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node organizer_headers_tssf.js",
     "fetch:auctions": "node dac_scraper.cjs",
+    "fetch:titleSearch": "node titleSearch.cjs",
     "ocr": "node ocr_tesseract.cjs",
     "ocr:pdf": "node ocr_tesseract.cjs sample.pdf",
     "ocr:image": "node ocr_tesseract.cjs sample.png",
