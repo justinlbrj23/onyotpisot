@@ -1,0 +1,35 @@
+name: Dallas CAD Parcel Scraper
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  scrape-parcels:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run scraper
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
+        run: |
+          node dac_scraper.cjs
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: parcel-artifacts
+          path: ./artifacts/
