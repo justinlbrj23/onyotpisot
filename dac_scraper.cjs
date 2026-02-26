@@ -7,6 +7,7 @@ const fs = require("fs");
 const PDFDocument = require("pdfkit");
 const path = require("path");
 const { google } = require("googleapis");
+const cheerio = require('cheerio');
 
 // =========================
 // CONFIG
@@ -65,53 +66,42 @@ async function loadParcelData() {
   return items;
 }
 
-// Main extraction function
-function extractOwnerNameFromHistoryPage(pageText, auctionYear) {
-  // Normalize auction year (e.g., "02032026" → "2026")
+// Main extraction function using Cheerio
+function extractOwnerNameFromHistoryPage(html, auctionYear) {
+  const $ = cheerio.load(html);
+
+  // Normalize auction year (e.g., "02/03/2026" → "2026")
   const auctionYearNum = auctionYear.match(/\d{4}/) ? auctionYear.match(/\d{4}/)[0] : auctionYear;
 
-  // Split into blocks by year (each block starts with a year)
-  const blocks = pageText.split(/(?=\d{4}\n)/);
+  // Find the owner history table
+  const ownerTable = $('#pnlOwnHist table').first();
+  if (!ownerTable.length) return '';
 
-  for (const block of blocks) {
-    const lines = block.split('\n').map(l => l.trim()).filter(Boolean);
+  // Find all rows (skip header row)
+  const rows = ownerTable.find('tr').slice(1);
 
-    // Find Deed Transfer Date line and extract year
-    const deedLine = lines.find(line => line.includes('Deed Transfer Date:'));
-    if (deedLine) {
-      const deedYearMatch = deedLine.match(/\d{4}/);
-      if (deedYearMatch && deedYearMatch[0] === auctionYearNum) {
-        // Owner is the line immediately after the year line (lines[0] = year, lines[1] = owner)
-        if (lines.length > 1) {
-          return lines[1];
-        }
+  let owner = '';
+  rows.each(function () {
+    const yearCell = $(this).find('th').first();
+    const ownerCell = $(this).find('td').first();
+    if (yearCell.length && ownerCell.length) {
+      const yearText = yearCell.text().trim();
+      if (yearText.includes(auctionYearNum)) {
+        owner = ownerCell.text().replace(/\s+/g, ' ').trim();
+        return false; // break loop
       }
+    }
+  });
+
+  // Fallback: If no matching year found, use owner from first data row
+  if (!owner && rows.length > 0) {
+    const ownerCell = $(rows[0]).find('td').first();
+    if (ownerCell.length) {
+      owner = ownerCell.text().replace(/\s+/g, ' ').trim();
     }
   }
 
-  // Fallback: If no matching year found, extract owner from first row (row 2)
-  return extractOwnerNameFallback(pageText);
-}
-
-// Fallback extraction function
-function extractOwnerNameFallback(pageText) {
-  // Split into lines and filter out empty lines
-  const lines = pageText.split('\n').map(l => l.trim()).filter(Boolean);
-
-  // Find the first year block (usually starts with a year)
-  let firstYearIdx = lines.findIndex(line => /^\d{4}$/.test(line));
-  if (firstYearIdx === -1) {
-    // No year found, fallback to second line (row 2)
-    return lines[1] || '';
-  }
-
-  // Owner is typically the line after the year
-  if (lines.length > firstYearIdx + 1) {
-    return lines[firstYearIdx + 1];
-  }
-
-  // Fallback: just return the second line
-  return lines[1] || '';
+  return owner;
 }
 
 // =========================
@@ -198,8 +188,8 @@ function createPDF(parcelId, detailScreenshot, historyScreenshot) {
     await page.screenshot({ path: historyFile, fullPage: true });
 
     // Extract Owner (from plain text)
-    const historyText = await page.evaluate(() => document.body.innerText);
-const ownerName = extractOwnerNameFromHistoryPage(historyText, auctionYear);
+    const historyHtml = await page.content();
+const ownerName = extractOwnerNameFromHistoryPage(historyHtml, auctionYear);
     console.log(`👤 Owner Extracted: ${ownerName}`);
 
     // Update Sheet
