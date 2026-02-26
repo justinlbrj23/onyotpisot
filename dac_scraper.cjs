@@ -8,6 +8,7 @@ const PDFDocument = require("pdfkit");
 const path = require("path");
 const { google } = require("googleapis");
 const cheerio = require('cheerio');
+const he = require('he');
 
 // =========================
 // CONFIG
@@ -66,7 +67,7 @@ async function loadParcelData() {
   return items;
 }
 
-// Main extraction function using Cheerio
+// Main extraction function using Cheerio and decoding HTML entities
 function extractOwnerNameFromHistoryPage(html, auctionYear) {
   const $ = cheerio.load(html);
 
@@ -87,10 +88,10 @@ function extractOwnerNameFromHistoryPage(html, auctionYear) {
     if (yearCell.length && ownerCell.length) {
       const yearText = yearCell.text().trim();
       if (yearText.includes(auctionYearNum)) {
-        // Get only the first line (the name), split by <br> or newline
+        // Get only the first line (the name), split by <br> or newline, decode HTML entities
         const ownerHtml = ownerCell.html() || '';
-        const ownerName = ownerHtml.split(/<br\s*\/?>/i)[0].replace(/[\n\r]/g, '').trim();
-        owner = ownerName;
+        const ownerNameRaw = ownerHtml.split(/<br\s*\/?>/i)[0].replace(/[\n\r]/g, '').trim();
+        owner = he.decode(ownerNameRaw);
         return false; // break loop
       }
     }
@@ -101,8 +102,8 @@ function extractOwnerNameFromHistoryPage(html, auctionYear) {
     const ownerCell = $(rows[0]).find('td').first();
     if (ownerCell.length) {
       const ownerHtml = ownerCell.html() || '';
-      const ownerName = ownerHtml.split(/<br\s*\/?>/i)[0].replace(/[\n\r]/g, '').trim();
-      owner = ownerName;
+      const ownerNameRaw = ownerHtml.split(/<br\s*\/?>/i)[0].replace(/[\n\r]/g, '').trim();
+      owner = he.decode(ownerNameRaw);
     }
   }
 
