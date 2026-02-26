@@ -65,11 +65,9 @@ async function loadParcelData() {
   return items;
 }
 
-// =========================
-// Owner Extraction Logic (Deed Transfer Date matching)
-// =========================
+// Main extraction function
 function extractOwnerNameFromHistoryPage(pageText, auctionYear) {
-  // Normalize auction year (e.g., "02/03/2026" → "2026")
+  // Normalize auction year (e.g., "02032026" → "2026")
   const auctionYearNum = auctionYear.match(/\d{4}/) ? auctionYear.match(/\d{4}/)[0] : auctionYear;
 
   // Split into blocks by year (each block starts with a year)
@@ -90,7 +88,30 @@ function extractOwnerNameFromHistoryPage(pageText, auctionYear) {
       }
     }
   }
-  return '';
+
+  // Fallback: If no matching year found, extract owner from first row (row 2)
+  return extractOwnerNameFallback(pageText);
+}
+
+// Fallback extraction function
+function extractOwnerNameFallback(pageText) {
+  // Split into lines and filter out empty lines
+  const lines = pageText.split('\n').map(l => l.trim()).filter(Boolean);
+
+  // Find the first year block (usually starts with a year)
+  let firstYearIdx = lines.findIndex(line => /^\d{4}$/.test(line));
+  if (firstYearIdx === -1) {
+    // No year found, fallback to second line (row 2)
+    return lines[1] || '';
+  }
+
+  // Owner is typically the line after the year
+  if (lines.length > firstYearIdx + 1) {
+    return lines[firstYearIdx + 1];
+  }
+
+  // Fallback: just return the second line
+  return lines[1] || '';
 }
 
 // =========================
