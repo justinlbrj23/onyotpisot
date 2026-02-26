@@ -1,4 +1,4 @@
-name: Docket Scraping Pipeline (Artifact Mode) INTEGRATED
+name: TEST WORKFLOW ONLY
 
 on:
   workflow_dispatch:
