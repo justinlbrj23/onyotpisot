@@ -29,6 +29,7 @@
     "pdf-lib": "^1.17.1",
     "pdfkit": "^0.15.0",
     "pdf-parse": "^1.1.1",
+    "he": "^1.2.0",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "uuidv4": "^6.2.13",
     "node-fetch": "^2.7.0",
