@@ -33,7 +33,7 @@ jobs:
             npm install
           fi
           # Ensure required packages are present
-          npm install googleapis node-fetch
+          npm install googleapis node-fetch puppeteer
 
       # --------------------------------------------------
       # Write RAW Service Account JSON
@@ -57,16 +57,19 @@ jobs:
           "
 
       # --------------------------------------------------
-      # Run Dallas PA scraper via npm script
+      # Run Dallas Title Search Scraper
       # --------------------------------------------------
       - name: Run Dallas Title Search
         run: npm run fetch:titleSearch
 
-      - name: Upload Dallas Title Search Screenshot
+      # --------------------------------------------------
+      # Upload ALL screenshot artifacts
+      # --------------------------------------------------
+      - name: Upload Dallas Title Search Screenshots
         uses: actions/upload-artifact@v4
         with:
-         name: dallas-title-search
-         path: artifacts/title_search_fullpage.png
+          name: dallas-title-search
+          path: artifacts/**
 
       # --------------------------------------------------
       # Cleanup credentials
