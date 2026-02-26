@@ -20,14 +20,15 @@ const puppeteer = require("puppeteer");
 const SHEET_ID = "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
 
 /**
- * Pull all columns from H → R:
+ * Pull columns C → R:
+ * C = index/file-id
  * H = auc_date
  * N = owner_name
  * R = rec_date
  *
- * Range "H2:R" ensures correct column order.
+ * Range "C2:R" ensures correct column order.
  */
-const RANGE = "raw_main!H2:R";
+const RANGE = "raw_main!C2:R";
 
 // ----------------------------
 // Google Sheets Auth
@@ -42,7 +43,7 @@ async function getSheets() {
 }
 
 // ----------------------------
-// Convert date mm/dd/yyyy → yyyymmdd (no timezone issues)
+// Convert date mm/dd/yyyy → yyyymmdd
 // ----------------------------
 function formatDate(input) {
   if (!input) return "";
@@ -70,7 +71,7 @@ function buildDallasURL(recDate, aucDate, ownerName) {
 // ----------------------------
 // Puppeteer Navigation + Screenshot
 // ----------------------------
-async function captureScreenshot(url, index) {
+async function captureScreenshot(url, filenameBase) {
   const browser = await puppeteer.launch({
     headless: "new",
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
@@ -83,13 +84,15 @@ async function captureScreenshot(url, index) {
     timeout: 60000,
   });
 
-  // WAIT 60 seconds before screenshot (Puppeteer-safe)
+  // WAIT 60 seconds before screenshot
   await new Promise((res) => setTimeout(res, 60000));
 
   const outDir = "artifacts";
   if (!fs.existsSync(outDir)) fs.mkdirSync(outDir);
 
-  const filename = `title_search_row_${index + 2}.png`;
+  // Sanitize filename
+  const safeName = String(filenameBase).replace(/[^\w\-]+/g, "_");
+  const filename = `title_search_${safeName}.png`;
   const filePath = path.join(outDir, filename);
 
   await page.screenshot({ path: filePath, fullPage: true });
@@ -121,12 +124,13 @@ async function main() {
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
 
-    // COLUMN MAPPING (based on RANGE = H2:R)
-    const aucDateRaw = row[0];     // H column
-    const ownerNameRaw = row[6];   // N column
-    const recDateRaw = row[10];    // R column
+    // NEW COLUMN MAPPING (based on RANGE = C2:R)
+    const indexValue = row[0];     // Column C
+    const aucDateRaw = row[5];     // Column H
+    const ownerNameRaw = row[11];  // Column N
+    const recDateRaw = row[15];    // Column R
 
-    // Skip row if all 3 key fields are empty
+    // Skip if all key fields are empty
     if (!recDateRaw && !aucDateRaw && !ownerNameRaw) continue;
 
     const recDate = formatDate(recDateRaw);
@@ -136,11 +140,11 @@ async function main() {
     const url = buildDallasURL(recDate, aucDate, ownerName);
 
     console.log(
-      `Row ${i + 2}: Rec=${recDateRaw}, Auc=${aucDateRaw}, Owner=${ownerName}`
+      `Row ${i + 2}: Index=${indexValue}, Rec=${recDateRaw}, Auc=${aucDateRaw}, Owner=${ownerName}`
     );
     console.log(`→ URL: ${url}`);
 
-    const screenshotPath = await captureScreenshot(url, i);
+    const screenshotPath = await captureScreenshot(url, indexValue);
     console.log(`Saved screenshot: ${screenshotPath}`);
   }
 
