@@ -1,7 +1,3 @@
-// dac_scraper.cjs
-// Dallas CAD Parcel Scraper (Artifact Mode, PDFKit)
-// Requires: npm install puppeteer cheerio googleapis pdfkit he
-
 const puppeteer = require("puppeteer");
 const fs = require("fs");
 const PDFDocument = require("pdfkit");
@@ -68,7 +64,7 @@ async function loadParcelData() {
 }
 
 // =========================
-// Owner + Deed Date Extraction (Paired)
+// Owner + Deed Date Extraction (Paired, robust for nested table)
 // =========================
 function extractOwnerAndDeedDateFromHistoryPage(html, auctionYear) {
   const $ = cheerio.load(html);
@@ -108,17 +104,19 @@ function extractOwnerAndDeedDateFromHistoryPage(html, auctionYear) {
     const ownerNameRaw = ownerHtml.split(/<br\s*\/?>/i)[0].replace(/[\n\r]/g, '').trim();
     owner = he.decode(ownerNameRaw);
 
-    // Deed Transfer Date (search in legalDescCell)
+    // Deed Transfer Date (search in legalDescCell, which contains a nested table)
     const legalHtml = rowFound.legalDescCell.html() || '';
     // Try to match "Deed Transfer Date:" and get the next tag/text
-    const deedDateMatch = legalHtml.match(/Deed Transfer Date:<\/span>\s*([0-9\/]+)/i);
-    if (deedDateMatch) {
-      deedDate = deedDateMatch[1].trim();
-    } else {
-      // fallback: try to match just the date pattern
-      const dateOnlyMatch = legalHtml.match(/(\d{1,2}\/\d{1,2}\/\d{4})/);
-      deedDate = dateOnlyMatch ? dateOnlyMatch[1] : '';
+    let deedDateMatch = legalHtml.match(/Deed Transfer Date:<\/span>\s*([0-9\/]+)/i);
+    if (!deedDateMatch) {
+      // Try to match the date in a <span> after "Deed Transfer Date:"
+      deedDateMatch = legalHtml.match(/Deed Transfer Date:[^<]*<[^>]*>([0-9\/]+)<\/span>/i);
     }
+    if (!deedDateMatch) {
+      // fallback: try to match just the date pattern
+      deedDateMatch = legalHtml.match(/(\d{1,2}\/\d{1,2}\/\d{4})/);
+    }
+    deedDate = deedDateMatch ? deedDateMatch[1].trim() : '';
   }
 
   return { owner, deedDate };
