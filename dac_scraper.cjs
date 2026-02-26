@@ -12,51 +12,60 @@ const he = require('he');
 const SERVICE_ACCOUNT_FILE = "./service-account.json";
 const SPREADSHEET_ID = "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
 const SHEET_NAME = "raw_main";
-const PARCEL_RANGE = "F2:F";
-const YEAR_RANGE = "H2:H";
+
+const INDEX_RANGE = "C2:C";   // <-- NEW (column C values)
+const PARCEL_RANGE = "F2:F";  // Parcel ID
+const YEAR_RANGE = "H2:H";    // Auction year
+
 const OWNER_OUTPUT_COL = "N";
 
 const TARGET_URL_1 = "https://www.dallascad.org/AcctDetailRes.aspx?ID=";
 const TARGET_URL_2 = "https://www.dallascad.org/AcctHistory.aspx?ID=";
 
-// Ensure artifacts directory exists
 if (!fs.existsSync("./artifacts")) {
   fs.mkdirSync("./artifacts");
 }
 
 // =========================
-// GOOGLE AUTH (Sheets Only)
+// GOOGLE AUTH
 // =========================
 const auth = new google.auth.GoogleAuth({
   keyFile: SERVICE_ACCOUNT_FILE,
   scopes: ["https://www.googleapis.com/auth/spreadsheets"],
 });
-
 const sheets = google.sheets({ version: "v4", auth });
 
 // =========================
-// Load PARCEL IDs + Years
+// Load PARCEL IDs + Years + INDEX (column C)
 // =========================
 async function loadParcelData() {
+  const indexRes = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${SHEET_NAME}!${INDEX_RANGE}`,
+  });
+
   const parcelsRes = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
     range: `${SHEET_NAME}!${PARCEL_RANGE}`,
   });
+
   const yearsRes = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
     range: `${SHEET_NAME}!${YEAR_RANGE}`,
   });
 
-  const parcels = (parcelsRes.data.values || []).flat().map(v => (v || "").trim());
-  const years = (yearsRes.data.values || []).flat().map(v => (v || "").trim());
+  const indexValues = (indexRes.data.values || []).flat();
+  const parcels = (parcelsRes.data.values || []).flat();
+  const years = (yearsRes.data.values || []).flat();
 
   const items = [];
   for (let i = 0; i < parcels.length; i++) {
     if (parcels[i]) {
       items.push({
-        parcelId: parcels[i],
-        auctionYear: years[i] || "",
-        rowNum: i + 2
+        parcelId: parcels[i].trim(),
+        auctionYear: (years[i] || "").trim(),
+        indexValue: (indexValues[i] || "").trim(), // <-- NEW
+        rowNum: i + 2,
       });
     }
   }
@@ -64,91 +73,68 @@ async function loadParcelData() {
 }
 
 // =========================
-// Owner + Deed Date + Instrument Extraction (Paired, robust for nested table)
+// Owner + Deed Extraction
 // =========================
 function extractOwnerDeedDateInstrumentFromHistoryPage(html, auctionYear) {
   const $ = cheerio.load(html);
   const auctionYearNum = auctionYear.match(/\d{4}/) ? auctionYear.match(/\d{4}/)[0] : auctionYear;
+
   const ownerTable = $('#pnlOwnHist table').first();
   if (!ownerTable.length) return { owner: '', deedDate: '', instrument: '' };
 
   const rows = ownerTable.find('tr').slice(1);
 
-  let owner = '', deedDate = '', instrument = '';
   let rowFound = null;
-
-  // Try to find the row matching the auction year
   rows.each(function () {
-    const yearCell = $(this).find('th').first();
-    const ownerCell = $(this).find('td').eq(0);
-    const legalDescCell = $(this).find('td').eq(1);
-    if (yearCell.length && ownerCell.length && legalDescCell.length) {
-      const yearText = yearCell.text().trim();
-      if (yearText.includes(auctionYearNum)) {
-        rowFound = { ownerCell, legalDescCell };
-        return false; // break loop
-      }
+    const yearText = $(this).find('th').first().text().trim();
+    if (yearText.includes(auctionYearNum)) {
+      rowFound = {
+        ownerCell: $(this).find('td').eq(0),
+        legalDescCell: $(this).find('td').eq(1),
+      };
+      return false;
     }
   });
 
-  // Fallback: use first data row if no match
   if (!rowFound && rows.length > 0) {
-    const ownerCell = $(rows[0]).find('td').eq(0);
-    const legalDescCell = $(rows[0]).find('td').eq(1);
-    rowFound = { ownerCell, legalDescCell };
+    rowFound = {
+      ownerCell: $(rows[0]).find('td').eq(0),
+      legalDescCell: $(rows[0]).find('td').eq(1),
+    };
   }
 
-  if (rowFound && rowFound.ownerCell && rowFound.legalDescCell) {
-    // Owner name(s) extraction (omit address/city/state)
+  let owner = "";
+  let deedDate = "";
+  let instrument = "";
+
+  if (rowFound) {
     const ownerHtml = rowFound.ownerCell.html() || '';
-    const ownerLines = ownerHtml.split(/<br\s*\/?>/i)
-      .map(line => he.decode(line).replace(/[\n\r]/g, '').trim())
+    owner = ownerHtml
+      .split(/<br\s*\/?>/i)
+      .map(line => he.decode(line).trim())
       .filter(line =>
-        line &&
-        /^[A-Z\s\.\&]+$/.test(line) && // all uppercase, spaces, dots, ampersand
-        !/\d/.test(line) && // no numbers
-        !/DALLAS|TEXAS|\d{5}/i.test(line) // not address/city/state/zip
-      );
-    owner = ownerLines.join(' & ');
+        /^[A-Z\s\.\&]+$/.test(line) && !/\d/.test(line)
+      )
+      .join(" & ");
 
-    // Deed Transfer Date (search in legalDescCell, which contains a nested table)
-    const legalHtml = rowFound.legalDescCell.html() || '';
-    let deedDateMatch = legalHtml.match(/Deed Transfer Date:<\/span>\s*([0-9\/]+)/i);
-    if (!deedDateMatch) {
-      deedDateMatch = legalHtml.match(/Deed Transfer Date:[^<]*<[^>]*>([0-9\/]+)<\/span>/i);
-    }
-    if (!deedDateMatch) {
-      deedDateMatch = legalHtml.match(/(\d{1,2}\/\d{1,2}\/\d{4})/);
-    }
-    deedDate = deedDateMatch ? deedDateMatch[1].trim() : '';
+    const legalHtml = rowFound.legalDescCell.html() || "";
+    const deedMatch = legalHtml.match(/(\d{1,2}\/\d{1,2}\/\d{4})/);
+    deedDate = deedMatch ? deedMatch[1] : "";
 
-    // Instrument/Document Number (look for the 4th row in the nested table)
-    const nestedTable = rowFound.legalDescCell.find('table');
-    if (nestedTable.length) {
-      // Try "4." first
-      let instrumentRow = nestedTable.find('tr').eq(3); // 0-based index
-      instrument = instrumentRow.length ? instrumentRow.find('td').text().trim() : '';
-      // Fallback: try "3." if "4." is empty
-      if (!instrument) {
-        instrumentRow = nestedTable.find('tr').eq(2);
-        instrument = instrumentRow.length ? instrumentRow.find('td').text().trim() : '';
-      }
-    }
-    // Fallback: try to match INT/Document number pattern in the HTML
-    if (!instrument) {
-      const instrMatch = legalHtml.match(/([A-Z]{2,}\d{9,})/);
-      instrument = instrMatch ? instrMatch[1] : '';
-    }
+    const instrMatch = legalHtml.match(/([A-Z]{2,}\d{9,})/);
+    instrument = instrMatch ? instrMatch[1] : "";
   }
 
   return { owner, deedDate, instrument };
 }
 
 // =========================
-// Build PDF for each parcel
+// Build PDF using indexValue
 // =========================
-function createPDF(parcelId, detailScreenshot, historyScreenshot) {
-  const pdfPath = path.join("artifacts", `parcel_${parcelId}.pdf`);
+function createPDF(indexValue, detailScreenshot, historyScreenshot) {
+  const safe = String(indexValue).replace(/[^\w\-]+/g, "_");
+
+  const pdfPath = path.join("artifacts", `parcel_${safe}.pdf`);
   const doc = new PDFDocument({ autoFirstPage: false });
   const stream = fs.createWriteStream(pdfPath);
   doc.pipe(stream);
@@ -174,74 +160,44 @@ function createPDF(parcelId, detailScreenshot, historyScreenshot) {
   console.log(`📄 Found ${parcelData.length} parcels`);
 
   const browser = await puppeteer.launch({
-    headless: "new",   // or true
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-blink-features=AutomationControlled",
-      "--ignore-certificate-errors",
-      "--disable-gpu",
-      "--single-process",
-      "--no-zygote"
-    ]
+    headless: "new",
+    args: ["--no-sandbox", "--disable-setuid-sandbox"]
   });
 
   const page = await browser.newPage();
   page.setDefaultNavigationTimeout(120000);
 
-  await page.setUserAgent(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-      "AppleWebKit/537.36 (KHTML, like Gecko) " +
-      "Chrome/121.0.0.0 Safari/537.36"
-  );
+  for (const { parcelId, auctionYear, indexValue, rowNum } of parcelData) {
+    const safe = String(indexValue).replace(/[^\w\-]+/g, "_");
 
-  await page.setExtraHTTPHeaders({
-    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9"
-  });
-
-  await page.evaluateOnNewDocument(() => {
-    Object.defineProperty(navigator, "webdriver", { get: () => false });
-  });
-
-  // Process each parcel
-  for (const { parcelId, auctionYear, rowNum } of parcelData) {
     console.log("\n==============================");
-    console.log(`📌 Parcel: ${parcelId} | Auction Year: ${auctionYear}`);
+    console.log(`📌 Parcel: ${parcelId} | Index: ${indexValue}`);
 
-    // DETAIL PAGE
-    const url1 = TARGET_URL_1 + parcelId;
-    console.log("➡️ Navigating:", url1);
-    await page.goto(url1, { waitUntil: "domcontentloaded" });
+    // DETAIL SCREENSHOT
+    await page.goto(TARGET_URL_1 + parcelId, { waitUntil: "domcontentloaded" });
     await new Promise(r => setTimeout(r, 3000));
-    const detailFile = `detail_${parcelId}.jpg`;
+
+    const detailFile = `detail_${safe}.jpg`;
     await page.screenshot({ path: detailFile, fullPage: true });
 
-    // HISTORY PAGE
-    const url2 = TARGET_URL_2 + parcelId;
-    console.log("➡️ Navigating:", url2);
-    await page.goto(url2, { waitUntil: "domcontentloaded" });
+    // HISTORY PAGE SCREENSHOT
+    await page.goto(TARGET_URL_2 + parcelId, { waitUntil: "domcontentloaded" });
     await new Promise(r => setTimeout(r, 3000));
+
     const historyHtml = await page.content();
-    const historyFile = `history_${parcelId}.jpg`;
+    const historyFile = `history_${safe}.jpg`;
     await page.screenshot({ path: historyFile, fullPage: true });
 
-    // Extract Owner Name, Deed Transfer Date, Instrument/Doc Number from the same row
-    const { owner, deedDate, instrument } = extractOwnerDeedDateInstrumentFromHistoryPage(historyHtml, auctionYear);
-    console.log(`👤 Owner Extracted: ${owner}`);
-    console.log(`📅 Deed Transfer Date: ${deedDate}`);
-    console.log(`📄 Instrument/Doc Number: ${instrument}`);
+    const { owner, deedDate, instrument } =
+      extractOwnerDeedDateInstrumentFromHistoryPage(historyHtml, auctionYear);
 
-    // Update Owner in Sheet (column N)
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: `${SHEET_NAME}!${OWNER_OUTPUT_COL}${rowNum}`,
+      range: `${SHEET_NAME}!N${rowNum}`,
       valueInputOption: "RAW",
       requestBody: { values: [[owner]] }
     });
 
-    // Update Deed Transfer Date in Sheet (column R)
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
       range: `${SHEET_NAME}!R${rowNum}`,
@@ -249,7 +205,6 @@ function createPDF(parcelId, detailScreenshot, historyScreenshot) {
       requestBody: { values: [[deedDate]] }
     });
 
-    // Update Instrument/Doc Number in Sheet (column S)
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
       range: `${SHEET_NAME}!S${rowNum}`,
@@ -257,17 +212,14 @@ function createPDF(parcelId, detailScreenshot, historyScreenshot) {
       requestBody: { values: [[instrument]] }
     });
 
-    console.log("📌 Sheet updated");
-
     // PDF
-    const pdfPath = createPDF(parcelId, detailFile, historyFile);
+    const pdfPath = createPDF(indexValue, detailFile, historyFile);
     console.log("📄 PDF Generated:", pdfPath);
 
-    // Clean temp images
     fs.unlinkSync(detailFile);
     fs.unlinkSync(historyFile);
   }
 
   await browser.close();
-  console.log("\n🏁 DONE — All parcels processed. PDFs ready for GitHub artifacts.");
+  console.log("\n🏁 DONE — All parcels processed.");
 })();
