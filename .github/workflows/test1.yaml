@@ -1,14 +1,12 @@
-name: Fetch Auctions Simon
+name: Fetch Auctions Simon-ALL
 
 on:
-  workflow_run:
-    workflows: ["Docket Scraping Pipeline (Artifact Mode)"]
-    types:
-      - completed
+  workflow_dispatch:
+  repository_dispatch:
+    types: [run-fetch-auctions]
 
 jobs:
   sync:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
 
     steps:
