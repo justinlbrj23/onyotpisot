@@ -1,3 +1,7 @@
+// dac_scraper.cjs
+// Dallas CAD Parcel Scraper (Artifact Mode, PDFKit)
+// Requires: npm install puppeteer cheerio googleapis pdfkit he
+
 const puppeteer = require("puppeteer");
 const fs = require("fs");
 const PDFDocument = require("pdfkit");
@@ -80,11 +84,12 @@ function extractOwnerAndDeedDateFromHistoryPage(html, auctionYear) {
   // Try to find the row matching the auction year
   rows.each(function () {
     const yearCell = $(this).find('th').first();
-    const ownerCell = $(this).find('td').first();
-    if (yearCell.length && ownerCell.length) {
+    const ownerCell = $(this).find('td').eq(0);
+    const legalDescCell = $(this).find('td').eq(1);
+    if (yearCell.length && ownerCell.length && legalDescCell.length) {
       const yearText = yearCell.text().trim();
       if (yearText.includes(auctionYearNum)) {
-        rowFound = ownerCell;
+        rowFound = { ownerCell, legalDescCell };
         return false; // break loop
       }
     }
@@ -92,15 +97,28 @@ function extractOwnerAndDeedDateFromHistoryPage(html, auctionYear) {
 
   // Fallback: use first data row if no match
   if (!rowFound && rows.length > 0) {
-    rowFound = $(rows[0]).find('td').first();
+    const ownerCell = $(rows[0]).find('td').eq(0);
+    const legalDescCell = $(rows[0]).find('td').eq(1);
+    rowFound = { ownerCell, legalDescCell };
   }
 
-  if (rowFound && rowFound.length) {
-    const ownerHtml = rowFound.html() || '';
+  if (rowFound && rowFound.ownerCell && rowFound.legalDescCell) {
+    // Owner name
+    const ownerHtml = rowFound.ownerCell.html() || '';
     const ownerNameRaw = ownerHtml.split(/<br\s*\/?>/i)[0].replace(/[\n\r]/g, '').trim();
     owner = he.decode(ownerNameRaw);
-    const deedDateMatch = ownerHtml.match(/Deed Transfer Date:\s*([0-9\/]+)/i);
-    deedDate = deedDateMatch ? deedDateMatch[1].trim() : '';
+
+    // Deed Transfer Date (search in legalDescCell)
+    const legalHtml = rowFound.legalDescCell.html() || '';
+    // Try to match "Deed Transfer Date:" and get the next tag/text
+    const deedDateMatch = legalHtml.match(/Deed Transfer Date:<\/span>\s*([0-9\/]+)/i);
+    if (deedDateMatch) {
+      deedDate = deedDateMatch[1].trim();
+    } else {
+      // fallback: try to match just the date pattern
+      const dateOnlyMatch = legalHtml.match(/(\d{1,2}\/\d{1,2}\/\d{4})/);
+      deedDate = dateOnlyMatch ? dateOnlyMatch[1] : '';
+    }
   }
 
   return { owner, deedDate };
