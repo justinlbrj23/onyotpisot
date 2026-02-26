@@ -65,8 +65,9 @@ async function loadParcelData() {
   return items;
 }
 
+// Main extraction function
 function extractOwnerNameFromHistoryPage(pageText, auctionYear) {
-  // Normalize auction year (e.g., "02/03/2026" → "2026")
+  // Normalize auction year (e.g., "02032026" → "2026")
   const auctionYearNum = auctionYear.match(/\d{4}/) ? auctionYear.match(/\d{4}/)[0] : auctionYear;
 
   // Split into blocks by year (each block starts with a year)
@@ -88,81 +89,28 @@ function extractOwnerNameFromHistoryPage(pageText, auctionYear) {
     }
   }
 
-  // Fallback: If no matching year found, extract owner from first plausible row
+  // Fallback: If no matching year found, extract owner from first row (row 2)
   return extractOwnerNameFallback(pageText);
 }
 
-// Improved fallback extraction function
+// Fallback extraction function
 function extractOwnerNameFallback(pageText) {
+  // Split into lines and filter out empty lines
   const lines = pageText.split('\n').map(l => l.trim()).filter(Boolean);
 
-  // List of phrases to skip (add more as needed)
-  const skipPhrases = [
-    "NAVIGATION LINKS",
-    "City School County College Hospital Special District",
-    "Owner Legal Desc Market Value Taxable Value Exemptions",
-    "Owner / Legal Description",
-    "Year",
-    "Legal Description",
-    "Deed Transfer Date",
-    "Market Value",
-    "Taxable Value",
-    "Exemptions",
-    "Annual Report",
-    "About DCAD",
-    "Search Appraisals",
-    "Find Property on Map",
-    "Online BPP Rendition",
-    "Online TaxRep Website",
-    "Forms",
-    "Data Products",
-    "Open Records",
-    "GIS Data Products",
-    "Exemptions",
-    "Property Valuation Process",
-    "Protest Process",
-    "uFILE Online Protest System",
-    "Informal Review Process",
-    "ARB",
-    "Taxpayer Liaison Officer",
-    "Paying Taxes",
-    "Local Tax Offices",
-    "Taxing Unit Rates",
-    "Entity Truth-in-Taxation",
-    "Notice Of Estimated Taxes",
-    "Elections DCAD BOD",
-    "Low Income Housing Cap Rate",
-    "F.A.Q.",
-    "Calendar",
-    "Certified Value Summaries",
-    "Certified Comparisons",
-    "Certification Reports",
-    "Preliminary Comparisons",
-    "Average SFR Values",
-    "Median SFR Values",
-    "Reappraisal Plan",
-    "Mass Appraisal Report",
-    "Water & Electricity Usage",
-    "Administration",
-    "Human Resources",
-    "Links",
-    "Contact Us"
-  ];
-
-  // Heuristic: likely owner lines contain a name and address (e.g., "CASTILLO GUADALUPE 422 AVENUE E DALLAS, TEXAS")
-  const ownerRegex = /[A-Z]{2,}.*\d{1,}.*DALLAS/i;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (
-      !skipPhrases.some(phrase => line.includes(phrase)) &&
-      ownerRegex.test(line)
-    ) {
-      return line;
-    }
+  // Find the first year block (usually starts with a year)
+  let firstYearIdx = lines.findIndex(line => /^\d{4}$/.test(line));
+  if (firstYearIdx === -1) {
+    // No year found, fallback to second line (row 2)
+    return lines[1] || '';
   }
 
-  // If nothing found, fallback to second line (row 2)
+  // Owner is typically the line after the year
+  if (lines.length > firstYearIdx + 1) {
+    return lines[firstYearIdx + 1];
+  }
+
+  // Fallback: just return the second line
   return lines[1] || '';
 }
 
@@ -251,7 +199,7 @@ function createPDF(parcelId, detailScreenshot, historyScreenshot) {
 
     // Extract Owner (from plain text)
     const historyText = await page.evaluate(() => document.body.innerText);
-    const ownerName = extractOwnerNameFromHistoryPage(historyText, auctionYear);
+const ownerName = extractOwnerNameFromHistoryPage(historyText, auctionYear);
     console.log(`👤 Owner Extracted: ${ownerName}`);
 
     // Update Sheet
