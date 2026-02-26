@@ -19,11 +19,15 @@ const puppeteer = require("puppeteer");
 // ----------------------------
 const SHEET_ID = "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
 
-// Pull values from:
-// R = Rec_date
-// H = Auc_date
-// N = Owner_name
-const RANGE = "raw_main!R2:N";
+/**
+ * Pull all columns from H → R:
+ * H = auc_date
+ * N = owner_name
+ * R = rec_date
+ *
+ * Range "H2:R" ensures correct column order.
+ */
+const RANGE = "raw_main!H2:R";
 
 // ----------------------------
 // Google Sheets Auth
@@ -117,11 +121,12 @@ async function main() {
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
 
-    const recDateRaw = row[0];
-    const aucDateRaw = row[1];
-    const ownerNameRaw = row[2];
+    // COLUMN MAPPING (based on RANGE = H2:R)
+    const aucDateRaw = row[0];     // H column
+    const ownerNameRaw = row[6];   // N column
+    const recDateRaw = row[10];    // R column
 
-    // Skip row if all empty
+    // Skip row if all 3 key fields are empty
     if (!recDateRaw && !aucDateRaw && !ownerNameRaw) continue;
 
     const recDate = formatDate(recDateRaw);
