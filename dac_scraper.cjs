@@ -39,13 +39,6 @@ const auth = new google.auth.GoogleAuth({
 const sheets = google.sheets({ version: "v4", auth });
 
 
-// Helper to extract Deed Transfer Date from an owner cell
-function extractDeedTransferDateFromOwnerCell(ownerCell) {
-  const ownerHtml = ownerCell.html() || '';
-  const deedDateMatch = ownerHtml.match(/Deed Transfer Date:\s*([0-9\/]+)/i);
-  return deedDateMatch ? deedDateMatch[1].trim() : '';
-}
-
 // =========================
 // Load PARCEL IDs + Years
 // =========================
@@ -75,47 +68,54 @@ async function loadParcelData() {
   return items;
 }
 
-// Main extraction function using Cheerio and decoding HTML entities
-function extractOwnerNameFromHistoryPage(html, auctionYear) {
+/**
+ * Extracts the owner name and deed transfer date from the Dallas CAD history HTML.
+ * - Owner name is always the first line (before <br>) of the owner cell.
+ * - Deed transfer date is parsed from the same cell as the owner name.
+ * - If no auction year match, falls back to the first data row.
+ *
+ * @param {string} html - The HTML content of the history page.
+ * @param {string} auctionYear - The auction year string (e.g., "01/06/2026").
+ * @returns {{ owner: string, deedDate: string }}
+ */
+function extractOwnerAndDeedDateFromHistoryPage(html, auctionYear) {
   const $ = cheerio.load(html);
-
-  // Normalize auction year (e.g., "02/03/2026" → "2026")
   const auctionYearNum = auctionYear.match(/\d{4}/) ? auctionYear.match(/\d{4}/)[0] : auctionYear;
-
-  // Find the owner history table
   const ownerTable = $('#pnlOwnHist table').first();
-  if (!ownerTable.length) return '';
+  if (!ownerTable.length) return { owner: '', deedDate: '' };
 
-  // Find all rows (skip header row)
   const rows = ownerTable.find('tr').slice(1);
 
-  let owner = '';
+  let owner = '', deedDate = '';
+  let rowFound = null;
+
+  // Try to find the row matching the auction year
   rows.each(function () {
     const yearCell = $(this).find('th').first();
     const ownerCell = $(this).find('td').first();
     if (yearCell.length && ownerCell.length) {
       const yearText = yearCell.text().trim();
       if (yearText.includes(auctionYearNum)) {
-        // Get only the first line (the name), split by <br> or newline, decode HTML entities
-        const ownerHtml = ownerCell.html() || '';
-        const ownerNameRaw = ownerHtml.split(/<br\s*\/?>/i)[0].replace(/[\n\r]/g, '').trim();
-        owner = he.decode(ownerNameRaw);
+        rowFound = ownerCell;
         return false; // break loop
       }
     }
   });
 
-  // Fallback: If no matching year found, use owner from first data row
-  if (!owner && rows.length > 0) {
-    const ownerCell = $(rows[0]).find('td').first();
-    if (ownerCell.length) {
-      const ownerHtml = ownerCell.html() || '';
-      const ownerNameRaw = ownerHtml.split(/<br\s*\/?>/i)[0].replace(/[\n\r]/g, '').trim();
-      owner = he.decode(ownerNameRaw);
-    }
+  // Fallback: use first data row if no match
+  if (!rowFound && rows.length > 0) {
+    rowFound = $(rows[0]).find('td').first();
   }
 
-  return owner;
+  if (rowFound && rowFound.length) {
+    const ownerHtml = rowFound.html() || '';
+    const ownerNameRaw = ownerHtml.split(/<br\s*\/?>/i)[0].replace(/[\n\r]/g, '').trim();
+    owner = he.decode(ownerNameRaw);
+    const deedDateMatch = ownerHtml.match(/Deed Transfer Date:\s*([0-9\/]+)/i);
+    deedDate = deedDateMatch ? deedDateMatch[1].trim() : '';
+  }
+
+  return { owner, deedDate };
 }
 
 // =========================
@@ -201,42 +201,17 @@ function createPDF(parcelId, detailScreenshot, historyScreenshot) {
     const historyFile = `history_${parcelId}.jpg`;
     await page.screenshot({ path: historyFile, fullPage: true });
 
-    // Extract Owner Name
-    const ownerName = extractOwnerNameFromHistoryPage(historyHtml, auctionYear);
-    console.log(`👤 Owner Extracted: ${ownerName}`);
-
-    // Extract Deed Transfer Date
-    const $ = cheerio.load(historyHtml);
-    const auctionYearNum = auctionYear.match(/\d{4}/) ? auctionYear.match(/\d{4}/)[0] : auctionYear;
-    const ownerTable = $('#pnlOwnHist table').first();
-    let deedTransferDate = '';
-    if (ownerTable.length) {
-      const rows = ownerTable.find('tr').slice(1);
-      let found = false;
-      rows.each(function () {
-        const yearCell = $(this).find('th').first();
-        const ownerCell = $(this).find('td').first();
-        const yearText = yearCell.text().trim();
-        if (yearText.includes(auctionYearNum)) {
-          deedTransferDate = extractDeedTransferDateFromOwnerCell(ownerCell);
-          found = true;
-          return false;
-        }
-      });
-      // Fallback: use first row if not found
-      if (!found && rows.length > 0) {
-        const ownerCell = $(rows[0]).find('td').first();
-        deedTransferDate = extractDeedTransferDateFromOwnerCell(ownerCell);
-      }
-    }
-    console.log(`📅 Deed Transfer Date: ${deedTransferDate}`);
+    // Extract Owner Name and Deed Transfer Date from the same row
+    const { owner, deedDate } = extractOwnerAndDeedDateFromHistoryPage(historyHtml, auctionYear);
+    console.log(`👤 Owner Extracted: ${owner}`);
+    console.log(`📅 Deed Transfer Date: ${deedDate}`);
 
     // Update Owner in Sheet (column N)
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
       range: `${SHEET_NAME}!${OWNER_OUTPUT_COL}${rowNum}`,
       valueInputOption: "RAW",
-      requestBody: { values: [[ownerName]] }
+      requestBody: { values: [[owner]] }
     });
 
     // Update Deed Transfer Date in Sheet (column R)
@@ -244,7 +219,7 @@ function createPDF(parcelId, detailScreenshot, historyScreenshot) {
       spreadsheetId: SPREADSHEET_ID,
       range: `${SHEET_NAME}!R${rowNum}`,
       valueInputOption: "RAW",
-      requestBody: { values: [[deedTransferDate]] }
+      requestBody: { values: [[deedDate]] }
     });
 
     console.log("📌 Sheet updated");
