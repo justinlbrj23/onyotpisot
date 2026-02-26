@@ -172,12 +172,13 @@ function createPDF(parcelId, detailScreenshot, historyScreenshot) {
     console.log("➡️ Navigating:", url2);
     await page.goto(url2, { waitUntil: "domcontentloaded" });
     await new Promise(r => setTimeout(r, 3000));
+    const html2 = await page.content();
     const historyFile = `history_${parcelId}.jpg`;
     await page.screenshot({ path: historyFile, fullPage: true });
 
     // Extract Owner (from plain text)
     const historyText = await page.evaluate(() => document.body.innerText);
-    const ownerName = extractOwnerNameFromHistoryPage(historyText, auctionYear);
+const ownerName = extractOwnerNameFromHistoryPage(historyText, auctionYear);
     console.log(`👤 Owner Extracted: ${ownerName}`);
 
     // Update Sheet
