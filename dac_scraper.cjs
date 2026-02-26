@@ -87,7 +87,10 @@ function extractOwnerNameFromHistoryPage(html, auctionYear) {
     if (yearCell.length && ownerCell.length) {
       const yearText = yearCell.text().trim();
       if (yearText.includes(auctionYearNum)) {
-        owner = ownerCell.text().replace(/\s+/g, ' ').trim();
+        // Get only the first line (the name), split by <br> or newline
+        const ownerHtml = ownerCell.html() || '';
+        const ownerName = ownerHtml.split(/<br\s*\/?>/i)[0].replace(/[\n\r]/g, '').trim();
+        owner = ownerName;
         return false; // break loop
       }
     }
@@ -97,7 +100,9 @@ function extractOwnerNameFromHistoryPage(html, auctionYear) {
   if (!owner && rows.length > 0) {
     const ownerCell = $(rows[0]).find('td').first();
     if (ownerCell.length) {
-      owner = ownerCell.text().replace(/\s+/g, ' ').trim();
+      const ownerHtml = ownerCell.html() || '';
+      const ownerName = ownerHtml.split(/<br\s*\/?>/i)[0].replace(/[\n\r]/g, '').trim();
+      owner = ownerName;
     }
   }
 
