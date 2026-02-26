@@ -5,7 +5,7 @@
  * - Loops through each row
  * - Builds title search URL per row
  * - Opens page via Puppeteer
- * - Waits 60 seconds
+ * - Waits 60 seconds (safe method)
  * - Saves full‑page screenshot
  */
 
@@ -18,7 +18,12 @@ const puppeteer = require("puppeteer");
 // CONFIG
 // ----------------------------
 const SHEET_ID = "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
-const RANGE = "raw_main!R2:N"; // Pull all columns needed in one go
+
+// Pull values from:
+// R = Rec_date
+// H = Auc_date
+// N = Owner_name
+const RANGE = "raw_main!R2:N";
 
 // ----------------------------
 // Google Sheets Auth
@@ -33,11 +38,12 @@ async function getSheets() {
 }
 
 // ----------------------------
-// Convert date mm/dd/yyyy → yyyymmdd
+// Convert date mm/dd/yyyy → yyyymmdd (no timezone issues)
 // ----------------------------
 function formatDate(input) {
   if (!input) return "";
-  const parts = input.split("/"); // prevents timezone problems
+
+  const parts = input.split("/");
   if (parts.length !== 3) return "";
 
   const [mm, dd, yyyy] = parts;
@@ -67,18 +73,19 @@ async function captureScreenshot(url, index) {
   });
 
   const page = await browser.newPage();
+
   await page.goto(url, {
     waitUntil: "networkidle2",
     timeout: 60000,
   });
 
-  // WAIT 60 seconds before screenshot
-  await page.waitForTimeout(60000);
+  // WAIT 60 seconds before screenshot (Puppeteer-safe)
+  await new Promise((res) => setTimeout(res, 60000));
 
   const outDir = "artifacts";
   if (!fs.existsSync(outDir)) fs.mkdirSync(outDir);
 
-  const filename = `title_search_row_${index + 2}.png`; // row number aligns with sheet
+  const filename = `title_search_row_${index + 2}.png`;
   const filePath = path.join(outDir, filename);
 
   await page.screenshot({ path: filePath, fullPage: true });
@@ -94,12 +101,12 @@ async function main() {
   console.log("Reading Google Sheet...");
   const sheets = await getSheets();
 
-  const res = await sheets.spreadsheets.values.get({
+  const result = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
     range: RANGE,
   });
 
-  const rows = res.data.values || [];
+  const rows = result.data.values || [];
   if (rows.length === 0) {
     console.log("No data found.");
     return;
@@ -109,11 +116,12 @@ async function main() {
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
+
     const recDateRaw = row[0];
     const aucDateRaw = row[1];
     const ownerNameRaw = row[2];
 
-    // Stop if all key values are blank
+    // Skip row if all empty
     if (!recDateRaw && !aucDateRaw && !ownerNameRaw) continue;
 
     const recDate = formatDate(recDateRaw);
@@ -127,8 +135,8 @@ async function main() {
     );
     console.log(`→ URL: ${url}`);
 
-    const screenshot = await captureScreenshot(url, i);
-    console.log(`Saved screenshot: ${screenshot}`);
+    const screenshotPath = await captureScreenshot(url, i);
+    console.log(`Saved screenshot: ${screenshotPath}`);
   }
 
   console.log("All rows processed.");
