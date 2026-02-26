@@ -4,7 +4,6 @@
 
 const puppeteer = require("puppeteer");
 const fs = require("fs");
-const cheerio = require("cheerio");
 const PDFDocument = require("pdfkit");
 const path = require("path");
 const { google } = require("googleapis");
@@ -67,31 +66,34 @@ async function loadParcelData() {
 }
 
 // =========================
-// Owner Extraction Logic
+// Owner Extraction Logic (Deed Transfer Date matching)
 // =========================
-function extractOwnerName(html, auctionYear) {
-  const $ = cheerio.load(html);
-  let owner = "";
+function extractOwnerNameFromHistoryPage(pageText, auctionYear) {
+  // Normalize auction year (e.g., "02/03/2026" → "2026")
+  const auctionYearNum = auctionYear.match(/\d{4}/) ? auctionYear.match(/\d{4}/)[0] : auctionYear;
 
-  let yearPattern = auctionYear;
-  const m = auctionYear.match(/\d{4}/);
-  if (m) yearPattern = m[0];
+  // Split into blocks by year (each block starts with a year)
+  const blocks = pageText.split(/(?=\d{4}\n)/); // crude split, adjust as needed
 
-  const tableCell = $("table td").filter((i, el) => {
-    return $(el).text().includes(yearPattern);
-  }).first();
-
-  if (tableCell.length) {
-    const fullText = tableCell.text().trim();
-    const lines = fullText.split("\n").map(l => l.trim()).filter(Boolean);
-
-    // Owner name is typically on second line
-    if (lines.length > 1) {
-      owner = lines[1].replace(/\s+/g, " ").trim();
+  for (const block of blocks) {
+    // Find Deed Transfer Date line
+    const deedLine = block.split('\n').find(line => line.includes('Deed Transfer Date:'));
+    if (deedLine) {
+      // Extract year from Deed Transfer Date
+      const deedYearMatch = deedLine.match(/\d{4}/);
+      if (deedYearMatch && deedYearMatch[0] === auctionYearNum) {
+        // Owner is the line after the year (first line of block is year, second is owner)
+        const lines = block.split('\n').map(l => l.trim()).filter(Boolean);
+        if (lines.length > 1) {
+          const ownerLine = lines[1];
+          if (/^[A-Z\s]+$/.test(ownerLine) && ownerLine.length > 2) {
+            return ownerLine;
+          }
+        }
+      }
     }
   }
-
-  return owner;
+  return '';
 }
 
 // =========================
@@ -124,18 +126,18 @@ function createPDF(parcelId, detailScreenshot, historyScreenshot) {
   console.log(`📄 Found ${parcelData.length} parcels`);
 
   const browser = await puppeteer.launch({
-  headless: "new",   // or true
-  args: [
-    "--no-sandbox",
-    "--disable-setuid-sandbox",
-    "--disable-dev-shm-usage",
-    "--disable-blink-features=AutomationControlled",
-    "--ignore-certificate-errors",
-    "--disable-gpu",
-    "--single-process",
-    "--no-zygote"
-  ]
-});
+    headless: "new",   // or true
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-blink-features=AutomationControlled",
+      "--ignore-certificate-errors",
+      "--disable-gpu",
+      "--single-process",
+      "--no-zygote"
+    ]
+  });
 
   const page = await browser.newPage();
   page.setDefaultNavigationTimeout(120000);
@@ -177,8 +179,9 @@ function createPDF(parcelId, detailScreenshot, historyScreenshot) {
     const historyFile = `history_${parcelId}.jpg`;
     await page.screenshot({ path: historyFile, fullPage: true });
 
-    // Extract Owner
-    const ownerName = extractOwnerName(html2, auctionYear);
+    // Extract Owner (from plain text)
+    const historyText = await page.evaluate(() => document.body.innerText);
+    const ownerName = extractOwnerNameFromHistoryPage(historyText, auctionYear);
     console.log(`👤 Owner Extracted: ${ownerName}`);
 
     // Update Sheet
