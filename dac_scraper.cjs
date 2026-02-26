@@ -1,7 +1,3 @@
-// dac_scraper.cjs
-// Dallas CAD Parcel Scraper (Artifact Mode, PDFKit)
-// Requires: npm install puppeteer cheerio googleapis pdfkit
-
 const puppeteer = require("puppeteer");
 const fs = require("fs");
 const PDFDocument = require("pdfkit");
@@ -38,7 +34,6 @@ const auth = new google.auth.GoogleAuth({
 
 const sheets = google.sheets({ version: "v4", auth });
 
-
 // =========================
 // Load PARCEL IDs + Years
 // =========================
@@ -68,16 +63,9 @@ async function loadParcelData() {
   return items;
 }
 
-/**
- * Extracts the owner name and deed transfer date from the Dallas CAD history HTML.
- * - Owner name is always the first line (before <br>) of the owner cell.
- * - Deed transfer date is parsed from the same cell as the owner name.
- * - If no auction year match, falls back to the first data row.
- *
- * @param {string} html - The HTML content of the history page.
- * @param {string} auctionYear - The auction year string (e.g., "01/06/2026").
- * @returns {{ owner: string, deedDate: string }}
- */
+// =========================
+// Owner + Deed Date Extraction (Paired)
+// =========================
 function extractOwnerAndDeedDateFromHistoryPage(html, auctionYear) {
   const $ = cheerio.load(html);
   const auctionYearNum = auctionYear.match(/\d{4}/) ? auctionYear.match(/\d{4}/)[0] : auctionYear;
