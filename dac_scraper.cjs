@@ -64,17 +64,17 @@ async function loadParcelData() {
 }
 
 // =========================
-// Owner + Deed Date Extraction (Paired, robust for nested table)
+// Owner + Deed Date + Instrument Extraction (Paired, robust for nested table)
 // =========================
-function extractOwnerAndDeedDateFromHistoryPage(html, auctionYear) {
+function extractOwnerDeedDateInstrumentFromHistoryPage(html, auctionYear) {
   const $ = cheerio.load(html);
   const auctionYearNum = auctionYear.match(/\d{4}/) ? auctionYear.match(/\d{4}/)[0] : auctionYear;
   const ownerTable = $('#pnlOwnHist table').first();
-  if (!ownerTable.length) return { owner: '', deedDate: '' };
+  if (!ownerTable.length) return { owner: '', deedDate: '', instrument: '' };
 
   const rows = ownerTable.find('tr').slice(1);
 
-  let owner = '', deedDate = '';
+  let owner = '', deedDate = '', instrument = '';
   let rowFound = null;
 
   // Try to find the row matching the auction year
@@ -99,27 +99,49 @@ function extractOwnerAndDeedDateFromHistoryPage(html, auctionYear) {
   }
 
   if (rowFound && rowFound.ownerCell && rowFound.legalDescCell) {
-    // Owner name
+    // Owner name(s) extraction (omit address/city/state)
     const ownerHtml = rowFound.ownerCell.html() || '';
-    const ownerNameRaw = ownerHtml.split(/<br\s*\/?>/i)[0].replace(/[\n\r]/g, '').trim();
-    owner = he.decode(ownerNameRaw);
+    const ownerLines = ownerHtml.split(/<br\s*\/?>/i)
+      .map(line => he.decode(line).replace(/[\n\r]/g, '').trim())
+      .filter(line =>
+        line &&
+        /^[A-Z\s\.\&]+$/.test(line) && // all uppercase, spaces, dots, ampersand
+        !/\d/.test(line) && // no numbers
+        !/DALLAS|TEXAS|\d{5}/i.test(line) // not address/city/state/zip
+      );
+    owner = ownerLines.join(' & ');
 
     // Deed Transfer Date (search in legalDescCell, which contains a nested table)
     const legalHtml = rowFound.legalDescCell.html() || '';
-    // Try to match "Deed Transfer Date:" and get the next tag/text
     let deedDateMatch = legalHtml.match(/Deed Transfer Date:<\/span>\s*([0-9\/]+)/i);
     if (!deedDateMatch) {
-      // Try to match the date in a <span> after "Deed Transfer Date:"
       deedDateMatch = legalHtml.match(/Deed Transfer Date:[^<]*<[^>]*>([0-9\/]+)<\/span>/i);
     }
     if (!deedDateMatch) {
-      // fallback: try to match just the date pattern
       deedDateMatch = legalHtml.match(/(\d{1,2}\/\d{1,2}\/\d{4})/);
     }
     deedDate = deedDateMatch ? deedDateMatch[1].trim() : '';
+
+    // Instrument/Document Number (look for the 4th row in the nested table)
+    const nestedTable = rowFound.legalDescCell.find('table');
+    if (nestedTable.length) {
+      // Try "4." first
+      let instrumentRow = nestedTable.find('tr').eq(3); // 0-based index
+      instrument = instrumentRow.length ? instrumentRow.find('td').text().trim() : '';
+      // Fallback: try "3." if "4." is empty
+      if (!instrument) {
+        instrumentRow = nestedTable.find('tr').eq(2);
+        instrument = instrumentRow.length ? instrumentRow.find('td').text().trim() : '';
+      }
+    }
+    // Fallback: try to match INT/Document number pattern in the HTML
+    if (!instrument) {
+      const instrMatch = legalHtml.match(/([A-Z]{2,}\d{9,})/);
+      instrument = instrMatch ? instrMatch[1] : '';
+    }
   }
 
-  return { owner, deedDate };
+  return { owner, deedDate, instrument };
 }
 
 // =========================
@@ -205,10 +227,11 @@ function createPDF(parcelId, detailScreenshot, historyScreenshot) {
     const historyFile = `history_${parcelId}.jpg`;
     await page.screenshot({ path: historyFile, fullPage: true });
 
-    // Extract Owner Name and Deed Transfer Date from the same row
-    const { owner, deedDate } = extractOwnerAndDeedDateFromHistoryPage(historyHtml, auctionYear);
+    // Extract Owner Name, Deed Transfer Date, Instrument/Doc Number from the same row
+    const { owner, deedDate, instrument } = extractOwnerDeedDateInstrumentFromHistoryPage(historyHtml, auctionYear);
     console.log(`👤 Owner Extracted: ${owner}`);
     console.log(`📅 Deed Transfer Date: ${deedDate}`);
+    console.log(`📄 Instrument/Doc Number: ${instrument}`);
 
     // Update Owner in Sheet (column N)
     await sheets.spreadsheets.values.update({
@@ -224,6 +247,14 @@ function createPDF(parcelId, detailScreenshot, historyScreenshot) {
       range: `${SHEET_NAME}!R${rowNum}`,
       valueInputOption: "RAW",
       requestBody: { values: [[deedDate]] }
+    });
+
+    // Update Instrument/Doc Number in Sheet (column S)
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!S${rowNum}`,
+      valueInputOption: "RAW",
+      requestBody: { values: [[instrument]] }
     });
 
     console.log("📌 Sheet updated");
