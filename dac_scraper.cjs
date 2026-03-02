@@ -38,7 +38,7 @@ const auth = new google.auth.GoogleAuth({
 const sheets = google.sheets({ version: "v4", auth });
 
 // =========================
-// Load PARCEL IDs + Years + INDEX (column C)
+/** Load PARCEL IDs + Years + INDEX (column C) */
 // =========================
 async function loadParcelData() {
   const indexRes = await sheets.spreadsheets.values.get({
@@ -75,7 +75,7 @@ async function loadParcelData() {
 }
 
 // =========================
-// Owner + Deed Date + Instrument Extraction
+/** Owner + Deed Date + Instrument Extraction */
 // =========================
 function extractOwnerDeedDateInstrumentFromHistoryPage(html, auctionYear) {
   const $ = cheerio.load(html);
@@ -132,26 +132,34 @@ function extractOwnerDeedDateInstrumentFromHistoryPage(html, auctionYear) {
 }
 
 // =========================
-// Build PDF using indexValue
+// Build TWO PDFs (separate) using indexValue
 // =========================
-function createPDF(indexValue, detailScreenshot, historyScreenshot) {
+// === CHANGED: replaced single combined PDF with two separate PDFs ===
+function createSeparatePDFs(indexValue, detailScreenshot, historyScreenshot) {
   const safe = String(indexValue).replace(/[^\w\-]+/g, "_");
-  const pdfPath = path.join("artifacts", `parcel_${safe}.pdf`);
 
-  const doc = new PDFDocument({ autoFirstPage: false });
-  const stream = fs.createWriteStream(pdfPath);
-  doc.pipe(stream);
+  const detailPdfPath = path.join("artifacts", `parcel_${safe}_detail.pdf`);
+  const historyPdfPath = path.join("artifacts", `parcel_${safe}_history.pdf`);
 
-  const img1 = doc.openImage(detailScreenshot);
-  doc.addPage({ size: [img1.width, img1.height] });
-  doc.image(img1, 0, 0);
+  // Detail PDF
+  const doc1 = new PDFDocument({ autoFirstPage: false });
+  const stream1 = fs.createWriteStream(detailPdfPath);
+  doc1.pipe(stream1);
+  const img1 = doc1.openImage(detailScreenshot);
+  doc1.addPage({ size: [img1.width, img1.height] });
+  doc1.image(img1, 0, 0);
+  doc1.end();
 
-  const img2 = doc.openImage(historyScreenshot);
-  doc.addPage({ size: [img2.width, img2.height] });
-  doc.image(img2, 0, 0);
+  // History PDF
+  const doc2 = new PDFDocument({ autoFirstPage: false });
+  const stream2 = fs.createWriteStream(historyPdfPath);
+  doc2.pipe(stream2);
+  const img2 = doc2.openImage(historyScreenshot);
+  doc2.addPage({ size: [img2.width, img2.height] });
+  doc2.image(img2, 0, 0);
+  doc2.end();
 
-  doc.end();
-  return pdfPath;
+  return [detailPdfPath, historyPdfPath];
 }
 
 // =========================
@@ -247,9 +255,13 @@ function createPDF(indexValue, detailScreenshot, historyScreenshot) {
 
     console.log("📌 Sheet updated");
 
-    const pdfPath = createPDF(indexValue, detailFile, historyFile);
-    console.log("📄 PDF Generated:", pdfPath);
+    // === CHANGED: create TWO separate PDFs, not merged ===
+    const [detailPdfPath, historyPdfPath] = createSeparatePDFs(indexValue, detailFile, historyFile);
+    console.log("📄 PDFs Generated:");
+    console.log("   •", detailPdfPath);
+    console.log("   •", historyPdfPath);
 
+    // Clean up temp images
     fs.unlinkSync(detailFile);
     fs.unlinkSync(historyFile);
   }
