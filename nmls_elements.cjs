@@ -1,29 +1,37 @@
-// nmls_consumer_access.js
+
+// nmls_elements.cjs
 // ------------------------------------------------------------
 // Purpose: Automate navigation on https://www.nmlsconsumeraccess.org/
-// Navigation logic and browser hardening modeled after user's sample.
-// Steps:
+// Navigation logic and browser hardening modeled after the user's sample.
+//
+// Flow:
 //   1) Open homepage and wait for DOMContentLoaded + short delay
-//   2) Find input.swap_value, click, and type ZIP (default "33122" or via --zip / ZIP_CODE)
+//   2) Find input.swap_value, click, and type ZIP
 //   3) Find and click input.go
 //   4) On next page (after DOMContentLoaded), click the terms checkbox
 //      input#ctl00_MainContent_cbxAgreeToTerms
-//   5) CAPTCHA: HUMAN-IN-THE-LOOP ONLY (no OCR). Save image to artifacts/captcha_*.png,
-//      then obtain the captcha through one of the following (in order):
-//        a) env var CAPTCHA_TEXT
-//        b) drop-file artifacts/captcha_answer.txt (waits up to CAPTCHA_TIMEOUT_MS)
-//        c) interactive stdin prompt (local runs)
-//      Next, enter it into input.swap_value and attempt a likely submit.
+//   5) CAPTCHA: HUMAN-IN-THE-LOOP ONLY (no OCR). The script saves the image to
+//      artifacts/captcha_*.png, then tries 3 sources for the answer (in order):
+//        a) process.env.CAPTCHA_TEXT
+//        b) a drop-file: artifacts/captcha_answer.txt (waits up to X min)
+//        c) interactive stdin prompt (for local runs)
+//      Then it types the provided text into input.swap_value and attempts submit.
 //
-// IMPORTANT:
-//   - Do not use this to bypass captchas or site controls. Respect Terms of Use.
-//   - Selectors can change; inspect and update if needed.
-//   - This script avoids programmatically enabling disabled buttons.
+//  NEW (Compliant):
+//   • Integrated OCR utilities (Tesseract/convert/pdftoppm/gs) for NON-CAPTCHA files only.
+//     Use env RUN_OCR_NON_CAPTCHA=1 and OCR_INPUT_PATH to process non-captcha images/PDFs.
+//     OCR outputs go to artifacts/ocr_output/<timestamp>.
+//
+// IMPORTANT COMPLIANCE NOTES:
+//   - Do not bypass captchas or site access controls. This script does NOT auto-solve captcha.
+//   - The OCR utilities will REFUSE to run on files named like 'captcha_*.png' or paths
+//     clearly pointing to the captcha image to avoid misuse.
 // ------------------------------------------------------------
 
-const puppeteer = require('puppeteer');
 const fs = require('fs');
 const path = require('path');
+const { execSync } = require('child_process');
+const puppeteer = require('puppeteer');
 
 // =========================
 // CONFIG + CLI
@@ -31,7 +39,6 @@ const path = require('path');
 const ARTIFACTS_DIR = path.join(process.cwd(), 'artifacts');
 const BASE_URL = 'https://www.nmlsconsumeraccess.org/';
 
-// CLI flags: --zip=XXXXX, --headful, --captcha-timeout-ms=NNNN
 function readFlag(name, fallback = '') {
   const prefix = `--${name}=`;
   const found = process.argv.find(a => a.startsWith(prefix));
@@ -40,8 +47,12 @@ function readFlag(name, fallback = '') {
 
 const HEADFUL = process.argv.includes('--headful');
 const ZIP_CODE = process.env.ZIP_CODE || readFlag('zip', '33122');
-const CAPTCHA_TIMEOUT_MS = parseInt(process.env.CAPTCHA_TIMEOUT_MS || readFlag('captcha-timeout-ms', '300000'), 10); // default 5 min
-const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined; // use system Chrome if specified
+const CAPTCHA_TIMEOUT_MS = parseInt(process.env.CAPTCHA_TIMEOUT_MS || readFlag('captcha-timeout-ms', '300000'), 10);
+const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined; // allow system Chrome
+
+// OCR toggles (NON-CAPTCHA ONLY)
+const RUN_OCR_NON_CAPTCHA = /^1|true|yes$/i.test(String(process.env.RUN_OCR_NON_CAPTCHA || '0'));
+const OCR_INPUT_PATH = process.env.OCR_INPUT_PATH || ''; // absolute or relative to repo root
 
 // Selectors
 const SEL = {
@@ -50,7 +61,6 @@ const SEL = {
   agreeCheckbox: process.env.SEL_AGREE || 'input#ctl00_MainContent_cbxAgreeToTerms',
   captchaImg: process.env.SEL_CAPTCHA_IMG || 'img#c_turingtestpage_ctl00_maincontent_captcha1_CaptchaImage',
   captchaInput: process.env.SEL_CAPTCHA_INPUT || 'input.swap_value',
-  // A set of possible submit buttons to try after captcha (do not force-enable)
   submitCandidates: (
     process.env.SEL_SUBMIT_CANDIDATES
       ? process.env.SEL_SUBMIT_CANDIDATES.split(',').map(s => s.trim()).filter(Boolean)
@@ -67,12 +77,119 @@ const SEL = {
 };
 
 // Ensure artifacts directory exists
-if (!fs.existsSync(ARTIFACTS_DIR)) {
-  fs.mkdirSync(ARTIFACTS_DIR);
+if (!fs.existsSync(ARTIFACTS_DIR)) fs.mkdirSync(ARTIFACTS_DIR);
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function ensureFile(file, content = '') {
+  try { fs.writeFileSync(file, content, 'utf8'); } catch {}
 }
 
-// Small helper delay
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+// =========================
+// OCR UTILITIES (NON-CAPTCHA ONLY)
+// =========================
+const ALLOWED_IMAGE_EXTS = ['.png', '.jpg', '.jpeg'];
+const ALLOWED_PDF_EXTS = ['.pdf'];
+
+function isRealPDF(filePath) {
+  const fd = fs.openSync(filePath, 'r');
+  const buffer = Buffer.alloc(5);
+  fs.readSync(fd, buffer, 0, 5, 0);
+  fs.closeSync(fd);
+  return buffer.toString() === '%PDF-';
+}
+
+function preprocessImage(inputPath, outputPath) {
+  // Requires ImageMagick's `convert`
+  execSync(`convert "${inputPath}" -colorspace Gray -resize 300% -contrast-stretch 0 "${outputPath}"`);
+}
+
+function runOcrNonCaptcha(inputFile, outBaseDir) {
+  const baseName = path.basename(inputFile).toLowerCase();
+  if (baseName.startsWith('captcha_')) {
+    console.warn('⛔ Skipping OCR: Detected CAPTCHA image name. OCR is disabled for captcha.');
+    return null;
+  }
+  const ext = path.extname(inputFile).toLowerCase();
+  const outDir = path.join(outBaseDir, String(Date.now()));
+  fs.mkdirSync(outDir, { recursive: true });
+
+  try {
+    let pageImages = [];
+
+    if (ALLOWED_PDF_EXTS.includes(ext)) {
+      console.log('📄 OCR: PDF detected — validating...');
+      if (!isRealPDF(inputFile)) throw new Error('File has .pdf extension but is NOT a valid PDF');
+      console.log('✅ OCR: PDF valid — converting pages to images...');
+      try {
+        execSync(`pdftoppm "${inputFile}" ${outDir}/page -png`);
+      } catch {
+        console.warn('⚠️ pdftoppm failed — attempting PDF normalization...');
+        const normalizedPDF = path.join(outDir, 'normalized.pdf');
+        execSync(`gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dNOPAUSE -dQUIET -dBATCH -sOutputFile="${normalizedPDF}" "${inputFile}"`);
+        execSync(`pdftoppm "${normalizedPDF}" ${outDir}/page -png`);
+      }
+      pageImages = fs.readdirSync(outDir)
+        .filter(f => f.startsWith('page-') && f.endsWith('.png'))
+        .filter(f => fs.statSync(path.join(outDir, f)).isFile())
+        .sort((a, b) => {
+          const na = parseInt(a.match(/page-(\d+)/)[1], 10);
+          const nb = parseInt(b.match(/page-(\d+)/)[1], 10);
+          return na - nb;
+        });
+
+    } else if (ALLOWED_IMAGE_EXTS.includes(ext)) {
+      const target = path.join(outDir, 'page-1.png');
+      fs.copyFileSync(inputFile, target);
+      pageImages = ['page-1.png'];
+
+    } else {
+      throw new Error(`Unsupported file type: ${ext}. Supported types: ${ALLOWED_PDF_EXTS.concat(ALLOWED_IMAGE_EXTS).join(', ')}`);
+    }
+
+    if (pageImages.length === 0) throw new Error('No pages found to OCR after conversion');
+
+    console.log('🔎 OCR files to process:', pageImages);
+    let combinedText = '';
+    const jsonResults = [];
+
+    for (let i = 0; i < pageImages.length; i++) {
+      const pageNum = i + 1;
+      const rawPath = path.join(outDir, pageImages[i]);
+      const cleanPath = path.join(outDir, `clean-page-${pageNum}.png`);
+
+      console.log(`🔍 OCR page ${pageNum}`);
+      preprocessImage(rawPath, cleanPath);
+
+      let text = '';
+      try {
+        text = execSync(`tesseract "${cleanPath}" stdout`, { encoding: 'utf8' });
+      } catch (e) {
+        console.warn(`⚠️ Tesseract failed on page ${pageNum}: ${e.message}`);
+      }
+
+      const entities = {
+        amounts: text.match(/\b(?:₱|\$)?\d{1,3}(?:,\d{3})*(?:\.\d{2})?\b/g) || [],
+        dates: text.match(/\b\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b/g) || [],
+        ids: text.match(/\b[A-Z0-9]{6,}\b/g) || []
+      };
+
+      fs.writeFileSync(path.join(outDir, `page-${pageNum}.txt`), text);
+      jsonResults.push({ page: pageNum, entities, text });
+      combinedText += `\n\n===== PAGE ${pageNum} =====\n\n${text}`;
+    }
+
+    fs.writeFileSync(path.join(outDir, 'full_text.txt'), combinedText);
+    fs.writeFileSync(path.join(outDir, 'output.json'), JSON.stringify(jsonResults, null, 2));
+
+    console.log('✅ OCR complete (Tesseract + PDF normalization + image support)');
+    return outDir;
+
+  } catch (err) {
+    console.error('❌ OCR failed:', err.message);
+    return null;
+  }
+}
 
 async function readCaptchaFromFile(filePath, timeoutMs) {
   const started = Date.now();
@@ -86,7 +203,7 @@ async function readCaptchaFromFile(filePath, timeoutMs) {
           return value;
         }
       }
-    } catch { /* ignore transient errors */ }
+    } catch {}
     await sleep(3000);
   }
   return '';
@@ -129,14 +246,12 @@ async function readCaptchaFromFile(filePath, timeoutMs) {
     Object.defineProperty(navigator, 'webdriver', { get: () => false });
   });
 
-  // Helpful console relay
   page.on('console', msg => console.log('[PAGE]', msg.text()));
 
   try {
     console.log('➡️  Navigating to:', BASE_URL);
     const navResp = await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
 
-    // Guard for 401/403 or blocked states
     try {
       const status = navResp ? navResp.status() : null;
       if (status && (status === 401 || status === 403)) {
@@ -181,7 +296,6 @@ async function readCaptchaFromFile(filePath, timeoutMs) {
     console.log('🧩 Waiting for CAPTCHA image...');
     await page.waitForSelector(SEL.captchaImg, { visible: true, timeout: 60000 });
 
-    // Save captcha and full page for the user
     const ts = Date.now();
     const fullshot = path.join(ARTIFACTS_DIR, `step4_captcha_page_${ts}.jpg`);
     const captchapath = path.join(ARTIFACTS_DIR, `captcha_${ts}.png`);
@@ -192,9 +306,22 @@ async function readCaptchaFromFile(filePath, timeoutMs) {
       if (el) {
         await el.screenshot({ path: captchapath });
         console.log(`🖼️  Saved CAPTCHA image at: ${captchapath}`);
+        // Create a placeholder note and empty answer file for operators
+        ensureFile(path.join(ARTIFACTS_DIR, 'captcha_note.txt'), [
+          'This run captured a CAPTCHA image. OCR for CAPTCHA is disabled.','',
+          'Provide the characters exactly in artifacts/captcha_answer.txt within the timeout window to continue.'
+        ].join('\n'));
+        ensureFile(path.join(ARTIFACTS_DIR, 'captcha_answer.txt'), '');
       }
     } catch (e) {
       console.warn('⚠️  Could not capture screenshots:', e.message);
+    }
+
+    // OPTIONAL OCR for NON-CAPTCHA content
+    if (RUN_OCR_NON_CAPTCHA && OCR_INPUT_PATH) {
+      const inputAbs = path.isAbsolute(OCR_INPUT_PATH) ? OCR_INPUT_PATH : path.join(process.cwd(), OCR_INPUT_PATH);
+      console.log('🧠 Running OCR (non-captcha):', inputAbs);
+      runOcrNonCaptcha(inputAbs, path.join(ARTIFACTS_DIR, 'ocr_output'));
     }
 
     // HUMAN-IN-THE-LOOP CAPTCHA ANSWER (no OCR)
@@ -202,12 +329,10 @@ async function readCaptchaFromFile(filePath, timeoutMs) {
     let captchaText = (process.env.CAPTCHA_TEXT || '').trim();
 
     if (!captchaText) {
-      // Try drop-file handoff (operator creates artifacts/captcha_answer.txt)
       captchaText = await readCaptchaFromFile(answerFile, CAPTCHA_TIMEOUT_MS);
     }
 
     if (!captchaText) {
-      // Fallback to interactive prompt (best for local runs)
       const readline = require('readline');
       const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
       captchaText = await new Promise(resolve => {
@@ -229,13 +354,10 @@ async function readCaptchaFromFile(filePath, timeoutMs) {
     await page.click(SEL.captchaInput, { clickCount: 3 });
     await page.type(SEL.captchaInput, captchaText, { delay: 40 });
 
-    // Attempt to click a valid submit/continue button without forcing enable
     let clicked = false;
     for (const sel of SEL.submitCandidates) {
       const exists = await page.$(sel);
       if (!exists) continue;
-
-      // Try clicking only if not disabled/hidden
       const canClick = await page.evaluate((s) => {
         const node = document.querySelector(s);
         if (!node) return false;
@@ -269,7 +391,7 @@ async function readCaptchaFromFile(filePath, timeoutMs) {
     console.error('💥 Automation error:', err);
   } finally {
     try { await page.close(); } catch {}
-    await browser.close();
+    await (await browser).close();
     console.log('🏁 Browser closed.');
   }
 })();
