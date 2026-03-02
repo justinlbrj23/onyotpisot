@@ -1,50 +1,72 @@
-// nmls_consumer_access.js
+// nmls_elements.cjs
 // ------------------------------------------------------------
 // Purpose: Automate navigation on https://www.nmlsconsumeraccess.org/
-// Navigation logic and browser hardening modeled after user's sample.
-// Steps:
+// with navigation logic and browser hardening modeled after the user's sample.
+//
+// Flow:
 //   1) Open homepage and wait for DOMContentLoaded + short delay
-//   2) Find input.swap_value, click, and type "33122"
+//   2) Find input.swap_value, click, and type ZIP
 //   3) Find and click input.go
 //   4) On next page (after DOMContentLoaded), click the terms checkbox
 //      input#ctl00_MainContent_cbxAgreeToTerms
-//   5) CAPTCHA: human-in-the-loop (no OCR). Save image to artifacts/captcha_*.png,
-//      prompt user to type it, enter into input.swap_value, then click a likely submit.
+//   5) CAPTCHA: HUMAN-IN-THE-LOOP ONLY (no OCR). The script saves the image to
+//      artifacts/captcha_*.png, then tries 3 sources for the answer (in order):
+//        a) process.env.CAPTCHA_TEXT
+//        b) a drop-file: artifacts/captcha_answer.txt (waits up to X min)
+//        c) interactive stdin prompt (for local runs)
+//      Then it types the provided text into input.swap_value and attempts submit.
 //
-// IMPORTANT:
-//   - Do not use this to bypass captchas or site controls. Respect Terms of Use.
+// IMPORTANT COMPLIANCE NOTES:
+//   - Do not bypass captchas or site access controls. This script does NOT auto-solve captcha.
 //   - Selectors can change; inspect and update if needed.
-//   - This script avoids programmatically enabling disabled buttons.
+//   - This script avoids force-enabling disabled buttons.
+//   - If the site returns 401/403 or a Private Access Token challenge, the script
+//     will capture evidence and exit gracefully.
 // ------------------------------------------------------------
 
-const puppeteer = require('puppeteer');
 const fs = require('fs');
 const path = require('path');
+const puppeteer = require('puppeteer');
 
 // =========================
-// CONFIG
+// CONFIG + CLI
 // =========================
 const ARTIFACTS_DIR = path.join(process.cwd(), 'artifacts');
 const BASE_URL = 'https://www.nmlsconsumeraccess.org/';
-const ZIP_CODE = '33122'; // per user request
+
+// CLI flags: --zip=XXXXX, --headful, --captcha-timeout-ms=NNNN
+function readFlag(name, fallback = '') {
+  const prefix = `--${name}=`;
+  const found = process.argv.find(a => a.startsWith(prefix));
+  return found ? found.slice(prefix.length) : fallback;
+}
+
+const HEADFUL = process.argv.includes('--headful');
+const ZIP_CODE = process.env.ZIP_CODE || readFlag('zip', '33122');
+const CAPTCHA_TIMEOUT_MS = parseInt(process.env.CAPTCHA_TIMEOUT_MS || readFlag('captcha-timeout-ms', '300000'), 10); // default 5 min
+const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined; // allow system Chrome
 
 // Selectors
 const SEL = {
-  zipInput: 'input.swap_value',
-  goBtn: 'input.go',
-  agreeCheckbox: 'input#ctl00_MainContent_cbxAgreeToTerms',
-  captchaImg: 'img#c_turingtestpage_ctl00_maincontent_captcha1_CaptchaImage',
-  captchaInput: 'input.swap_value', // as specified by user
+  zipInput: process.env.SEL_ZIP_INPUT || 'input.swap_value',
+  goBtn: process.env.SEL_GO_BTN || 'input.go',
+  agreeCheckbox: process.env.SEL_AGREE || 'input#ctl00_MainContent_cbxAgreeToTerms',
+  captchaImg: process.env.SEL_CAPTCHA_IMG || 'img#c_turingtestpage_ctl00_maincontent_captcha1_CaptchaImage',
+  captchaInput: process.env.SEL_CAPTCHA_INPUT || 'input.swap_value',
   // A set of possible submit buttons to try after captcha
-  submitCandidates: [
-    'input.aspNetDisabled', // as given (may be disabled unless conditions met)
-    'input[type="submit"]',
-    'button[type="submit"]',
-    'input[value*="Continue" i]',
-    'input[value*="Search" i]',
-    'input[id*="btn" i]',
-    'button[id*="btn" i]'
-  ]
+  submitCandidates: (
+    process.env.SEL_SUBMIT_CANDIDATES
+      ? process.env.SEL_SUBMIT_CANDIDATES.split(',').map(s => s.trim()).filter(Boolean)
+      : [
+          'input.aspNetDisabled', // as given (may be disabled unless conditions met)
+          'input[type="submit"]',
+          'button[type="submit"]',
+          'input[value*="Continue" i]',
+          'input[value*="Search" i]',
+          'input[id*="btn" i]',
+          'button[id*="btn" i]'
+        ]
+  )
 };
 
 // Ensure artifacts directory exists
@@ -55,13 +77,29 @@ if (!fs.existsSync(ARTIFACTS_DIR)) {
 // Small helper delay
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// =========================
-// MAIN
-// =========================
-(async () => {
+async function readCaptchaFromFile(filePath, timeoutMs) {
+  const started = Date.now();
+  console.log(`⏳ Waiting for captcha answer file: ${filePath} (timeout ${(timeoutMs/1000)|0}s)`);
+  while (Date.now() - started < timeoutMs) {
+    try {
+      if (fs.existsSync(filePath)) {
+        const value = fs.readFileSync(filePath, 'utf8').trim();
+        if (value) {
+          console.log('✅ Captcha answer file detected.');
+          return value;
+        }
+      }
+    } catch { /* ignore transient errors */ }
+    await sleep(3000);
+  }
+  return '';
+}
+
+async function main() {
   console.log('🚀 Launching browser...');
   const browser = await puppeteer.launch({
-    headless: 'new',
+    headless: HEADFUL ? false : 'new',
+    executablePath,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -71,7 +109,8 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
       '--disable-gpu',
       '--single-process',
       '--no-zygote'
-    ]
+    ],
+    defaultViewport: { width: 1366, height: 900 }
   });
 
   const page = await browser.newPage();
@@ -95,14 +134,31 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
   try {
     console.log('➡️  Navigating to:', BASE_URL);
-    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+    const navResp = await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+
+    // Guard for 401/403 or blocked states
+    try {
+      const status = navResp ? navResp.status() : null;
+      if (status && (status === 401 || status === 403)) {
+        const htmlPath = path.join(ARTIFACTS_DIR, `blocked_${Date.now()}.html`);
+        const imgPath = path.join(ARTIFACTS_DIR, `blocked_${Date.now()}.png`);
+        try {
+          fs.writeFileSync(htmlPath, await page.content(), 'utf-8');
+          await page.screenshot({ path: imgPath, fullPage: true });
+        } catch {}
+        console.error(`❌ Initial navigation blocked with status ${status}. Evidence saved.`);
+        await browser.close();
+        process.exit(2);
+      }
+    } catch {}
+
     await sleep(3000);
     await page.screenshot({ path: path.join(ARTIFACTS_DIR, 'step1_home.jpg'), fullPage: true });
 
     console.log('🔎 Typing ZIP into input.swap_value...');
     await page.waitForSelector(SEL.zipInput, { visible: true, timeout: 45000 });
     await page.click(SEL.zipInput, { clickCount: 3 });
-    await page.type(SEL.zipInput, ZIP_CODE, { delay: 40 });
+    await page.type(SEL.zipInput, String(ZIP_CODE), { delay: 40 });
 
     console.log('🖱️ Clicking input.go ...');
     await page.waitForSelector(SEL.goBtn, { visible: true, timeout: 45000 });
@@ -141,15 +197,26 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
       console.warn('⚠️  Could not capture screenshots:', e.message);
     }
 
-    // Prompt for manual captcha input
-    const readline = require('readline');
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    const captchaText = await new Promise(resolve => {
-      rl.question('Enter CAPTCHA text (check artifacts/captcha_*.png): ', ans => {
-        rl.close();
-        resolve((ans || '').trim());
+    // HUMAN-IN-THE-LOOP CAPTCHA ANSWER (no OCR)
+    const answerFile = path.join(ARTIFACTS_DIR, 'captcha_answer.txt');
+    let captchaText = (process.env.CAPTCHA_TEXT || '').trim();
+
+    if (!captchaText) {
+      // Try drop-file handoff (operator creates artifacts/captcha_answer.txt)
+      captchaText = await readCaptchaFromFile(answerFile, CAPTCHA_TIMEOUT_MS);
+    }
+
+    if (!captchaText) {
+      // Fallback to interactive prompt (best for local runs)
+      const readline = require('readline');
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      captchaText = await new Promise(resolve => {
+        rl.question('Enter CAPTCHA text (check artifacts/captcha_*.png): ', ans => {
+          rl.close();
+          resolve((ans || '').trim());
+        });
       });
-    });
+    }
 
     if (!captchaText) {
       console.log('❌ No CAPTCHA entered. Exiting.');
@@ -201,7 +268,10 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
   } catch (err) {
     console.error('💥 Automation error:', err);
   } finally {
-    await browser.close();
+    try { await page.close(); } catch {}
+    await (await browser).close();
     console.log('🏁 Browser closed.');
   }
-})();
+}
+
+main();
