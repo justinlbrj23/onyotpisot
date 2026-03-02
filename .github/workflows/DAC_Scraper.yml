@@ -1,4 +1,4 @@
-name: Fetch Dallas CAD Parcels
+name: Fetch NMLS Data
 
 on:
   workflow_dispatch:  # Manual trigger only
@@ -57,18 +57,18 @@ jobs:
           "
 
       # --------------------------------------------------
-      # Run Dallas CAD Parcel Scraper
+      # Run NMLS Scraper
       # --------------------------------------------------
-      - name: Run Dallas CAD Parcel Scraper
-        run: node dac_scraper.cjs
+      - name: Run NMLS Scraper
+        run: node nmls_elements.cjs
 
       # --------------------------------------------------
       # Upload ALL screenshot artifacts
       # --------------------------------------------------
-      - name: Upload Dallas CAD Artifacts
+      - name: Upload NMLS Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dallas-cad-artifacts
+          name: nmls-artifacts
           path: artifacts/**
 
       # --------------------------------------------------
