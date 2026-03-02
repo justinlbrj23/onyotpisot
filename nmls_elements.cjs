@@ -312,7 +312,7 @@ ensureFile(path.join(ARTIFACTS_DIR, 'textCaption_note.txt'), [
 ].join('\n'));
 
 ensureFile(path.join(ARTIFACTS_DIR, 'textCaption_answer.txt'), '');
-      }
+      
     } catch (e) {
       console.warn('⚠️  Could not capture screenshots:', e.message);
     }
