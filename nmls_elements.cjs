@@ -1,32 +1,29 @@
-// nmls_elements.cjs
+// nmls_consumer_access.js
 // ------------------------------------------------------------
 // Purpose: Automate navigation on https://www.nmlsconsumeraccess.org/
-// with navigation logic and browser hardening modeled after the user's sample.
-//
-// Flow:
+// Navigation logic and browser hardening modeled after user's sample.
+// Steps:
 //   1) Open homepage and wait for DOMContentLoaded + short delay
-//   2) Find input.swap_value, click, and type ZIP
+//   2) Find input.swap_value, click, and type ZIP (default "33122" or via --zip / ZIP_CODE)
 //   3) Find and click input.go
 //   4) On next page (after DOMContentLoaded), click the terms checkbox
 //      input#ctl00_MainContent_cbxAgreeToTerms
-//   5) CAPTCHA: HUMAN-IN-THE-LOOP ONLY (no OCR). The script saves the image to
-//      artifacts/captcha_*.png, then tries 3 sources for the answer (in order):
-//        a) process.env.CAPTCHA_TEXT
-//        b) a drop-file: artifacts/captcha_answer.txt (waits up to X min)
-//        c) interactive stdin prompt (for local runs)
-//      Then it types the provided text into input.swap_value and attempts submit.
+//   5) CAPTCHA: HUMAN-IN-THE-LOOP ONLY (no OCR). Save image to artifacts/captcha_*.png,
+//      then obtain the captcha through one of the following (in order):
+//        a) env var CAPTCHA_TEXT
+//        b) drop-file artifacts/captcha_answer.txt (waits up to CAPTCHA_TIMEOUT_MS)
+//        c) interactive stdin prompt (local runs)
+//      Next, enter it into input.swap_value and attempt a likely submit.
 //
-// IMPORTANT COMPLIANCE NOTES:
-//   - Do not bypass captchas or site access controls. This script does NOT auto-solve captcha.
+// IMPORTANT:
+//   - Do not use this to bypass captchas or site controls. Respect Terms of Use.
 //   - Selectors can change; inspect and update if needed.
-//   - This script avoids force-enabling disabled buttons.
-//   - If the site returns 401/403 or a Private Access Token challenge, the script
-//     will capture evidence and exit gracefully.
+//   - This script avoids programmatically enabling disabled buttons.
 // ------------------------------------------------------------
 
+const puppeteer = require('puppeteer');
 const fs = require('fs');
 const path = require('path');
-const puppeteer = require('puppeteer');
 
 // =========================
 // CONFIG + CLI
@@ -44,7 +41,7 @@ function readFlag(name, fallback = '') {
 const HEADFUL = process.argv.includes('--headful');
 const ZIP_CODE = process.env.ZIP_CODE || readFlag('zip', '33122');
 const CAPTCHA_TIMEOUT_MS = parseInt(process.env.CAPTCHA_TIMEOUT_MS || readFlag('captcha-timeout-ms', '300000'), 10); // default 5 min
-const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined; // allow system Chrome
+const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined; // use system Chrome if specified
 
 // Selectors
 const SEL = {
@@ -53,12 +50,12 @@ const SEL = {
   agreeCheckbox: process.env.SEL_AGREE || 'input#ctl00_MainContent_cbxAgreeToTerms',
   captchaImg: process.env.SEL_CAPTCHA_IMG || 'img#c_turingtestpage_ctl00_maincontent_captcha1_CaptchaImage',
   captchaInput: process.env.SEL_CAPTCHA_INPUT || 'input.swap_value',
-  // A set of possible submit buttons to try after captcha
+  // A set of possible submit buttons to try after captcha (do not force-enable)
   submitCandidates: (
     process.env.SEL_SUBMIT_CANDIDATES
       ? process.env.SEL_SUBMIT_CANDIDATES.split(',').map(s => s.trim()).filter(Boolean)
       : [
-          'input.aspNetDisabled', // as given (may be disabled unless conditions met)
+          'input.aspNetDisabled',
           'input[type="submit"]',
           'button[type="submit"]',
           'input[value*="Continue" i]',
@@ -95,7 +92,10 @@ async function readCaptchaFromFile(filePath, timeoutMs) {
   return '';
 }
 
-async function main() {
+// =========================
+// MAIN
+// =========================
+(async () => {
   console.log('🚀 Launching browser...');
   const browser = await puppeteer.launch({
     headless: HEADFUL ? false : 'new',
@@ -269,9 +269,7 @@ async function main() {
     console.error('💥 Automation error:', err);
   } finally {
     try { await page.close(); } catch {}
-    await (await browser).close();
+    await browser.close();
     console.log('🏁 Browser closed.');
   }
-}
-
-main();
+})();
