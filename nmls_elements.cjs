@@ -1,4 +1,3 @@
-
 // nmls_elements.cjs
 // ------------------------------------------------------------
 // Purpose: Automate navigation on https://www.nmlsconsumeraccess.org/
@@ -294,28 +293,41 @@ async function readCaptchaFromFile(filePath, timeoutMs) {
     await page.screenshot({ path: path.join(ARTIFACTS_DIR, 'step3_terms_checked.jpg'), fullPage: true });
 
     console.log('🧩 Waiting for CAPTCHA image...');
-    await page.waitForSelector(SEL.captchaImg, { visible: true, timeout: 60000 });
+await page.waitForSelector(SEL.captchaImg, { visible: true, timeout: 60000 });
 
-    const ts = Date.now();
-    const fullshot = path.join(ARTIFACTS_DIR, `step4_captcha_page_${ts}.jpg`);
-    const textCaptionPath = path.join(ARTIFACTS_DIR, `textCaption_${ts}.png`);
+const ts = Date.now();
+const fullshot = path.join(ARTIFACTS_DIR, `step4_captcha_page_${ts}.jpg`);
+const textCaptionPath = path.join(ARTIFACTS_DIR, `textCaption_${ts}.png`);
 
-await el.screenshot({ path: textCaptionPath });
-console.log(`🖼️ Saved CAPTCHA element as: ${textCaptionPath}`);
+try {
+  // Save full-page screenshot
+  await page.screenshot({ path: fullshot, fullPage: true });
 
-// Create note + empty answer file under new naming
-ensureFile(path.join(ARTIFACTS_DIR, 'textCaption_note.txt'), [
-  'This run captured a visual challenge image.',
-  'OCR is disabled for this file.',
-  '',
-  'Provide the human-decoded text inside artifacts/textCaption_answer.txt within the timeout window.'
-].join('\n'));
+  // Capture only the CAPTCHA element
+  const el = await page.$(SEL.captchaImg);
+  if (el) {
+    await el.screenshot({ path: textCaptionPath });
+    console.log(`🖼️ Saved CAPTCHA element as: ${textCaptionPath}`);
 
-ensureFile(path.join(ARTIFACTS_DIR, 'textCaption_answer.txt'), '');
-      
-    } catch (e) {
-      console.warn('⚠️  Could not capture screenshots:', e.message);
-    }
+    // Create explanatory note
+    ensureFile(
+      path.join(ARTIFACTS_DIR, 'textCaption_note.txt'),
+      [
+        'This run captured a visual challenge image.',
+        'OCR is disabled for this file (CAPTCHA must be solved manually).',
+        '',
+        'Provide the human-decoded text inside artifacts/textCaption_answer.txt within the timeout window.'
+      ].join('\n')
+    );
+
+    // Create empty answer file for human input
+    ensureFile(path.join(ARTIFACTS_DIR, 'textCaption_answer.txt'), '');
+  } else {
+    console.warn('⚠️ Could not find CAPTCHA element.');
+  }
+} catch (e) {
+  console.warn('⚠️ Could not capture CAPTCHA screenshots:', e.message);
+}
 
     // OPTIONAL OCR for NON-CAPTCHA content
     if (RUN_OCR_NON_CAPTCHA && OCR_INPUT_PATH) {
