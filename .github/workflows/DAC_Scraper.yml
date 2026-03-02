@@ -52,14 +52,6 @@ jobs:
           google-chrome --version
 
       # --------------------------------------------------
-      # Install OCR dependencies (for NON-CAPTCHA OCR only)
-      # --------------------------------------------------
-      - name: Install OCR dependencies (non-captcha OCR only)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y tesseract-ocr imagemagick poppler-utils ghostscript
-
-      # --------------------------------------------------
       # Install Node Dependencies (skip Chromium download; use system Chrome)
       # --------------------------------------------------
       - name: Install Node dependencies
@@ -71,7 +63,7 @@ jobs:
           else
             npm install
           fi
-          # Your project deps; puppeteer is required for the run
+          # Ensure required packages are present
           npm install googleapis node-fetch puppeteer cheerio pdfkit he
 
       # --------------------------------------------------
@@ -102,15 +94,7 @@ jobs:
       - name: Run NMLS Scraper via Xvfb
         env:
           PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome
-          # === OPTIONAL: Non-captcha OCR toggles ===
-          # Turn on ONLY when you want to OCR a NON-CAPTCHA image/PDF your script creates.
-          RUN_OCR_NON_CAPTCHA: 'false'              # set to 'true' to enable
-          OCR_INPUT_PATH: 'artifacts/step3_terms_checked.jpg'   # example; DO NOT point to captcha_*.png
-          # === OPTIONAL: ZIP/captcha timing (script defaults exist) ===
-          ZIP_CODE: '33122'
-          CAPTCHA_TIMEOUT_MS: '300000'              # 5 minutes
         run: |
-          set -euxo pipefail
           mkdir -p artifacts
           # Use a 1920x1080x24 virtual screen; adjust as needed
           timeout 180s xvfb-run -a --server-args="-screen 0 1920x1080x24" \
