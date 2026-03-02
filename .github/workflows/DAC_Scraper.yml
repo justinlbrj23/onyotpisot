@@ -104,7 +104,7 @@ jobs:
           PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome
           # === OPTIONAL: Non-captcha OCR toggles ===
           # Turn on ONLY when you want to OCR a NON-CAPTCHA image/PDF your script creates.
-          RUN_OCR_NON_CAPTCHA: 'true'              # set to 'true' to enable
+          RUN_OCR_NON_CAPTCHA: 'false'              # set to 'true' to enable
           OCR_INPUT_PATH: 'artifacts/step3_terms_checked.jpg'   # example; DO NOT point to captcha_*.png
           # === OPTIONAL: ZIP/captcha timing (script defaults exist) ===
           ZIP_CODE: '33122'
