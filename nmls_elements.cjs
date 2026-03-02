@@ -298,20 +298,20 @@ async function readCaptchaFromFile(filePath, timeoutMs) {
 
     const ts = Date.now();
     const fullshot = path.join(ARTIFACTS_DIR, `step4_captcha_page_${ts}.jpg`);
-    const captchapath = path.join(ARTIFACTS_DIR, `captcha_${ts}.png`);
+    const textCaptionPath = path.join(ARTIFACTS_DIR, `textCaption_${ts}.png`);
 
-    try {
-      await page.screenshot({ path: fullshot, fullPage: true });
-      const el = await page.$(SEL.captchaImg);
-      if (el) {
-        await el.screenshot({ path: captchapath });
-        console.log(`🖼️  Saved CAPTCHA image at: ${captchapath}`);
-        // Create a placeholder note and empty answer file for operators
-        ensureFile(path.join(ARTIFACTS_DIR, 'captcha_note.txt'), [
-          'This run captured a CAPTCHA image. OCR for CAPTCHA is disabled.','',
-          'Provide the characters exactly in artifacts/captcha_answer.txt within the timeout window to continue.'
-        ].join('\n'));
-        ensureFile(path.join(ARTIFACTS_DIR, 'captcha_answer.txt'), '');
+await el.screenshot({ path: textCaptionPath });
+console.log(`🖼️ Saved CAPTCHA element as: ${textCaptionPath}`);
+
+// Create note + empty answer file under new naming
+ensureFile(path.join(ARTIFACTS_DIR, 'textCaption_note.txt'), [
+  'This run captured a visual challenge image.',
+  'OCR is disabled for this file.',
+  '',
+  'Provide the human-decoded text inside artifacts/textCaption_answer.txt within the timeout window.'
+].join('\n'));
+
+ensureFile(path.join(ARTIFACTS_DIR, 'textCaption_answer.txt'), '');
       }
     } catch (e) {
       console.warn('⚠️  Could not capture screenshots:', e.message);
