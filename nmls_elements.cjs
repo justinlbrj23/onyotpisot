@@ -2,7 +2,7 @@
 // ------------------------------------------------------------
 // Purpose:
 //   Navigate nmlsconsumeraccess.org until CAPTCHA is shown
-//   and save ONLY the CAPTCHA image as textCaption_<ts>.png.
+//   and save ONLY the CAPTCHA image as textCaption.jpeg.
 //
 // Compliance:
 //   - No CAPTCHA bypass
@@ -125,7 +125,7 @@ function sleep(ms) {
     }
 
     // --------------------------------------------------
-    // 5) Wait for CAPTCHA and save ONLY the image
+    // 5) Wait for CAPTCHA and save ONLY the image as JPEG
     // --------------------------------------------------
     console.log('🧩 Waiting for CAPTCHA...');
     await page.waitForSelector(SEL.captchaImg, {
@@ -133,18 +133,15 @@ function sleep(ms) {
       timeout: 60000
     });
 
-    const ts = Date.now();
-    const outPath = path.join(
-      ARTIFACTS_DIR,
-      `textCaption_${ts}.png`
-    );
+    const outPath = path.join(ARTIFACTS_DIR, 'textCaption.jpeg');
 
     const captchaEl = await page.$(SEL.captchaImg);
     if (!captchaEl) {
       throw new Error('CAPTCHA element not found');
     }
 
-    await captchaEl.screenshot({ path: outPath });
+    // Save as JPEG (not PNG), fixed filename, quality 90
+    await captchaEl.screenshot({ path: outPath, type: 'jpeg', quality: 90 });
     console.log(`✅ CAPTCHA image saved: ${outPath}`);
 
     console.log('🏁 Done. No other artifacts generated.');
