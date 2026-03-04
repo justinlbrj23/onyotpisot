@@ -1,7 +1,7 @@
 name: Fetch NMLS Data
 
 on:
-  workflow_dispatch:  # Manual trigger only
+  workflow_dispatch:
 
 jobs:
   sync:
@@ -24,15 +24,14 @@ jobs:
           node-version: 20
 
       # --------------------------------------------------
-      # Install system dependencies (Chrome + Xvfb + libs)
-      # (Handle Ubuntu 24.04 t64 package names for libasound2)
+      # Install Chrome + Xvfb + Required Libraries
       # --------------------------------------------------
       - name: Install Chrome, Xvfb and required libraries
         run: |
           set -euxo pipefail
           sudo apt-get update
 
-          # Core libs (exclude libasound2 here; handle below due to t64 rename on Ubuntu 24.04+)
+          # Core libs
           sudo apt-get install -y \
             xvfb wget ca-certificates \
             fonts-liberation fonts-noto-color-emoji \
@@ -44,7 +43,7 @@ jobs:
           # Handle libasound2 name difference across Ubuntu releases
           (sudo apt-get install -y libasound2) || (sudo apt-get install -y libasound2t64)
 
-          # Install Google Chrome Stable
+          # Install Chrome Stable
           wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
           sudo apt-get install -y ./google-chrome-stable_current_amd64.deb || \
             (sudo apt-get -f install -y && sudo apt-get install -y ./google-chrome-stable_current_amd64.deb)
@@ -52,15 +51,15 @@ jobs:
           google-chrome --version
 
       # --------------------------------------------------
-      # Install OCR dependencies (for NON-CAPTCHA OCR only)
+      # Install OCR dependencies (Tesseract, ImageMagick, Poppler)
       # --------------------------------------------------
-      - name: Install OCR dependencies (non-captcha OCR only)
+      - name: Install OCR dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y tesseract-ocr imagemagick poppler-utils ghostscript
 
       # --------------------------------------------------
-      # Install Node Dependencies (skip Chromium download; use system Chrome)
+      # Install Node Dependencies
       # --------------------------------------------------
       - name: Install Node dependencies
         env:
@@ -71,7 +70,6 @@ jobs:
           else
             npm install
           fi
-          # Your project deps; puppeteer is required for the run
           npm install googleapis node-fetch puppeteer cheerio pdfkit he
 
       # --------------------------------------------------
@@ -82,49 +80,62 @@ jobs:
           echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
 
       # --------------------------------------------------
-      # Validate Service Account JSON
+      # Validate service account JSON
       # --------------------------------------------------
       - name: Validate service account JSON
         run: |
           node -e "
             const fs = require('fs');
             const j = JSON.parse(fs.readFileSync('service-account.json','utf8'));
-            if (!j.private_key || !j.client_email) {
-              throw new Error('Invalid service account JSON');
-            }
+            if (!j.private_key || !j.client_email) throw new Error('Invalid service account JSON');
             console.log('Service account OK:', j.client_email);
           "
 
       # --------------------------------------------------
-      # Run NMLS Scraper under Xvfb (visible Chrome in virtual display)
-      # Add timeout so CI won't hang on CAPTCHA prompt.
+      # Run NMLS Scraper
       # --------------------------------------------------
       - name: Run NMLS Scraper via Xvfb
         env:
           PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome
-          # === OPTIONAL: Non-captcha OCR toggles ===
-          # Turn on ONLY when you want to OCR a NON-CAPTCHA image/PDF your script creates.
-          RUN_OCR_NON_CAPTCHA: 'true'              # set to 'true' to enable
-          OCR_INPUT_PATH: 'artifacts/step3_terms_checked.jpg'   # example; DO NOT point to captcha_*.png
-          # === OPTIONAL: ZIP/captcha timing (script defaults exist) ===
           ZIP_CODE: '33122'
-          CAPTCHA_TIMEOUT_MS: '300000'              # 5 minutes
+          CAPTCHA_TIMEOUT_MS: '300000'
         run: |
           set -euxo pipefail
           mkdir -p artifacts
-          # Use a 1920x1080x24 virtual screen; adjust as needed
+
           timeout 180s xvfb-run -a --server-args="-screen 0 1920x1080x24" \
             node nmls_elements.cjs || true
 
       # --------------------------------------------------
-      # Upload ALL screenshot artifacts
+      # Run OCR on generated textCaption PNG
       # --------------------------------------------------
-      - name: Upload NMLS Artifacts
+      - name: OCR textCaption image
+        if: always()
+        run: |
+          set -euxo pipefail
+
+          CAPTCHA_IMG=$(ls artifacts/textCaption_*.png | head -n 1 || true)
+
+          if [ -z "$CAPTCHA_IMG" ]; then
+            echo "❌ No textCaption image found. OCR skipped."
+            exit 0
+          fi
+
+          echo "🧠 Running OCR on: $CAPTCHA_IMG"
+          node ocr_tesseract.js "$CAPTCHA_IMG"
+
+      # --------------------------------------------------
+      # Upload ONLY textCaption PNG + OCR output
+      # --------------------------------------------------
+      - name: Upload OCR Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nmls-artifacts
-          path: artifacts/**
+          name: ocr-results
+          path: |
+            artifacts/textCaption_*.png
+            ocr_output/**
+          if-no-files-found: warn
 
       # --------------------------------------------------
       # Cleanup credentials
