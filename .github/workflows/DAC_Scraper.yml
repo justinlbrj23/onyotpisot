@@ -107,17 +107,17 @@ jobs:
             node nmls_elements.cjs || true
 
       # --------------------------------------------------
-      # Run OCR on generated textCaption JPEG
+      # Run OCR on generated textCaption PNG
       # --------------------------------------------------
       - name: OCR textCaption image
         if: always()
         run: |
           set -euxo pipefail
 
-          CAPTCHA_IMG="artifacts/textCaption.jpeg"
+          CAPTCHA_IMG=$(ls artifacts/textCaption_*.png | head -n 1 || true)
 
-          if [ ! -f "$CAPTCHA_IMG" ]; then
-            echo "❌ No textCaption.jpeg found. OCR skipped."
+          if [ -z "$CAPTCHA_IMG" ]; then
+            echo "❌ No textCaption image found. OCR skipped."
             exit 0
           fi
 
@@ -125,7 +125,7 @@ jobs:
           node ocr_tesseract.js "$CAPTCHA_IMG"
 
       # --------------------------------------------------
-      # Upload ONLY textCaption JPEG + OCR output
+      # Upload ONLY textCaption PNG + OCR output
       # --------------------------------------------------
       - name: Upload OCR Artifacts
         if: always()
@@ -133,7 +133,7 @@ jobs:
         with:
           name: ocr-results
           path: |
-            artifacts/textCaption.jpeg
+            artifacts/textCaption_*.png
             ocr_output/**
           if-no-files-found: warn
 
