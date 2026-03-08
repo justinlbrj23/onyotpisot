@@ -8,16 +8,12 @@
     "start": "node organizer_headers_tssf.js",
     "fetch:auctions": "node dac_scraper.cjs",
     "fetch:titleSearch": "node titleSearch.cjs",
-
-    // --- OCR (new) ---
     "ocr": "node ocr_pipeline.js",
     "ocr:img": "cross-env OCR_POLARITY=light-on-dark OCR_PSM=7 OCR_WHITELIST=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 node ocr_pipeline.js ./sample.png",
     "ocr:img:dark": "cross-env OCR_POLARITY=dark-on-light node ocr_pipeline.js ./sample.png",
     "ocr:img:auto": "cross-env OCR_POLARITY=auto node ocr_pipeline.js ./sample.png",
     "ocr:pdf": "cross-env OCR_DPI=400 OCR_MAX_PAR=6 node ocr_pipeline.js ./sample.pdf",
     "ocr:code6": "cross-env OCR_PSM=7 OCR_WHITELIST=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 OCR_CODE_LEN=6 node ocr_pipeline.js ./sample.png",
-
-    // --- Dev utility ---
     "test": "echo \"No tests defined\" && exit 0",
     "lint": "eslint ."
   },
@@ -54,4 +50,3 @@
   "author": "Justin Otment",
   "license": "ISC"
 }
-``
