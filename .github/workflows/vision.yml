@@ -1,57 +1,54 @@
-name: OCR (Image/PDF) with Tesseract
+name: OCR (Image or PDF)
 
 on:
   workflow_dispatch:
     inputs:
       input_path:
-        description: 'Path to file to OCR (image or PDF) relative to repo root'
+        description: "Path to file to OCR (image or PDF) relative to repo root"
         required: true
-        default: 'sample.pdf'
+        default: "sample.pdf"
       polarity:
-        description: 'Polarity: light-on-dark | dark-on-light | auto'
+        description: "Polarity: light-on-dark | dark-on-light | auto"
         required: false
-        default: 'light-on-dark'
+        default: "light-on-dark"
       psm:
-        description: 'Tesseract PSM (7 for single line, 6 for blocks)'
+        description: "Tesseract PSM (7 for single line, 6 for blocks)"
         required: false
-        default: '7'
+        default: "7"
       dpi:
-        description: 'Rasterization DPI for PDF'
+        description: "Rasterization DPI for PDF"
         required: false
-        default: '350'
+        default: "350"
       code_len:
-        description: 'Expected fixed code length (leave blank to skip)'
+        description: "Expected fixed code length (leave blank to skip)"
         required: false
-        default: ''
+        default: ""
       whitelist:
-        description: 'Whitelist characters (e.g., A–Z0–9). Leave blank to skip.'
+        description: "Whitelist characters (e.g., A-Z0-9). Leave blank to skip."
         required: false
-        default: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+        default: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
       max_par:
-        description: 'Max parallel OCR workers'
+        description: "Max parallel OCR workers"
         required: false
-        default: '4'
+        default: "4"
 
 jobs:
   ocr:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
-        # v6 is the current major for checkout. [1](https://github.com/actions/checkout/releases)[2](https://newreleases.io/project/github/actions/checkout/release/v6.0.0)
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
-        # setup-node v4 and cache support are documented in the repo. [3](https://github.com/actions/setup-node)
+          node-version: "20"
 
-      - name: Install system dependencies (Tesseract, ImageMagick, Poppler, Ghostscript)
+      - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y tesseract-ocr tesseract-ocr-eng imagemagick poppler-utils ghostscript
-        # Tesseract + language packages on Ubuntu (tesseract-ocr-eng); Poppler utils (pdftoppm); Ghostscript. [4](https://tesseract-ocr.github.io/tessdoc/Installation.html)[5](https://lindevs.com/install-poppler-utilities-on-ubuntu)[6](https://installati.one/install-ghostscript-ubuntu-22-04/)
 
       - name: Show tool versions
         run: |
@@ -61,16 +58,8 @@ jobs:
           pdftoppm -v || true
           gs --version || true
 
-      # OPTIONAL: Only if you plan to use ImageMagick directly on PDFs (our pipeline does not).
-      # - name: (Optional) Relax ImageMagick PDF policy
-      #   run: |
-      #     sudo sed -i 's/^\s*<policy domain="coder" rights="none" pattern="PDF" \/>//g' /etc/ImageMagick-6/policy.xml || true
-      #     sudo sed -i 's/^\s*<policy domain="coder" rights="none" pattern="PS" \/>//g' /etc/ImageMagick-6/policy.xml || true
-      #     sudo sed -i 's/^\s*<policy domain="coder" rights="none" pattern="EPS" \/>//g' /etc/ImageMagick-6/policy.xml || true
-      #   # Background on the PDF policy and the common fix. [7](https://stackoverflow.com/questions/70655631/imagemagick-security-policy-error-in-github-workflow)[8](https://github.com/ImageMagick/ImageMagick/discussions/3953)
-
       - name: Install npm dependencies
-        run: npm ci
+        run: npm install
 
       - name: Run OCR
         env:
@@ -83,10 +72,9 @@ jobs:
         run: |
           FILE="${{ github.event.inputs.input_path }}"
           if [ ! -f "$FILE" ]; then
-            echo "❌ File '$FILE' does not exist!"
+            echo "File '$FILE' does not exist!"
             exit 1
           fi
-          echo "📄 Running OCR on $FILE..."
           node ocr_pipeline.js "$FILE"
 
       - name: List OCR output
