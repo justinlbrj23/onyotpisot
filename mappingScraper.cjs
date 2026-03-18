@@ -125,6 +125,15 @@ function yn(val) {
   return "";
 }
 
+// Clean Case Number: remove anything in parentheses (including parentheses)
+function cleanCaseNumber(val) {
+  if (val === null || val === undefined) return "";
+  return String(val)
+    .replace(/\s*$$[^)]*$$/g, "") // remove ( ... )
+    .replace(/\s{2,}/g, " ")      // normalize spacing
+    .trim();
+}
+
 /* =========================
    URL → COUNTY / STATE MAPPING
    ========================= */
@@ -330,7 +339,7 @@ function mapRow(raw, urlMapping, anomalies) {
   mapped["City"] = city;
   mapped["ZIP Code"] = zip;
   mapped["Parcel / APN Number"] = raw.parcelId || "";
-  mapped["Case Number"] = raw.caseNumber || "";
+  mapped["Case Number"] = cleanCaseNumber(raw.caseNumber);
   mapped["Auction Date"] = raw.auctionDate || "";
   mapped["Sale Finalized (Yes/No)"] = "Yes";
 
