@@ -6,7 +6,7 @@ const pdfParse = require("pdf-parse");
 // CONFIG
 // ==============================
 const PDF_URL =
-  "https://img1.wsimg.com/blobby/go/dcf61f4f-af9a-47b3-9cc6-0b2cf55ca500/downloads/5b5fe9ca-4300-48da-af83-a1334fe84a68/Surplus%20File%20Update%20List.pdf?ver=1773441853981";
+  "https://img1.wsimg.com/blobby/go/dcf61f4f-af9a-47b3-9cc6-0b2cf55ca500/downloads/2cc74735-1c8c-4180-8dd3-7fe2d3fa0218/Surplus%20File%20Update%20List.pdf?ver=1773692360706";
 
 const SPREADSHEET_ID = "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
 const SHEET_NAME = "raw_main";
