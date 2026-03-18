@@ -72,7 +72,7 @@ jobs:
   # --------------------------------------------------
   # JOB 4 — PDF Cross Reference Check (LAST STEP)
   # --------------------------------------------------
-  surplus_pdf_crossref:
+  sync:
     needs: tda_pipeline
     runs-on: ubuntu-latest
 
