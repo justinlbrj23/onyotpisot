@@ -1,4 +1,4 @@
-name: Surplus Riches Automation test
+name: Surplus Riches Automation
 
 on:
   workflow_dispatch:
@@ -70,7 +70,7 @@ jobs:
         run: rm -f service-account.json
 
   # --------------------------------------------------
-  # JOB 4 — PDF Cross Reference Check (LAST STEP)
+  # JOB 2 — PDF Cross Reference Check (LAST STEP)
   # --------------------------------------------------
   surplus_pdf_crossref:
     needs: tda_pipeline
@@ -114,3 +114,4 @@ jobs:
       - name: Cleanup secrets
         if: always()
         run: rm -f service-account.json
+
