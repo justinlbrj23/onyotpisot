@@ -4,7 +4,6 @@ on:
   workflow_dispatch:
 
 jobs:
-
   # --------------------------------------------------
   # JOB 1 — TDA Pipeline
   # --------------------------------------------------
@@ -74,6 +73,7 @@ jobs:
   # JOB 4 — PDF Cross Reference Check (LAST STEP)
   # --------------------------------------------------
   surplus_pdf_crossref:
+    needs: tda_pipeline
     runs-on: ubuntu-latest
 
     steps:
