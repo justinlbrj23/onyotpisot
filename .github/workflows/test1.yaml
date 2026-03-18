@@ -1,4 +1,4 @@
-name: Surplus Riches Automation
+name: Surplus Riches Automation Tester
 
 on:
   workflow_dispatch:
