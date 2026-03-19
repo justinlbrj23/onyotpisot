@@ -125,6 +125,7 @@ function yn(val) {
   return "";
 }
 
+// Clean Case Number: remove anything in parentheses (including parentheses)
 function cleanCaseNumber(val) {
   if (val === null || val === undefined) return "";
   return String(val)
@@ -497,7 +498,8 @@ async function appendRows(rows) {
   // Process each parsed row
 for (const raw of rawData) {
   const baseKey = normalizeBaseUrl(raw.sourceUrl || "");
-  const key = `${baseKey}|${(raw.caseNumber || '').trim()}|${(raw.parcelId || '').trim()}`;
+  // Use cleaned case number for deduplication!
+  const key = `${baseKey}|${cleanCaseNumber(raw.caseNumber)}|${(raw.parcelId || '').trim()}`;
 
   // Deduplicate
   if (uniqueMap.has(key)) continue;
