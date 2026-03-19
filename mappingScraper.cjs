@@ -125,11 +125,10 @@ function yn(val) {
   return "";
 }
 
-// Clean Case Number: remove anything in parentheses (including parentheses)
 function cleanCaseNumber(val) {
   if (val === null || val === undefined) return "";
   return String(val)
-    .replace(/\s*$$[^)]*$$/g, "") // remove ( ... )
+    .replace(/\s*$$[^)]*$$/g, "") // CORRECT: remove ( ... )
     .replace(/\s{2,}/g, " ")      // normalize spacing
     .trim();
 }
@@ -345,6 +344,8 @@ function mapRow(raw, urlMapping, anomalies) {
 
   mapped["Sale Price"] = raw.salePrice || "";
   mapped["Opening / Minimum Bid"] = raw.openingBid || "";
+
+console.log("Raw:", raw.caseNumber, "Cleaned:", cleanCaseNumber(raw.caseNumber));
 
   /* =========================
      SURPLUS → HEADERS
