@@ -74,6 +74,16 @@ const HEADERS = [
 // Utility Functions
 // =========================
 
+// Clean case numbers: remove parentheses and their contents, trim whitespace
+function cleanCaseNumber(s) {
+  if (!s) return '';
+  // Remove any parenthetical group like " (29)" or "(abc)" and trim
+  let out = String(s).replace(/\s*\(.*?\)\s*/g, '').trim();
+  // Normalize multiple spaces to single, remove leading/trailing punctuation
+  out = out.replace(/\s+/g, ' ').replace(/^[\s\-\._]+|[\s\-\._]+$/g, '');
+  return out;
+}
+
 // Normalize encodings
 function decodeAmp(u) {
   return String(u || "")
@@ -330,7 +340,9 @@ function mapRow(raw, urlMapping, anomalies) {
   mapped["City"] = city;
   mapped["ZIP Code"] = zip;
   mapped["Parcel / APN Number"] = raw.parcelId || "";
-  mapped["Case Number"] = raw.caseNumber || "";
+  // near "WRITE CORE FIELDS" in mapRow
+const caseNumberClean = cleanCaseNumber(raw.caseNumber || '');
+mapped["Case Number"] = caseNumberClean || "";
   mapped["Auction Date"] = raw.auctionDate || "";
   mapped["Sale Finalized (Yes/No)"] = "Yes";
 
@@ -489,14 +501,21 @@ async function appendRows(rows) {
   // Process each parsed row
 for (const raw of rawData) {
   const baseKey = normalizeBaseUrl(raw.sourceUrl || "");
-  const key = `${baseKey}|${(raw.caseNumber || '').trim()}|${(raw.parcelId || '').trim()}`;
+  // CLEAN the case number before dedupe and mapping
+  const rawCase = cleanCaseNumber(raw.caseNumber || '');
+  const rawParcel = (raw.parcelId || '').trim();
+  const key = `${baseKey}|${rawCase}|${rawParcel}`;
 
   // Deduplicate
   if (uniqueMap.has(key)) continue;
 
+  // Pass cleaned case number into mapRow (or set it on raw)
+  // Option A: set on raw so mapRow sees the cleaned value
+  raw.caseNumber = rawCase;
+
   const mapped = mapRow(raw, urlMapping, anomalies);
 
-  // 💥 FILTER HERE → Only include rows that meet surplus requirement
+  // Filter as before...
   if (mapped && mapped["Meets Minimum Surplus? (Yes/No)"] === "Yes") {
     uniqueMap.set(key, mapped);
   } else {
