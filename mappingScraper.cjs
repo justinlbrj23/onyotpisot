@@ -129,7 +129,7 @@ function yn(val) {
 function cleanCaseNumber(val) {
   if (val === null || val === undefined) return "";
   return String(val)
-    .replace(/\s*$$[^)]*$$/g, "") // CORRECT: remove ( ... )
+    .replace(/\s*$$[^)]*$$/g, "") // remove ( ... )
     .replace(/\s{2,}/g, " ")      // normalize spacing
     .trim();
 }
@@ -137,7 +137,107 @@ function cleanCaseNumber(val) {
 /* =========================
    URL → COUNTY / STATE MAPPING
    ========================= */
-// ... (unchanged code for URL mapping, etc.)
+
+// Normalize URL for mapping by stripping paging params & trailing slashes
+function normalizeBaseUrl(u) {
+  if (!u) return "";
+  const raw = decodeAmp(u).trim();
+
+  try {
+    const url = new URL(raw);
+
+    // Remove page-like parameters (keeps county/state mapping stable)
+    const paramsToStrip = [
+      "page","pagenum","p","pg","pageno","start","startrow","offset",
+      "AUCTIONDATE","auctiondate","Zmethod","zmethod"
+    ];
+    paramsToStrip.forEach(p => url.searchParams.delete(p));
+
+    const cleanPath = url.pathname.replace(/\/+$/, ""); // remove trailing slash
+    return `${url.protocol}//${url.hostname}${cleanPath}`.toLowerCase();
+  } catch {
+    // Fallback: strip common paging markers
+    return raw.split("&page=")[0].replace(/\/+$/, "").toLowerCase();
+  }
+}
+
+// Extract origin-only part of URL
+function getOrigin(u) {
+  try {
+    return new URL(decodeAmp(u)).origin.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Infer county/state from hostname patterns like:
+ *   dallas.texas.sheriffsaleauctions.com
+ */
+function inferCountyStateFromHost(hostname) {
+  const out = { county: "", state: "" };
+  if (!hostname) return out;
+
+  const parts = hostname.split(".");
+  if (parts.length < 3) return out;
+
+  const countyCandidate = parts[0];
+  const stateCandidate = parts[1];
+
+  // Convert to 2‑letter state codes
+  const stateMap = {
+    alabama: 'AL', alaska: 'AK', arizona: 'AZ', arkansas: 'AR', california: 'CA',
+    colorado: 'CO', connecticut: 'CT', delaware: 'DE', florida: 'FL', georgia: 'GA',
+    hawaii: 'HI', idaho: 'ID', illinois: 'IL', indiana: 'IN', iowa: 'IA',
+    kansas: 'KS', kentucky: 'KY', louisiana: 'LA', maine: 'ME', maryland: 'MD',
+    massachusetts: 'MA', michigan: 'MI', minnesota: 'MN', mississippi: 'MS', missouri: 'MO',
+    montana: 'MT', nebraska: 'NE', nevada: 'NV', newmexico: 'NM', "new-mexico": 'NM',
+    newyork: 'NY', "new-york": 'NY', northcarolina: 'NC', "north-carolina": 'NC',
+    northdakota: 'ND', "north-dakota": 'ND', ohio: 'OH', oklahoma: 'OK', oregon: 'OR',
+    pennsylvania: 'PA', rhodeisland: 'RI', "rhode-island": 'RI', southcarolina: 'SC',
+    "south-carolina": 'SC', southdakota: 'SD', "south-dakota": 'SD', tennessee: 'TN',
+    texas: 'TX', utah: 'UT', vermont: 'VT', virginia: 'VA', washington: 'WA',
+    westvirginia: 'WV', "west-virginia": 'WV', wisconsin: 'WI', wyoming: 'WY',
+    districtofcolumbia: 'DC', "district-of-columbia": 'DC', dc: 'DC'
+  };
+
+  const stateKey = stateCandidate.toLowerCase().replace(/[\s._-]/g, "");
+  out.county = countyCandidate.replace(/[-_]/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+  out.state = stateMap[stateKey] || "";
+
+  return out;
+}
+
+/**
+ * Load URL → County/State mapping from Google Sheets
+ */
+async function getUrlMapping() {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${SHEET_NAME_URLS}!A2:C`,  // County | State | URL
+  });
+
+  const rows = res.data.values || [];
+  const mapping = {};
+
+  rows.forEach((row) => {
+    const [county, state, url] = [row[0] || "", row[1] || "", row[2] || ""];
+    if (!url) return;
+
+    const key = normalizeBaseUrl(url);
+    if (key) {
+      mapping[key] = { county: county || "", state: state || "" };
+    }
+
+    // Origin fallback
+    const origin = getOrigin(url);
+    if (origin && !mapping[origin]) {
+      mapping[origin] = { county: county || "", state: state || "" };
+    }
+  });
+
+  return mapping;
+}
 
 /* =========================
    MAP RAW PARSER ROW → TSSF FORMAT
@@ -239,15 +339,12 @@ function mapRow(raw, urlMapping, anomalies) {
   mapped["City"] = city;
   mapped["ZIP Code"] = zip;
   mapped["Parcel / APN Number"] = raw.parcelId || "";
-  mapped["Case Number"] = cleanCaseNumber(raw.caseNumber); // <-- CLEANED!
+  mapped["Case Number"] = cleanCaseNumber(raw.caseNumber);
   mapped["Auction Date"] = raw.auctionDate || "";
   mapped["Sale Finalized (Yes/No)"] = "Yes";
 
   mapped["Sale Price"] = raw.salePrice || "";
   mapped["Opening / Minimum Bid"] = raw.openingBid || "";
-
-  // Debug log for verification
-  console.log("Raw:", raw.caseNumber, "Cleaned:", mapped["Case Number"]);
 
   /* =========================
      SURPLUS → HEADERS
@@ -283,6 +380,99 @@ function mapRow(raw, urlMapping, anomalies) {
 }
 
 /* =========================
+   ENSURE HEADER ROW EXISTS
+   ========================= */
+async function ensureHeaderRow() {
+  try {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME_RAW}!A1:AZ1`,
+    });
+
+    const firstRow = (res.data.values && res.data.values[0]) || [];
+
+    // Check if row 1 matches HEADERS
+    const needsHeaders =
+      firstRow.length === 0 ||
+      HEADERS.some((h, i) => (firstRow[i] || "") !== h);
+
+    if (needsHeaders) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `${SHEET_NAME_RAW}!A1`,
+        valueInputOption: "RAW",
+        requestBody: { values: [HEADERS] },
+      });
+
+      console.log(`🧭 Header row written to "${SHEET_NAME_RAW}"`);
+    }
+
+  } catch (err) {
+    console.error("❌ Failed to ensure header row:", err.message || err);
+
+    // Fallback: try to append header row instead
+    try {
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `${SHEET_NAME_RAW}!A1`,
+        valueInputOption: "RAW",
+        insertDataOption: "INSERT_ROWS",
+        requestBody: { values: [HEADERS] },
+      });
+
+      console.log(`🧭 Header row appended to "${SHEET_NAME_RAW}"`);
+
+    } catch (e2) {
+      console.error("❌ Header append fallback failed:", e2.message || e2);
+    }
+  }
+}
+
+/* =========================
+   APPEND ROWS WITH RETRIES
+   ========================= */
+async function appendRows(rows) {
+  if (!rows.length) {
+    console.log("⚠️ No mapped rows to append.");
+    return;
+  }
+
+  // Ensure header row is present first
+  await ensureHeaderRow();
+
+  const values = rows.map(row => HEADERS.map(h => row[h] || ""));
+
+  let attempt = 0;
+  const maxAttempts = 4;
+
+  while (attempt < maxAttempts) {
+    attempt++;
+
+    try {
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `${SHEET_NAME_RAW}!A1`,
+        valueInputOption: "RAW",
+        insertDataOption: "INSERT_ROWS",
+        requestBody: { values },
+      });
+
+      console.log(`✅ Appended ${values.length} mapped rows.`);
+      return;
+
+    } catch (err) {
+      const wait = Math.min(2000 * attempt, 8000);
+
+      console.error(`❌ Sheets append attempt ${attempt} failed:`, err.message || err);
+      if (attempt >= maxAttempts) throw err;
+
+      console.log(`⏳ Retrying in ${wait}ms...`);
+      await new Promise(r => setTimeout(r, wait));
+    }
+  }
+}
+
+/* =========================
    MAIN PIPELINE
    ========================= */
 
@@ -306,23 +496,22 @@ function mapRow(raw, urlMapping, anomalies) {
   let filteredOutCount = 0;
 
   // Process each parsed row
-  for (const raw of rawData) {
-    const baseKey = normalizeBaseUrl(raw.sourceUrl || "");
-    // Use cleaned case number for deduplication!
-    const key = `${baseKey}|${cleanCaseNumber(raw.caseNumber)}|${(raw.parcelId || '').trim()}`;
+for (const raw of rawData) {
+  const baseKey = normalizeBaseUrl(raw.sourceUrl || "");
+  const key = `${baseKey}|${(raw.caseNumber || '').trim()}|${(raw.parcelId || '').trim()}`;
 
-    // Deduplicate
-    if (uniqueMap.has(key)) continue;
+  // Deduplicate
+  if (uniqueMap.has(key)) continue;
 
-    const mapped = mapRow(raw, urlMapping, anomalies);
+  const mapped = mapRow(raw, urlMapping, anomalies);
 
-    // 💥 FILTER HERE → Only include rows that meet surplus requirement
-    if (mapped && mapped["Meets Minimum Surplus? (Yes/No)"] === "Yes") {
-      uniqueMap.set(key, mapped);
-    } else {
-      filteredOutCount++;
-    }
+  // 💥 FILTER HERE → Only include rows that meet surplus requirement
+  if (mapped && mapped["Meets Minimum Surplus? (Yes/No)"] === "Yes") {
+    uniqueMap.set(key, mapped);
+  } else {
+    filteredOutCount++;
   }
+}
 
   console.log(`ℹ️ Filtered out ${filteredOutCount} non-finalized or invalid rows.`);
 
