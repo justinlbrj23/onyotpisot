@@ -125,7 +125,6 @@ function yn(val) {
   return "";
 }
 
-// Clean Case Number: remove anything in parentheses (including parentheses)
 function cleanCaseNumber(val) {
   if (val === null || val === undefined) return "";
   return String(val)
