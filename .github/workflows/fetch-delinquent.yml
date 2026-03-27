@@ -1,30 +1,23 @@
-name: Fetch Auctions Simon 
+name: TEST_RUN Surplus Riches Automation
 
 on:
-  workflow_dispatch:  # Manual trigger only
+  workflow_dispatch:
 
 jobs:
-  sync:
+  # --------------------------------------------------
+  # JOB 1 — TDA Pipeline
+  # --------------------------------------------------
+  tda_pipeline:
     runs-on: ubuntu-latest
-
     steps:
-      # --------------------------------------------------
-      # Checkout Repo
-      # --------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # --------------------------------------------------
-      # Setup Node.js
-      # --------------------------------------------------
-      - name: Setup Node.js
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      # --------------------------------------------------
-      # Install Dependencies
-      # --------------------------------------------------
       - name: Install dependencies
         run: |
           if [ -f package-lock.json ]; then
@@ -32,19 +25,11 @@ jobs:
           else
             npm install
           fi
-          # Ensure required packages are present
-          npm install googleapis node-fetch puppeteer
+          npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis
 
-      # --------------------------------------------------
-      # Write RAW Service Account JSON
-      # --------------------------------------------------
       - name: Write Service Account JSON
-        run: |
-          echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
+        run: echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
 
-      # --------------------------------------------------
-      # Validate Service Account JSON
-      # --------------------------------------------------
       - name: Validate service account JSON
         run: |
           node -e "
@@ -56,24 +41,76 @@ jobs:
             console.log('Service account OK:', j.client_email);
           "
 
-      # --------------------------------------------------
-      # Run Dallas Title Search Scraper
-      # --------------------------------------------------
-      - name: Run Dallas Title Search
-        run: npm run fetch:titleSearch
+      - name: Run organizer_headers_tssf.cjs
+        run: node organizer_headers_tssf.cjs
 
-      # --------------------------------------------------
-      # Upload ALL screenshot artifacts
-      # --------------------------------------------------
-      - name: Upload Dallas Title Search Screenshots
+      - name: Run webInspector.cjs
+        run: node webInspector.cjs
+
+      - name: Upload inspector artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dallas-title-search
-          path: artifacts/**
+          name: inspector-artifacts
+          path: |
+            raw-elements.json
+            parsed-auctions.json
+            errors.json
 
-      # --------------------------------------------------
-      # Cleanup credentials
-      # --------------------------------------------------
+      - name: Run mappingScraper.cjs
+        run: node mappingScraper.cjs parsed-auctions.json
+
+      - name: Upload mapped output
+        uses: actions/upload-artifact@v4
+        with:
+          name: mapped-output
+          path: mapped-output.json
+
+      - name: Cleanup secrets
+        if: always()
+        run: rm -f service-account.json
+
+  # --------------------------------------------------
+  # JOB 2 — PDF Cross Reference Check (LAST STEP)
+  # --------------------------------------------------
+  surplus_pdf_crossref:
+    needs: tda_pipeline
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+          npm install googleapis pdf-parse
+
+      - name: Write Service Account JSON
+        run: echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
+
+      - name: Validate service account JSON
+        run: |
+          node -e "
+            const fs = require('fs');
+            const j = JSON.parse(fs.readFileSync('service-account.json','utf8'));
+            if (!j.private_key || !j.client_email) {
+              throw new Error('Invalid service account JSON');
+            }
+            console.log('Service account OK:', j.client_email);
+          "
+
+      - name: Run PDF Cross Reference Checker
+        run: node surplus_pdf_crossref.cjs
+
       - name: Cleanup secrets
         if: always()
         run: rm -f service-account.json
