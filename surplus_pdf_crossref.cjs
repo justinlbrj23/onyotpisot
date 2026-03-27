@@ -21,20 +21,34 @@ function normalizeText(str = "") {
   return String(str)
     .toLowerCase()
     .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")      // remove accents
+    .replace(/[\u0300-\u036f]/g, "")
     .replace(/&/g, " and ")
-    .replace(/[^a-z0-9\s]/g, " ")         // keep only alphanumeric + spaces
+    .replace(/[^a-z0-9\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+// 🔥 NEW: Extract structured ID like TX-123-67 → tx12367
+function extractIdCore(str = "") {
+  const normalized = normalizeText(str);
+
+  // pattern: 2 letters + numbers + numbers (flexible spacing)
+  const match = normalized.match(/\b[a-z]{2}\s*\d+\s*\d+\b/i);
+
+  if (!match) return null;
+
+  return match[0].replace(/\s+/g, ""); // remove spaces → tx12367
 }
 
 function getBigrams(str) {
   const s = normalizeText(str).replace(/\s+/g, " ");
   const bigrams = [];
   if (s.length < 2) return bigrams;
+
   for (let i = 0; i < s.length - 1; i++) {
     bigrams.push(s.slice(i, i + 2));
   }
+
   return bigrams;
 }
 
@@ -87,14 +101,11 @@ function similarityScore(a, b) {
 
   if (!na || !nb) return 0;
 
-  // Strong direct containment shortcut
   if (containsLoose(na, nb)) return 1.0;
 
-  // Two fuzzy signals
   const dice = diceCoefficient(na, nb);
   const token = tokenSetSimilarity(na, nb);
 
-  // Weighted blend
   return (dice * 0.65) + (token * 0.35);
 }
 
@@ -106,18 +117,15 @@ function buildPdfCandidates(pdfText) {
 
   const candidates = new Set();
 
-  // Single lines
   for (const line of rawLines) {
     candidates.add(line);
   }
 
-  // 2-line windows (helps if PDF wraps text across lines)
   for (let i = 0; i < rawLines.length - 1; i++) {
     const joined = `${rawLines[i]} ${rawLines[i + 1]}`.trim();
     if (joined) candidates.add(joined);
   }
 
-  // 3-line windows
   for (let i = 0; i < rawLines.length - 2; i++) {
     const joined = `${rawLines[i]} ${rawLines[i + 1]} ${rawLines[i + 2]}`.trim();
     if (joined) candidates.add(joined);
@@ -180,7 +188,7 @@ async function main() {
 
   for (let i = 0; i < rows.length; i++) {
     const originalValue = rows[i]?.[0] || "";
-    const rowNumber = i + 2; // because source starts at G2
+    const rowNumber = i + 2;
 
     if (!originalValue || !String(originalValue).trim()) {
       outputValues.push([""]);
@@ -189,24 +197,53 @@ async function main() {
     }
 
     const value = normalizeText(originalValue);
+    const valueId = extractIdCore(originalValue);
+
     let bestScore = 0;
     let bestCandidate = "";
+    let idMatchFound = false;
 
-    // Fast direct whole-PDF containment
-    if (normalizedPdfText.includes(value)) {
-      bestScore = 1;
-      bestCandidate = "[WHOLE PDF MATCH]";
-    } else {
-      // Compare against candidate lines/windows
-      for (const candidate of pdfCandidates) {
-        const score = similarityScore(value, candidate);
-        if (score > bestScore) {
-          bestScore = score;
-          bestCandidate = candidate;
+    // ==========================
+    // 🔥 ID MATCHING FIRST
+    // ==========================
+    if (valueId) {
+      // ⚡ Fast check against whole PDF
+      if (normalizedPdfText.includes(valueId)) {
+        bestScore = 1;
+        bestCandidate = "[FAST ID MATCH]";
+        idMatchFound = true;
+      } else {
+        for (const candidate of pdfCandidates) {
+          const candidateId = extractIdCore(candidate);
+
+          if (candidateId && candidateId === valueId) {
+            bestScore = 1;
+            bestCandidate = candidate;
+            idMatchFound = true;
+            break;
+          }
         }
+      }
+    }
 
-        // early exit if perfect
-        if (bestScore >= 1) break;
+    // ==========================
+    // 🔁 FALLBACK TO FUZZY
+    // ==========================
+    if (!idMatchFound) {
+      if (normalizedPdfText.includes(value)) {
+        bestScore = 1;
+        bestCandidate = "[WHOLE PDF MATCH]";
+      } else {
+        for (const candidate of pdfCandidates) {
+          const score = similarityScore(value, candidate);
+
+          if (score > bestScore) {
+            bestScore = score;
+            bestCandidate = candidate;
+          }
+
+          if (bestScore >= 1) break;
+        }
       }
     }
 
@@ -219,11 +256,11 @@ async function main() {
       )})`
     );
 
-    // Uncomment for debugging best candidate:
-    // console.log(`   Best candidate: ${bestCandidate}`);
+    // Debug:
+    // console.log(`Best candidate: ${bestCandidate}`);
   }
 
-  const outputEndRow = outputValues.length + 1; // starts at row 2
+  const outputEndRow = outputValues.length + 1;
   const outputRange = `${SHEET_NAME}!${OUTPUT_COLUMN}2:${OUTPUT_COLUMN}${outputEndRow}`;
 
   console.log(`Writing results to ${outputRange}...`);
