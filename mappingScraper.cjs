@@ -299,37 +299,53 @@ function mapRow(raw, urlMapping, anomalies) {
   }
 
   /* =========================
-     SURPLUS: Sale - Opening Bid
-     ========================= */
-  const sale = parseCurrency(raw.salePrice);
-  const open = parseCurrency(raw.openingBid);
+   SURPLUS: Sale - Opening Bid
+   ========================= */
 
-  let estimatedSurplus = null;
-  if (sale !== null && open !== null) {
-    estimatedSurplus = sale - open;
-  }
+// Parse numeric values
+const sale = parseCurrency(raw.salePrice);
+const open = parseCurrency(raw.openingBid);
 
-  // If sale price missing → anomaly
-  if (sale === null) {
-    anomalies.push({
-      type: "MissingSalePrice",
-      message: "Sale price missing for finalized sale.",
-      parcelId: raw.parcelId,
-      caseNumber: raw.caseNumber,
-      sourceUrl: raw.sourceUrl,
-    });
-  }
+// -------------------------
+// Sale Price Handling
+// -------------------------
+let saleDisplay = raw.salePrice;
 
-  // If cannot compute surplus → anomaly
-  if (estimatedSurplus === null) {
-    anomalies.push({
-      type: "MissingSurplus",
-      message: "Cannot compute surplus: salePrice or openingBid missing.",
-      parcelId: raw.parcelId,
-      caseNumber: raw.caseNumber,
-      sourceUrl: raw.sourceUrl,
-    });
-  }
+// If missing → mark as "Unavailable"
+if (sale === null) {
+  saleDisplay = "Unavailable";
+
+  anomalies.push({
+    type: "MissingSalePrice",
+    message: "Sale price missing — marked as Unavailable.",
+    parcelId: raw.parcelId,
+    caseNumber: raw.caseNumber,
+    sourceUrl: raw.sourceUrl,
+  });
+}
+
+// -------------------------
+// Surplus Calculation
+// -------------------------
+let estimatedSurplus = null;
+
+// Only compute if BOTH values exist
+if (sale !== null && open !== null) {
+  estimatedSurplus = sale - open;
+}
+
+// -------------------------
+// Surplus Anomaly Logging
+// -------------------------
+if (estimatedSurplus === null) {
+  anomalies.push({
+    type: "MissingSurplus",
+    message: "Cannot compute surplus: salePrice or openingBid missing.",
+    parcelId: raw.parcelId,
+    caseNumber: raw.caseNumber,
+    sourceUrl: raw.sourceUrl,
+  });
+}
 
   /* =========================
      WRITE CORE FIELDS
@@ -346,7 +362,7 @@ mapped["Case Number"] = caseNumberClean || "";
   mapped["Auction Date"] = raw.auctionDate || "";
   mapped["Sale Finalized (Yes/No)"] = "Yes";
 
-  mapped["Sale Price"] = raw.salePrice || "";
+  mapped["Sale Price"] = saleDisplay;
   mapped["Opening / Minimum Bid"] = raw.openingBid || "";
 
   /* =========================
@@ -428,6 +444,30 @@ async function ensureHeaderRow() {
     } catch (e2) {
       console.error("❌ Header append fallback failed:", e2.message || e2);
     }
+  }
+}
+
+async function getExistingCaseNumbers() {
+  try {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME_RAW}!G2:G`,
+    });
+
+    const rows = res.data.values || [];
+
+    // Flatten into Set for fast lookup
+    const set = new Set(
+      rows
+        .map(r => (r[0] || "").trim())
+        .filter(Boolean)
+    );
+
+    return set;
+
+  } catch (err) {
+    console.error("❌ Failed to fetch existing Case Numbers:", err.message || err);
+    return new Set(); // fail-safe: don't block pipeline
   }
 }
 
@@ -516,11 +556,10 @@ for (const raw of rawData) {
   const mapped = mapRow(raw, urlMapping, anomalies);
 
   // Filter as before...
-  if (mapped && mapped["Meets Minimum Surplus? (Yes/No)"] === "Yes") {
-    uniqueMap.set(key, mapped);
-  } else {
-    filteredOutCount++;
-  }
+  if (mapped) {
+  uniqueMap.set(key, mapped);
+} else {
+  filteredOutCount++;
 }
 
   console.log(`ℹ️ Filtered out ${filteredOutCount} non-finalized or invalid rows.`);
@@ -549,8 +588,18 @@ for (const raw of rawData) {
   // ============================
   // APPEND TO GOOGLE SHEETS
   // ============================
+const existingCases = await getExistingCaseNumbers();
   try {
-    await appendRows(mappedRows);
+    const rowsToInsert = mappedRows.filter(row => {
+  const caseNum = (row["Case Number"] || "").trim();
+  if (!caseNum) return true; // allow if empty (optional)
+
+  return !existingCases.has(caseNum);
+});
+
+console.log(`🚫 Skipped ${mappedRows.length - rowsToInsert.length} duplicate rows.`);
+
+await appendRows(rowsToInsert);
   } catch (err) {
     console.error("❌ Final append failed:", err.message || err);
     process.exit(1);
