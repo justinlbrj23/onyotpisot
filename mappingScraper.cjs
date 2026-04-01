@@ -247,17 +247,23 @@ function mapRow(raw, urlMapping, anomalies) {
   if (!raw) return null;
 
   // Normalize status
-  const statusRaw = String(raw.status || raw.auctionStatus || "").trim().toLowerCase();
-  const isSold =
-    statusRaw.includes("sold") ||
-    statusRaw.includes("paid") ||
-    statusRaw.includes("paid prior") ||
-    statusRaw.includes("paid in full");
+  // =========================
+// TRUST PARSER STATUS (webInspector)
+// =========================
+const isSold =
+  String(raw.auctionStatus || "").toLowerCase() === "sold";
 
-  // Only include finalized / sold auctions
-  if (!isSold) {
-    return null;
-  }
+// Fallback safety (in case parser changes)
+const statusRaw = String(raw.status || "").toLowerCase();
+
+const fallbackSold =
+  statusRaw.includes("sold") ||
+  statusRaw.includes("paid") ||
+  statusRaw.includes("redeemed");
+
+if (!isSold && !fallbackSold) {
+  return null;
+}
 
   // Prepare mapped object with empty columns
   const mapped = {};
