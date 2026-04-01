@@ -281,17 +281,30 @@ function parseAuctionsFromHtml(html, pageUrl) {
         '';
     }
 
-    const status     = clean($item.find('div.ASTAT_MSGA').first().text());
-    const soldAmount = clean($item.find('div.ASTAT_MSGD').first().text());
+  // =========================
+// ROBUST STATUS + SALE DETECTION
+// =========================
+const fullText = clean($item.text()).toLowerCase();
 
-    // =========================
-    // SOLD DETECTION (RELAXED)
-    // =========================
-    const looksSold =
-      status.toLowerCase().includes('sold') ||
-      (!!soldAmount && parseCurrency(soldAmount) !== null);
+// Try original selectors first
+let status = clean($item.find('div.ASTAT_MSGA').first().text());
+let soldAmount = clean($item.find('div.ASTAT_MSGD').first().text());
 
-    if (!looksSold) return;
+// Fallback: detect SOLD anywhere in block
+const looksSold = /sold|paid|redeemed/i.test(fullText);
+
+if (!looksSold) return;
+
+// =========================
+// FALLBACK SALE PRICE EXTRACTION
+// =========================
+if (!soldAmount) {
+  // Try to extract something like "$123,456.78"
+  const match = fullText.match(/\$\s?[0-9,]+(?:\.[0-9]{2})?/);
+  if (match) {
+    soldAmount = match[0];
+  }
+}
 
     // =========================
     // PARSE NUMBERS
