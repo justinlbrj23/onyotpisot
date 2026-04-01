@@ -299,18 +299,30 @@ function mapRow(raw, urlMapping, anomalies) {
   }
 
   /* =========================
-     SURPLUS: Sale - Opening Bid
+     SURPLUS: Prefer raw.surplus, otherwise compute if possible
      ========================= */
-  const sale = parseCurrency(raw.salePrice);
-  const open = parseCurrency(raw.openingBid);
-
   let estimatedSurplus = null;
-  if (sale !== null && open !== null) {
-    estimatedSurplus = sale - open;
+
+  // Prefer canonical raw.surplus if present (webInspector should set row.surplus)
+  if (raw.surplus !== undefined && raw.surplus !== null) {
+    if (typeof raw.surplus === "number") {
+      estimatedSurplus = raw.surplus;
+    } else {
+      const n = parseFloat(String(raw.surplus).replace(/[^0-9.-]/g, ""));
+      if (Number.isFinite(n)) estimatedSurplus = n;
+    }
+  } else {
+    // Fallback compute from salePrice and openingBid if both present
+    const sale = parseCurrency(raw.salePrice);
+    const open = parseCurrency(raw.openingBid);
+    if (sale !== null && open !== null) {
+      estimatedSurplus = sale - open;
+    }
   }
 
   // If sale price missing → anomaly (log as Unavailable in sheet)
-  if (sale === null) {
+  const saleNumeric = parseCurrency(raw.salePrice);
+  if (saleNumeric === null) {
     anomalies.push({
       type: "MissingSalePrice",
       message: "Sale price missing for finalized sale.",
@@ -322,7 +334,7 @@ function mapRow(raw, urlMapping, anomalies) {
     // Only push MissingSurplus when sale exists but surplus cannot be computed
     anomalies.push({
       type: "MissingSurplus",
-      message: "Cannot compute surplus: openingBid missing.",
+      message: "Cannot compute surplus: openingBid missing or surplus not derivable.",
       parcelId: raw.parcelId,
       caseNumber: raw.caseNumber,
       sourceUrl: raw.sourceUrl,
@@ -531,6 +543,7 @@ async function filterOutExistingCases(rows) {
   // Load parsed rows from webInspector
   const rawData = JSON.parse(fs.readFileSync(INPUT_FILE, "utf8"));
   console.log(`📦 Loaded ${rawData.length} parsed rows from ${INPUT_FILE}`);
+  console.log('DEBUG: sample parsed row:', rawData && rawData[0] ? rawData[0] : '<<no rows>>');
 
   // Load URL→County/State mapping
   const urlMapping = await getUrlMapping();
@@ -556,8 +569,9 @@ async function filterOutExistingCases(rows) {
 
     const mapped = mapRow(raw, urlMapping, anomalies);
 
-    // Filter as before...
-    if (mapped && mapped["Meets Minimum Surplus? (Yes/No)"] === "Yes") {
+    // NEW BEHAVIOR: Accept mapped rows even when surplus is missing.
+    // Previously we only kept rows that met the minimum surplus.
+    if (mapped) {
       uniqueMap.set(key, mapped);
     } else {
       filteredOutCount++;
