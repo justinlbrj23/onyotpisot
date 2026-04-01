@@ -541,6 +541,7 @@ async function appendRows(rows) {
   // Process each parsed row
 for (const raw of rawData) {
   const baseKey = normalizeBaseUrl(raw.sourceUrl || "");
+
   // CLEAN the case number before dedupe and mapping
   const rawCase = cleanCaseNumber(raw.caseNumber || '');
   const rawParcel = (raw.parcelId || '').trim();
@@ -549,20 +550,19 @@ for (const raw of rawData) {
   // Deduplicate
   if (uniqueMap.has(key)) continue;
 
-  // Pass cleaned case number into mapRow (or set it on raw)
-  // Option A: set on raw so mapRow sees the cleaned value
+  // Ensure cleaned case number is used
   raw.caseNumber = rawCase;
 
   const mapped = mapRow(raw, urlMapping, anomalies);
 
-  // Filter as before...
   if (mapped) {
-  uniqueMap.set(key, mapped);
-} else {
-  filteredOutCount++;
-}
+    uniqueMap.set(key, mapped);
+  } else {
+    filteredOutCount++;
+  }
+} // ✅ <-- THIS WAS MISSING
 
-  console.log(`ℹ️ Filtered out ${filteredOutCount} non-finalized or invalid rows.`);
+console.log(`ℹ️ Filtered out ${filteredOutCount} non-finalized or invalid rows.`);
 
   // Final mapped rows array
   const mappedRows = [...uniqueMap.values()];
