@@ -70,8 +70,10 @@ function clean(text) {
 }
 
 function parseCurrency(str) {
-  if (!str) return null;
-  const n = parseFloat(str.replace(/[^0-9.-]/g, ''));
+  if (str === null || str === undefined) return null;
+  const s = String(str).trim();
+  if (!s) return null;
+  const n = parseFloat(s.replace(/[^0-9.-]/g, ''));
   return isNaN(n) ? null : n;
 }
 
@@ -257,6 +259,7 @@ function parseAuctionsFromHtml(html, pageUrl) {
   $('#BID_WINDOW_CONTAINER div[aid]').each((_, item) => {
     const $item = $(item);
 
+    // record relevant block for diagnostics
     const blockText = clean($item.text());
     if (blockText) {
       relevant.push({
@@ -273,6 +276,7 @@ function parseAuctionsFromHtml(html, pageUrl) {
     const parcelId      = getByThLabel($, $item, 'Account Number');
     const streetAddress = getByThLabel($, $item, 'Property Address');
 
+    // city/state/zip – template sometimes uses row order
     let cityStateZip = clean($item.find('tr:nth-of-type(8) td').first().text());
     if (!cityStateZip) {
       cityStateZip =
@@ -281,84 +285,55 @@ function parseAuctionsFromHtml(html, pageUrl) {
         '';
     }
 
-  // =========================
-// ROBUST STATUS + SALE DETECTION
-// =========================
-const fullText = clean($item.text()).toLowerCase();
+    const status     = clean($item.find('div.ASTAT_MSGA').first().text());
+    const soldAmount = clean($item.find('div.ASTAT_MSGD').first().text());
 
-// Try original selectors first
-let status = clean($item.find('div.ASTAT_MSGA').first().text());
-let soldAmount = clean($item.find('div.ASTAT_MSGD').first().text());
+    const looksSold =
+      status.toLowerCase().includes('sold') ||
+      (!!soldAmount && parseCurrency(soldAmount) !== null);
+    if (!looksSold) return;
 
-// Fallback: detect SOLD anywhere in block
-const looksSold = /sold|paid|redeemed/i.test(fullText);
-
-if (!looksSold) return;
-
-// =========================
-// FALLBACK SALE PRICE EXTRACTION
-// =========================
-if (!soldAmount) {
-  // Try to extract something like "$123,456.78"
-  const match = fullText.match(/\$\s?[0-9,]+(?:\.[0-9]{2})?/);
-  if (match) {
-    soldAmount = match[0];
-  }
-}
-
-    // =========================
-    // PARSE NUMBERS
-    // =========================
-    const openingBidNum = parseCurrency(openingBid);
-    const salePriceNum  = parseCurrency(soldAmount);
-
-    // =========================
-    // SALE PRICE HANDLING
-    // =========================
-    let salePriceClean = clean(soldAmount);
-    if (salePriceNum === null) {
-  salePriceClean = "Unavailable";
-}
-
-    // =========================
-    // BUILD ROW (NO HARD FILTER)
-    // =========================
+    // Build base row values (strings)
     const row = {
       sourceUrl: pageUrl,
       auctionStatus: 'Sold',
       auctionType: 'Tax Sale',
-
       caseNumber: clean(caseNumber),
       parcelId: clean(parcelId),
       propertyAddress: clean(streetAddress),
-
       openingBid: clean(openingBid),
-      salePrice: salePriceClean,
+      salePrice: clean(soldAmount),
       assessedValue: clean(assessedValue),
-
       auctionDate: extractAuctionDateFromUrl(pageUrl),
       cityStateZip: clean(cityStateZip),
       status: clean(status),
     };
 
-    // =========================
-    // MINIMUM REQUIRED FIELDS ONLY
-    // =========================
-    if (!row.caseNumber && !row.parcelId) return;
+    // Require only identifiers; allow missing monetary fields so mapping can still log the row.
+    const valid = row.caseNumber && row.parcelId;
+    if (!valid) return;
 
-    // =========================
-    // SURPLUS (ONLY IF POSSIBLE)
-    // =========================
+    // Numeric conversions (for diagnostics and canonical surplus)
+    const openingBidNum = parseCurrency(row.openingBid);
+    const assessedNum   = parseCurrency(row.assessedValue);
+    const salePriceNum  = parseCurrency(row.salePrice);
+
+    // Canonical surplus field (authoritative for downstream mapping)
+    // Use salePrice - openingBid when both numeric; otherwise null
+    row.surplus = (salePriceNum !== null && openingBidNum !== null)
+      ? (salePriceNum - openingBidNum)
+      : null;
+
+    // Keep the diagnostic surplus fields if you want them
+    row.surplusAssessVsSale =
+      (assessedNum !== null && salePriceNum !== null) ? (assessedNum - salePriceNum) : null;
+
     row.surplusSaleVsOpen =
-      salePriceNum !== null && openingBidNum !== null
-        ? salePriceNum - openingBidNum
-        : null;
+      (salePriceNum !== null && openingBidNum !== null) ? (salePriceNum - openingBidNum) : null;
 
-    // DO NOT rely on assessed anymore (per your rules)
+    // meetsMinimumSurplus should only be set when canonical surplus exists
     row.meetsMinimumSurplus =
-      row.surplusSaleVsOpen !== null && row.surplusSaleVsOpen >= MIN_SURPLUS
-        ? 'Yes'
-        : 'No';
+      (row.surplus !== null && row.surplus >= MIN_SURPLUS) ? 'Yes' : '';
 
     rows.push(row);
   });
@@ -525,11 +500,12 @@ async function inspectAndParse(browser, url) {
     totalRowsRaw: allRows.length,
     totalRowsFinal: finalRows.length,
     errorsCount: errors.length,
-    surplusAboveThreshold: finalRows.filter(r => r.meetsMinimumSurplus === 'Yes').length,
-    surplusBelowThreshold: finalRows.filter(r => r.meetsMinimumSurplus === 'No').length,
+    surplusAboveThreshold: finalRows.filter(r => (r.surplus !== null && r.surplus >= MIN_SURPLUS)).length,
+    surplusBelowThreshold: finalRows.filter(r => (r.surplus !== null && r.surplus < MIN_SURPLUS)).length,
     blanks: {
       salePriceBlank: finalRows.filter(r => !r.salePrice).length,
       auctionDateBlank: finalRows.filter(r => !r.auctionDate).length,
+      surplusBlank: finalRows.filter(r => r.surplus === null).length,
     },
   };
 
