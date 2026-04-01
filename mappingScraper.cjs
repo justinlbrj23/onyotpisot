@@ -397,7 +397,7 @@ mapped["Case Number"] = caseNumberClean || "";
   /* =========================
      Kickback Reason (optional)
      ========================= */
-  if (!raw.salePrice && raw.status) {
+  if ((!raw.salePrice || raw.salePrice === "Unavailable") && raw.status) {
     mapped["Kickback Reason"] = `status: ${raw.status}`;
   }
 
