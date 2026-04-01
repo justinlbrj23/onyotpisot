@@ -257,7 +257,6 @@ function parseAuctionsFromHtml(html, pageUrl) {
   $('#BID_WINDOW_CONTAINER div[aid]').each((_, item) => {
     const $item = $(item);
 
-    // record relevant block for diagnostics
     const blockText = clean($item.text());
     if (blockText) {
       relevant.push({
@@ -274,7 +273,6 @@ function parseAuctionsFromHtml(html, pageUrl) {
     const parcelId      = getByThLabel($, $item, 'Account Number');
     const streetAddress = getByThLabel($, $item, 'Property Address');
 
-    // city/state/zip – template sometimes uses row order
     let cityStateZip = clean($item.find('tr:nth-of-type(8) td').first().text());
     if (!cityStateZip) {
       cityStateZip =
@@ -286,46 +284,68 @@ function parseAuctionsFromHtml(html, pageUrl) {
     const status     = clean($item.find('div.ASTAT_MSGA').first().text());
     const soldAmount = clean($item.find('div.ASTAT_MSGD').first().text());
 
+    // =========================
+    // SOLD DETECTION (RELAXED)
+    // =========================
     const looksSold =
       status.toLowerCase().includes('sold') ||
       (!!soldAmount && parseCurrency(soldAmount) !== null);
+
     if (!looksSold) return;
 
+    // =========================
+    // PARSE NUMBERS
+    // =========================
     const openingBidNum = parseCurrency(openingBid);
-    const assessedNum   = parseCurrency(assessedValue);
     const salePriceNum  = parseCurrency(soldAmount);
 
+    // =========================
+    // SALE PRICE HANDLING
+    // =========================
+    let salePriceClean = clean(soldAmount);
+    if (!salePriceNum) {
+      salePriceClean = "Unavailable";
+    }
+
+    // =========================
+    // BUILD ROW (NO HARD FILTER)
+    // =========================
     const row = {
       sourceUrl: pageUrl,
       auctionStatus: 'Sold',
       auctionType: 'Tax Sale',
+
       caseNumber: clean(caseNumber),
       parcelId: clean(parcelId),
       propertyAddress: clean(streetAddress),
+
       openingBid: clean(openingBid),
-      salePrice: clean(soldAmount),
+      salePrice: salePriceClean,
       assessedValue: clean(assessedValue),
+
       auctionDate: extractAuctionDateFromUrl(pageUrl),
       cityStateZip: clean(cityStateZip),
       status: clean(status),
     };
 
-    const valid =
-      row.caseNumber &&
-      row.parcelId &&
-      row.openingBid &&
-      row.salePrice &&
-      row.assessedValue;
-    if (!valid) return;
+    // =========================
+    // MINIMUM REQUIRED FIELDS ONLY
+    // =========================
+    if (!row.caseNumber && !row.parcelId) return;
 
-    row.surplusAssessVsSale =
-      assessedNum !== null && salePriceNum !== null ? assessedNum - salePriceNum : null;
-
+    // =========================
+    // SURPLUS (ONLY IF POSSIBLE)
+    // =========================
     row.surplusSaleVsOpen =
-      salePriceNum !== null && openingBidNum !== null ? salePriceNum - openingBidNum : null;
+      salePriceNum !== null && openingBidNum !== null
+        ? salePriceNum - openingBidNum
+        : null;
 
+    // DO NOT rely on assessed anymore (per your rules)
     row.meetsMinimumSurplus =
-      row.surplusAssessVsSale !== null && row.surplusAssessVsSale >= MIN_SURPLUS ? 'Yes' : 'No';
+      row.surplusSaleVsOpen !== null && row.surplusSaleVsOpen >= MIN_SURPLUS
+        ? 'Yes'
+        : 'No';
 
     rows.push(row);
   });
