@@ -316,9 +316,9 @@ if (!soldAmount) {
     // SALE PRICE HANDLING
     // =========================
     let salePriceClean = clean(soldAmount);
-    if (!salePriceNum) {
-      salePriceClean = "Unavailable";
-    }
+    if (salePriceNum === null) {
+  salePriceClean = "Unavailable";
+}
 
     // =========================
     // BUILD ROW (NO HARD FILTER)
