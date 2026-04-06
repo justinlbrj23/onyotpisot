@@ -288,8 +288,8 @@ function parseAuctionsFromHtml(html, pageUrl) {
     const status     = clean($item.find('div.ASTAT_MSGA').first().text()) || clean($item.find('.status, .ASTAT_MSGA').first().text());
     const soldAmount = clean($item.find('div.ASTAT_MSGD').first().text()) || '';
 
-    // Determine auction status but do not drop preview/non-sold items.
     // Robust detection: check status node and the whole block text, and treat numeric soldAmount as sold.
+    // Also detect cancelled explicitly.
     const statusLower = (status || '').toLowerCase();
     const blockLower = (blockText || '').toLowerCase();
     const soldAmountNumeric = !!soldAmount && parseCurrency(soldAmount) !== null;
@@ -304,10 +304,16 @@ function parseAuctionsFromHtml(html, pageUrl) {
       blockLower.includes('sold') ||
       soldAmountNumeric;
 
+    const looksCancelled =
+      statusLower.includes('cancel') ||
+      blockLower.includes('cancel') ||
+      statusLower.includes('cancelled') ||
+      blockLower.includes('cancelled');
+
     // Build base row values (strings)
     const row = {
       sourceUrl: pageUrl,
-      auctionStatus: looksSold ? 'Sold' : (status ? status : 'Preview'),
+      auctionStatus: looksSold ? 'Sold' : (looksCancelled ? 'Cancelled' : (status ? status : 'Preview')),
       auctionType: 'Tax Sale',
       caseNumber: clean(caseNumber),
       parcelId: clean(parcelId),
@@ -319,6 +325,9 @@ function parseAuctionsFromHtml(html, pageUrl) {
       cityStateZip: clean(cityStateZip),
       status: clean(status),
     };
+
+    // mark cancelled for downstream logic
+    row.isCancelled = looksCancelled;
 
     // Require only identifiers; allow missing monetary fields so mapping can still log the row.
     const valid = row.caseNumber && row.parcelId;
@@ -364,7 +373,7 @@ function parseAuctionsFromHtml(html, pageUrl) {
       (row.surplus !== null && row.surplus >= MIN_SURPLUS) ? 'Yes' : '';
 
     // Debug lightweight log (can be removed or toggled)
-    // console.log(`PARSE: case=${row.caseNumber} parcel=${row.parcelId} sale="${row.salePrice}" surplus=${row.surplus}`);
+    // console.log(`PARSE: case=${row.caseNumber} parcel=${row.parcelId} sale="${row.salePrice}" surplus=${row.surplus} cancelled=${row.isCancelled}`);
 
     rows.push(row);
   });
