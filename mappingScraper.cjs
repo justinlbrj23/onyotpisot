@@ -257,8 +257,13 @@ function mapRow(raw, urlMapping, anomalies) {
   // Also consider scraper flag for sold-without-price
   const isSoldByFlag = !!raw.isSoldButNoPrice;
 
-  // Finalized if either status indicates sold OR scraper flagged sold-without-price
-  const isFinalized = isSoldByStatus || isSoldByFlag;
+  // Consider cancelled flag from parser or status text
+  const isCancelledByStatus = statusRaw.includes("cancel") || statusRaw.includes("cancelled");
+  const isCancelledByFlag = !!raw.isCancelled;
+  const isCancelled = isCancelledByStatus || isCancelledByFlag;
+
+  // Finalized if either status indicates sold OR scraper flagged sold-without-price OR cancelled
+  const isFinalized = isSoldByStatus || isSoldByFlag || isCancelled;
 
   // Prepare mapped object with empty columns
   const mapped = {};
@@ -352,7 +357,7 @@ function mapRow(raw, urlMapping, anomalies) {
   mapped["Case Number"] = caseNumberClean || "";
   mapped["Auction Date"] = raw.auctionDate || "";
 
-  // Sale Finalized: Yes/No based on detection
+  // Sale Finalized: Yes/No based on detection (sold or cancelled or flagged)
   mapped["Sale Finalized (Yes/No)"] = isFinalized ? "Yes" : "No";
 
   // Sale Price: show "Unavailable" when missing
@@ -388,6 +393,13 @@ function mapRow(raw, urlMapping, anomalies) {
      ========================= */
   if (!raw.salePrice && raw.status) {
     mapped["Kickback Reason"] = `status: ${raw.status}`;
+  }
+
+  // If cancelled, make Kickback Reason explicit
+  if (isCancelled) {
+    mapped["Kickback Reason"] = mapped["Kickback Reason"]
+      ? `${mapped["Kickback Reason"]}; cancelled`
+      : `status: Cancelled`;
   }
 
   return mapped;
