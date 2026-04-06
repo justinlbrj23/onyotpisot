@@ -315,6 +315,20 @@ function parseAuctionsFromHtml(html, pageUrl) {
       return;
     }
 
+    // --- Begin: infer zero sale price for sold items with no explicit sale amount ---
+    row.isSoldButNoPrice = looksSold && !row.salePrice ? true : false;
+
+    if (row.isSoldButNoPrice) {
+      // Set canonical salePrice to "$0" so parseCurrency will return 0
+      row.salePrice = '$0';
+      // Audit flags so downstream consumers can detect inferred zeros
+      row.salePriceInferred = true;
+      row.salePriceInferenceReason = 'sold-status-no-amount-default-zero';
+      // Keep suppressSurplusAlerts false because inferred zeros should be included as normal
+      row.suppressSurplusAlerts = false;
+    }
+    // --- End inference snippet ---
+
     // Numeric conversions (for diagnostics and canonical surplus)
     const openingBidNum = parseCurrency(row.openingBid);
     const assessedNum   = parseCurrency(row.assessedValue);
