@@ -289,8 +289,20 @@ function parseAuctionsFromHtml(html, pageUrl) {
     const soldAmount = clean($item.find('div.ASTAT_MSGD').first().text()) || '';
 
     // Determine auction status but do not drop preview/non-sold items.
+    // Robust detection: check status node and the whole block text, and treat numeric soldAmount as sold.
     const statusLower = (status || '').toLowerCase();
-    const looksSold = statusLower.includes('sold') || statusLower.includes('paid') || statusLower.includes('paid prior') || statusLower.includes('paid in full') || (!!soldAmount && parseCurrency(soldAmount) !== null);
+    const blockLower = (blockText || '').toLowerCase();
+    const soldAmountNumeric = !!soldAmount && parseCurrency(soldAmount) !== null;
+
+    const looksSold =
+      statusLower.includes('sold') ||
+      statusLower.includes('paid') ||
+      statusLower.includes('paid prior') ||
+      statusLower.includes('paid in full') ||
+      blockLower.includes('paid in full') ||
+      blockLower.includes('paid prior') ||
+      blockLower.includes('sold') ||
+      soldAmountNumeric;
 
     // Build base row values (strings)
     const row = {
