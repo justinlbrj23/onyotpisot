@@ -248,16 +248,17 @@ function mapRow(raw, urlMapping, anomalies) {
 
   // Normalize status
   const statusRaw = String(raw.status || raw.auctionStatus || "").trim().toLowerCase();
-  const isSold =
+  const isSoldByStatus =
     statusRaw.includes("sold") ||
     statusRaw.includes("paid") ||
     statusRaw.includes("paid prior") ||
     statusRaw.includes("paid in full");
 
-  // Only include finalized / sold auctions
-  if (!isSold) {
-    return null;
-  }
+  // Also consider scraper flag for sold-without-price
+  const isSoldByFlag = !!raw.isSoldButNoPrice;
+
+  // Finalized if either status indicates sold OR scraper flagged sold-without-price
+  const isFinalized = isSoldByStatus || isSoldByFlag;
 
   // Prepare mapped object with empty columns
   const mapped = {};
@@ -314,7 +315,6 @@ function mapRow(raw, urlMapping, anomalies) {
   }
 
   // If canonical surplus is missing, record an anomaly.
-  // Do NOT compute surplus from salePrice/openingBid — that is disallowed by rules.
   if (estimatedSurplus === null) {
     anomalies.push({
       type: "MissingCanonicalSurplus",
@@ -332,7 +332,7 @@ function mapRow(raw, urlMapping, anomalies) {
   if (saleNumeric === null) {
     anomalies.push({
       type: "MissingSalePrice",
-      message: "Sale price missing for finalized sale.",
+      message: "Sale price missing for finalized sale (or not provided).",
       parcelId: raw.parcelId,
       caseNumber: raw.caseNumber,
       sourceUrl: raw.sourceUrl,
@@ -351,7 +351,9 @@ function mapRow(raw, urlMapping, anomalies) {
   const caseNumberClean = cleanCaseNumber(raw.caseNumber || '');
   mapped["Case Number"] = caseNumberClean || "";
   mapped["Auction Date"] = raw.auctionDate || "";
-  mapped["Sale Finalized (Yes/No)"] = "Yes";
+
+  // Sale Finalized: Yes/No based on detection
+  mapped["Sale Finalized (Yes/No)"] = isFinalized ? "Yes" : "No";
 
   // Sale Price: show "Unavailable" when missing
   mapped["Sale Price"] = (parseCurrency(raw.salePrice) === null) ? "Unavailable" : (raw.salePrice || "");
