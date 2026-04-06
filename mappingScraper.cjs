@@ -299,11 +299,11 @@ function mapRow(raw, urlMapping, anomalies) {
   }
 
   /* =========================
-     SURPLUS: Prefer raw.surplus, otherwise compute if possible
+     SURPLUS: Use ONLY raw.surplus (no fallback computations)
      ========================= */
   let estimatedSurplus = null;
 
-  // Prefer canonical raw.surplus if present (webInspector should set row.surplus)
+  // Use canonical raw.surplus only (webInspector should set row.surplus)
   if (raw.surplus !== undefined && raw.surplus !== null) {
     if (typeof raw.surplus === "number") {
       estimatedSurplus = raw.surplus;
@@ -311,30 +311,28 @@ function mapRow(raw, urlMapping, anomalies) {
       const n = parseFloat(String(raw.surplus).replace(/[^0-9.-]/g, ""));
       if (Number.isFinite(n)) estimatedSurplus = n;
     }
-  } else {
-    // Fallback compute from salePrice and openingBid if both present
-    const sale = parseCurrency(raw.salePrice);
-    const open = parseCurrency(raw.openingBid);
-    if (sale !== null && open !== null) {
-      estimatedSurplus = sale - open;
-    }
   }
 
-  // If sale price missing → anomaly (log as Unavailable in sheet)
+  // If canonical surplus is missing, record an anomaly.
+  // Do NOT compute surplus from salePrice/openingBid — that is disallowed by rules.
+  if (estimatedSurplus === null) {
+    anomalies.push({
+      type: "MissingCanonicalSurplus",
+      message: "Canonical raw.surplus missing from scraper output; no fallback allowed.",
+      parcelId: raw.parcelId,
+      caseNumber: raw.caseNumber,
+      sourceUrl: raw.sourceUrl,
+    });
+  }
+
+  /* =========================
+     SALE PRICE ANOMALY (independent)
+     ========================= */
   const saleNumeric = parseCurrency(raw.salePrice);
   if (saleNumeric === null) {
     anomalies.push({
       type: "MissingSalePrice",
       message: "Sale price missing for finalized sale.",
-      parcelId: raw.parcelId,
-      caseNumber: raw.caseNumber,
-      sourceUrl: raw.sourceUrl,
-    });
-  } else if (estimatedSurplus === null) {
-    // Only push MissingSurplus when sale exists but surplus cannot be computed
-    anomalies.push({
-      type: "MissingSurplus",
-      message: "Cannot compute surplus: openingBid missing or surplus not derivable.",
       parcelId: raw.parcelId,
       caseNumber: raw.caseNumber,
       sourceUrl: raw.sourceUrl,
@@ -361,7 +359,7 @@ function mapRow(raw, urlMapping, anomalies) {
   mapped["Opening / Minimum Bid"] = raw.openingBid || "";
 
   /* =========================
-     SURPLUS → HEADERS
+     SURPLUS → HEADERS (only from canonical raw.surplus)
      ========================= */
   mapped["Estimated Surplus"] =
     (typeof estimatedSurplus === "number") ? String(estimatedSurplus) : "";
