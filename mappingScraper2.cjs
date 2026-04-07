@@ -248,16 +248,22 @@ function mapRow(raw, urlMapping, anomalies) {
 
   // Normalize status
   const statusRaw = String(raw.status || raw.auctionStatus || "").trim().toLowerCase();
-  const isSold =
+  const isSoldByStatus =
     statusRaw.includes("sold") ||
     statusRaw.includes("paid") ||
     statusRaw.includes("paid prior") ||
     statusRaw.includes("paid in full");
 
-  // Only include finalized / sold auctions
-  if (!isSold) {
-    return null;
-  }
+  // Also consider scraper flag for sold-without-price
+  const isSoldByFlag = !!raw.isSoldButNoPrice;
+
+  // Consider cancelled flag from parser or status text
+  const isCancelledByStatus = statusRaw.includes("cancel") || statusRaw.includes("cancelled");
+  const isCancelledByFlag = !!raw.isCancelled;
+  const isCancelled = isCancelledByStatus || isCancelledByFlag;
+
+  // Finalized if either status indicates sold OR scraper flagged sold-without-price OR cancelled
+  const isFinalized = isSoldByStatus || isSoldByFlag || isCancelled;
 
   // Prepare mapped object with empty columns
   const mapped = {};
@@ -299,11 +305,11 @@ function mapRow(raw, urlMapping, anomalies) {
   }
 
   /* =========================
-     SURPLUS: Prefer raw.surplus, otherwise compute if possible
+     SURPLUS: Use ONLY raw.surplus (no fallback computations)
      ========================= */
   let estimatedSurplus = null;
 
-  // Prefer canonical raw.surplus if present (webInspector should set row.surplus)
+  // Use canonical raw.surplus only (webInspector should set row.surplus)
   if (raw.surplus !== undefined && raw.surplus !== null) {
     if (typeof raw.surplus === "number") {
       estimatedSurplus = raw.surplus;
@@ -311,30 +317,27 @@ function mapRow(raw, urlMapping, anomalies) {
       const n = parseFloat(String(raw.surplus).replace(/[^0-9.-]/g, ""));
       if (Number.isFinite(n)) estimatedSurplus = n;
     }
-  } else {
-    // Fallback compute from salePrice and openingBid if both present
-    const sale = parseCurrency(raw.salePrice);
-    const open = parseCurrency(raw.openingBid);
-    if (sale !== null && open !== null) {
-      estimatedSurplus = sale - open;
-    }
   }
 
-  // If sale price missing → anomaly (log as Unavailable in sheet)
-  const saleNumeric = parseCurrency(raw.salePrice);
-  if (saleNumeric === null) {
+  // If canonical surplus is missing, record an anomaly.
+  if (estimatedSurplus === null) {
     anomalies.push({
-      type: "MissingSalePrice",
-      message: "Sale price missing for finalized sale.",
+      type: "MissingCanonicalSurplus",
+      message: "Canonical raw.surplus missing from scraper output; no fallback allowed.",
       parcelId: raw.parcelId,
       caseNumber: raw.caseNumber,
       sourceUrl: raw.sourceUrl,
     });
-  } else if (estimatedSurplus === null) {
-    // Only push MissingSurplus when sale exists but surplus cannot be computed
+  }
+
+  /* =========================
+     SALE PRICE ANOMALY (independent)
+     ========================= */
+  const saleNumeric = parseCurrency(raw.salePrice);
+  if (saleNumeric === null) {
     anomalies.push({
-      type: "MissingSurplus",
-      message: "Cannot compute surplus: openingBid missing or surplus not derivable.",
+      type: "MissingSalePrice",
+      message: "Sale price missing for finalized sale (or not provided).",
       parcelId: raw.parcelId,
       caseNumber: raw.caseNumber,
       sourceUrl: raw.sourceUrl,
@@ -353,7 +356,9 @@ function mapRow(raw, urlMapping, anomalies) {
   const caseNumberClean = cleanCaseNumber(raw.caseNumber || '');
   mapped["Case Number"] = caseNumberClean || "";
   mapped["Auction Date"] = raw.auctionDate || "";
-  mapped["Sale Finalized (Yes/No)"] = "Yes";
+
+  // Sale Finalized: Yes/No based on detection (sold or cancelled or flagged)
+  mapped["Sale Finalized (Yes/No)"] = isFinalized ? "Yes" : "No";
 
   // Sale Price: show "Unavailable" when missing
   mapped["Sale Price"] = (parseCurrency(raw.salePrice) === null) ? "Unavailable" : (raw.salePrice || "");
@@ -361,7 +366,7 @@ function mapRow(raw, urlMapping, anomalies) {
   mapped["Opening / Minimum Bid"] = raw.openingBid || "";
 
   /* =========================
-     SURPLUS → HEADERS
+     SURPLUS → HEADERS (only from canonical raw.surplus)
      ========================= */
   mapped["Estimated Surplus"] =
     (typeof estimatedSurplus === "number") ? String(estimatedSurplus) : "";
@@ -388,6 +393,13 @@ function mapRow(raw, urlMapping, anomalies) {
      ========================= */
   if (!raw.salePrice && raw.status) {
     mapped["Kickback Reason"] = `status: ${raw.status}`;
+  }
+
+  // If cancelled, make Kickback Reason explicit
+  if (isCancelled) {
+    mapped["Kickback Reason"] = mapped["Kickback Reason"]
+      ? `${mapped["Kickback Reason"]}; cancelled`
+      : `status: Cancelled`;
   }
 
   return mapped;
