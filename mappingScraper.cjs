@@ -1,4 +1,3 @@
-
 /* ===================================================================
    mappingScraper.cjs (Updated Version)
    ---------------------------------------------------------------
@@ -74,6 +73,16 @@ const HEADERS = [
 // =========================
 // Utility Functions
 // =========================
+
+// Clean case numbers: remove parentheses and their contents, trim whitespace
+function cleanCaseNumber(s) {
+  if (!s) return '';
+  // Remove any parenthetical group like " (29)" or "(abc)" and trim
+  let out = String(s).replace(/\s*\(.*?\)\s*/g, '').trim();
+  // Normalize multiple spaces to single, remove leading/trailing punctuation
+  out = out.replace(/\s+/g, ' ').replace(/^[\s\-\._]+|[\s\-\._]+$/g, '');
+  return out;
+}
 
 // Normalize encodings
 function decodeAmp(u) {
@@ -290,18 +299,30 @@ function mapRow(raw, urlMapping, anomalies) {
   }
 
   /* =========================
-     SURPLUS: Sale - Opening Bid
+     SURPLUS: Prefer raw.surplus, otherwise compute if possible
      ========================= */
-  const sale = parseCurrency(raw.salePrice);
-  const open = parseCurrency(raw.openingBid);
-
   let estimatedSurplus = null;
-  if (sale !== null && open !== null) {
-    estimatedSurplus = sale - open;
+
+  // Prefer canonical raw.surplus if present (webInspector should set row.surplus)
+  if (raw.surplus !== undefined && raw.surplus !== null) {
+    if (typeof raw.surplus === "number") {
+      estimatedSurplus = raw.surplus;
+    } else {
+      const n = parseFloat(String(raw.surplus).replace(/[^0-9.-]/g, ""));
+      if (Number.isFinite(n)) estimatedSurplus = n;
+    }
+  } else {
+    // Fallback compute from salePrice and openingBid if both present
+    const sale = parseCurrency(raw.salePrice);
+    const open = parseCurrency(raw.openingBid);
+    if (sale !== null && open !== null) {
+      estimatedSurplus = sale - open;
+    }
   }
 
-  // If sale price missing → anomaly
-  if (sale === null) {
+  // If sale price missing → anomaly (log as Unavailable in sheet)
+  const saleNumeric = parseCurrency(raw.salePrice);
+  if (saleNumeric === null) {
     anomalies.push({
       type: "MissingSalePrice",
       message: "Sale price missing for finalized sale.",
@@ -309,13 +330,11 @@ function mapRow(raw, urlMapping, anomalies) {
       caseNumber: raw.caseNumber,
       sourceUrl: raw.sourceUrl,
     });
-  }
-
-  // If cannot compute surplus → anomaly
-  if (estimatedSurplus === null) {
+  } else if (estimatedSurplus === null) {
+    // Only push MissingSurplus when sale exists but surplus cannot be computed
     anomalies.push({
       type: "MissingSurplus",
-      message: "Cannot compute surplus: salePrice or openingBid missing.",
+      message: "Cannot compute surplus: openingBid missing or surplus not derivable.",
       parcelId: raw.parcelId,
       caseNumber: raw.caseNumber,
       sourceUrl: raw.sourceUrl,
@@ -331,22 +350,25 @@ function mapRow(raw, urlMapping, anomalies) {
   mapped["City"] = city;
   mapped["ZIP Code"] = zip;
   mapped["Parcel / APN Number"] = raw.parcelId || "";
-  mapped["Case Number"] = raw.caseNumber || "";
+  const caseNumberClean = cleanCaseNumber(raw.caseNumber || '');
+  mapped["Case Number"] = caseNumberClean || "";
   mapped["Auction Date"] = raw.auctionDate || "";
   mapped["Sale Finalized (Yes/No)"] = "Yes";
 
-  mapped["Sale Price"] = raw.salePrice || "";
+  // Sale Price: show "Unavailable" when missing
+  mapped["Sale Price"] = (parseCurrency(raw.salePrice) === null) ? "Unavailable" : (raw.salePrice || "");
+
   mapped["Opening / Minimum Bid"] = raw.openingBid || "";
 
   /* =========================
      SURPLUS → HEADERS
      ========================= */
   mapped["Estimated Surplus"] =
-    estimatedSurplus !== null ? String(estimatedSurplus) : "";
+    (typeof estimatedSurplus === "number") ? String(estimatedSurplus) : "";
   mapped["Final Estimated Surplus to Owner"] =
-    estimatedSurplus !== null ? String(estimatedSurplus) : "";
+    (typeof estimatedSurplus === "number") ? String(estimatedSurplus) : "";
 
-  const meets = estimatedSurplus !== null && estimatedSurplus >= MIN_SURPLUS;
+  const meets = (typeof estimatedSurplus === "number") && estimatedSurplus >= MIN_SURPLUS;
   mapped["Meets Minimum Surplus? (Yes/No)"] = meets ? "Yes" : "No";
   mapped["Deal Viable? (Yes/No)"] = meets ? "Yes" : "No";
 
@@ -465,6 +487,49 @@ async function appendRows(rows) {
 }
 
 /* =========================
+   SHEET DUPLICATE CHECK HELPERS
+   ========================= */
+
+// Fetch existing Case Numbers from sheet (G2:G) and return a Set of cleaned case numbers
+async function getExistingCaseNumbers() {
+  try {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME_RAW}!G2:G`,
+    });
+    const rows = res.data.values || [];
+    const set = new Set();
+    rows.forEach(r => {
+      const rawVal = (r && r[0]) ? String(r[0]) : "";
+      const cleaned = cleanCaseNumber(rawVal);
+      if (cleaned) set.add(cleaned);
+    });
+    return set;
+  } catch (err) {
+    console.error("❌ Failed to read existing Case Numbers:", err.message || err);
+    return new Set();
+  }
+}
+
+// Remove rows whose Case Number already exists in the sheet
+async function filterOutExistingCases(rows) {
+  if (!rows || !rows.length) return rows;
+  const existing = await getExistingCaseNumbers();
+  const filtered = rows.filter(r => {
+    const cn = cleanCaseNumber(r["Case Number"] || "");
+    // If case number is empty, keep the row (can't check); if present and exists, skip
+    if (cn && existing.has(cn)) {
+      console.log(`⏭️ Skipping existing Case Number: ${cn}`);
+      return false;
+    }
+    return true;
+  });
+  const skipped = rows.length - filtered.length;
+  if (skipped) console.log(`⏳ Skipped ${skipped} rows already present in sheet.`);
+  return filtered;
+}
+
+/* =========================
    MAIN PIPELINE
    ========================= */
 
@@ -478,6 +543,7 @@ async function appendRows(rows) {
   // Load parsed rows from webInspector
   const rawData = JSON.parse(fs.readFileSync(INPUT_FILE, "utf8"));
   console.log(`📦 Loaded ${rawData.length} parsed rows from ${INPUT_FILE}`);
+  console.log('DEBUG: sample parsed row:', rawData && rawData[0] ? rawData[0] : '<<no rows>>');
 
   // Load URL→County/State mapping
   const urlMapping = await getUrlMapping();
@@ -488,22 +554,29 @@ async function appendRows(rows) {
   let filteredOutCount = 0;
 
   // Process each parsed row
-for (const raw of rawData) {
-  const baseKey = normalizeBaseUrl(raw.sourceUrl || "");
-  const key = `${baseKey}|${(raw.caseNumber || '').trim()}|${(raw.parcelId || '').trim()}`;
+  for (const raw of rawData) {
+    const baseKey = normalizeBaseUrl(raw.sourceUrl || "");
+    // CLEAN the case number before dedupe and mapping
+    const rawCase = cleanCaseNumber(raw.caseNumber || '');
+    const rawParcel = (raw.parcelId || '').trim();
+    const key = `${baseKey}|${rawCase}|${rawParcel}`;
 
-  // Deduplicate
-  if (uniqueMap.has(key)) continue;
+    // Deduplicate in-memory
+    if (uniqueMap.has(key)) continue;
 
-  const mapped = mapRow(raw, urlMapping, anomalies);
+    // Pass cleaned case number into mapRow (or set it on raw)
+    raw.caseNumber = rawCase;
 
-  // 💥 FILTER HERE → Only include rows that meet surplus requirement
-  if (mapped && mapped["Meets Minimum Surplus? (Yes/No)"] === "Yes") {
-    uniqueMap.set(key, mapped);
-  } else {
-    filteredOutCount++;
+    const mapped = mapRow(raw, urlMapping, anomalies);
+
+    // NEW BEHAVIOR: Accept mapped rows even when surplus is missing.
+    // Previously we only kept rows that met the minimum surplus.
+    if (mapped) {
+      uniqueMap.set(key, mapped);
+    } else {
+      filteredOutCount++;
+    }
   }
-}
 
   console.log(`ℹ️ Filtered out ${filteredOutCount} non-finalized or invalid rows.`);
 
@@ -529,10 +602,17 @@ for (const raw of rawData) {
   }
 
   // ============================
-  // APPEND TO GOOGLE SHEETS
+  // APPEND TO GOOGLE SHEETS (with sheet-level duplicate check)
   // ============================
   try {
-    await appendRows(mappedRows);
+    // Remove rows whose Case Number already exists in the sheet
+    const rowsToAppend = await filterOutExistingCases(mappedRows);
+
+    if (!rowsToAppend.length) {
+      console.log("⚠️ No new rows to append after checking existing Case Numbers.");
+    } else {
+      await appendRows(rowsToAppend);
+    }
   } catch (err) {
     console.error("❌ Final append failed:", err.message || err);
     process.exit(1);
