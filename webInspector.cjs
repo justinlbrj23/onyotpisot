@@ -1,4 +1,4 @@
-// webInspector.cjs (page intelligence + auction parser for SOLD cards only)
+// webInspector.cjs (page intelligence + auction parser)
 // Requires:
 // npm install puppeteer cheerio googleapis
 
@@ -70,8 +70,10 @@ function clean(text) {
 }
 
 function parseCurrency(str) {
-  if (!str) return null;
-  const n = parseFloat(str.replace(/[^0-9.-]/g, ''));
+  if (str === null || str === undefined) return null;
+  const s = String(str).trim();
+  if (!s) return null;
+  const n = parseFloat(s.replace(/[^0-9.-]/g, ''));
   return isNaN(n) ? null : n;
 }
 
@@ -247,7 +249,7 @@ function extractAuctionDateFromUrl(url) {
 }
 
 // =========================
-// Parser (SOLD-only) – sitemap-accurate mapping on div[aid]
+// Parser – mapping on div[aid]
 // =========================
 function parseAuctionsFromHtml(html, pageUrl) {
   const $ = cheerio.load(html);
@@ -268,11 +270,11 @@ function parseAuctionsFromHtml(html, pageUrl) {
       });
     }
 
-    const caseNumber    = getByThLabel($, $item, 'Cause Number');
-    const assessedValue = getByThLabel($, $item, 'Adjudged Value');
-    const openingBid    = getByThLabel($, $item, 'Est. Min. Bid');
-    const parcelId      = getByThLabel($, $item, 'Account Number');
-    const streetAddress = getByThLabel($, $item, 'Property Address');
+    const caseNumber    = getByThLabel($, $item, 'Cause Number') || getByThLabel($, $item, 'Case Number') || '';
+    const assessedValue = getByThLabel($, $item, 'Adjudged Value') || getByThLabel($, $item, 'Assessed Value') || '';
+    const openingBid    = getByThLabel($, $item, 'Est. Min. Bid') || getByThLabel($, $item, 'Opening Bid') || '';
+    const parcelId      = getByThLabel($, $item, 'Account Number') || getByThLabel($, $item, 'Parcel Number') || '';
+    const streetAddress = getByThLabel($, $item, 'Property Address') || '';
 
     // city/state/zip – template sometimes uses row order
     let cityStateZip = clean($item.find('tr:nth-of-type(8) td').first().text());
@@ -283,21 +285,17 @@ function parseAuctionsFromHtml(html, pageUrl) {
         '';
     }
 
-    const status     = clean($item.find('div.ASTAT_MSGA').first().text());
-    const soldAmount = clean($item.find('div.ASTAT_MSGD').first().text());
+    const status     = clean($item.find('div.ASTAT_MSGA').first().text()) || clean($item.find('.status, .ASTAT_MSGA').first().text());
+    const soldAmount = clean($item.find('div.ASTAT_MSGD').first().text()) || '';
 
-    const looksSold =
-      status.toLowerCase().includes('sold') ||
-      (!!soldAmount && parseCurrency(soldAmount) !== null);
-    if (!looksSold) return;
+    // Determine auction status but do not drop preview/non-sold items.
+    const statusLower = (status || '').toLowerCase();
+    const looksSold = statusLower.includes('sold') || statusLower.includes('paid') || statusLower.includes('paid prior') || statusLower.includes('paid in full') || (!!soldAmount && parseCurrency(soldAmount) !== null);
 
-    const openingBidNum = parseCurrency(openingBid);
-    const assessedNum   = parseCurrency(assessedValue);
-    const salePriceNum  = parseCurrency(soldAmount);
-
+    // Build base row values (strings)
     const row = {
       sourceUrl: pageUrl,
-      auctionStatus: 'Sold',
+      auctionStatus: looksSold ? 'Sold' : (status ? status : 'Preview'),
       auctionType: 'Tax Sale',
       caseNumber: clean(caseNumber),
       parcelId: clean(parcelId),
@@ -310,22 +308,37 @@ function parseAuctionsFromHtml(html, pageUrl) {
       status: clean(status),
     };
 
-    const valid =
-      row.caseNumber &&
-      row.parcelId &&
-      row.openingBid &&
-      row.salePrice &&
-      row.assessedValue;
-    if (!valid) return;
+    // Require only identifiers; allow missing monetary fields so mapping can still log the row.
+    const valid = row.caseNumber && row.parcelId;
+    if (!valid) {
+      // keep relevant for diagnostics but skip emitting
+      return;
+    }
 
+    // Numeric conversions (for diagnostics and canonical surplus)
+    const openingBidNum = parseCurrency(row.openingBid);
+    const assessedNum   = parseCurrency(row.assessedValue);
+    const salePriceNum  = parseCurrency(row.salePrice);
+
+    // Canonical surplus field (authoritative for downstream mapping)
+    // Use salePrice - openingBid when both numeric; otherwise null
+    row.surplus = (salePriceNum !== null && openingBidNum !== null)
+      ? (salePriceNum - openingBidNum)
+      : null;
+
+    // Keep the diagnostic surplus fields if you want them
     row.surplusAssessVsSale =
-      assessedNum !== null && salePriceNum !== null ? assessedNum - salePriceNum : null;
+      (assessedNum !== null && salePriceNum !== null) ? (assessedNum - salePriceNum) : null;
 
     row.surplusSaleVsOpen =
-      salePriceNum !== null && openingBidNum !== null ? salePriceNum - openingBidNum : null;
+      (salePriceNum !== null && openingBidNum !== null) ? (salePriceNum - openingBidNum) : null;
 
+    // meetsMinimumSurplus should only be set when canonical surplus exists
     row.meetsMinimumSurplus =
-      row.surplusAssessVsSale !== null && row.surplusAssessVsSale >= MIN_SURPLUS ? 'Yes' : 'No';
+      (row.surplus !== null && row.surplus >= MIN_SURPLUS) ? 'Yes' : '';
+
+    // Debug lightweight log (can be removed or toggled)
+    // console.log(`PARSE: case=${row.caseNumber} parcel=${row.parcelId} sale="${row.salePrice}" surplus=${row.surplus}`);
 
     rows.push(row);
   });
@@ -334,7 +347,7 @@ function parseAuctionsFromHtml(html, pageUrl) {
 }
 
 // =========================
-// Inspect + Parse Page (SOLD only) – with pager clicking as per your recording
+// Inspect + Parse Page – with pager clicking
 // =========================
 async function inspectAndParse(browser, url) {
   const page = await browser.newPage();
@@ -381,7 +394,7 @@ async function inspectAndParse(browser, url) {
       }
       allRelevantElements.push(...relevant);
 
-      console.log(`   ➜ SOLD rows so far: ${allParsedRows.length}`);
+      console.log(`   ➜ Parsed rows so far: ${allParsedRows.length}`);
 
       // Identify pager pieces inside BID_WINDOW_CONTAINER
       const pieces = await scope.getPagerPieces();
@@ -430,10 +443,10 @@ async function inspectAndParse(browser, url) {
 
     return { relevantElements: allRelevantElements, parsedRows: allParsedRows };
   } catch (err) {
-    console.error(`❌ Error on ${url}:`, err.message);
-    return { relevantElements: [], parsedRows: [], error: { url, message: err.message } };
+    console.error(`❌ Error on ${url}:`, err.message || err);
+    return { relevantElements: [], parsedRows: [], error: { url, message: err.message || String(err) } };
   } finally {
-    await page.close();
+    try { await page.close(); } catch {}
   }
 }
 
@@ -470,12 +483,12 @@ async function inspectAndParse(browser, url) {
       allRows.push(...parsedRows);
       if (error) errors.push(error);
     } catch (err) {
-      console.error(`❌ Fatal error on ${url}:`, err.message);
-      errors.push({ url, message: err.message });
+      console.error(`❌ Fatal error on ${url}:`, err.message || err);
+      errors.push({ url, message: err.message || String(err) });
     }
   }
 
-  await browser.close();
+  try { await browser.close(); } catch {}
 
   // Global dedupe
   const uniqueMap = new Map();
@@ -492,26 +505,35 @@ async function inspectAndParse(browser, url) {
     totalRowsRaw: allRows.length,
     totalRowsFinal: finalRows.length,
     errorsCount: errors.length,
-    surplusAboveThreshold: finalRows.filter(r => r.meetsMinimumSurplus === 'Yes').length,
-    surplusBelowThreshold: finalRows.filter(r => r.meetsMinimumSurplus === 'No').length,
+    surplusAboveThreshold: finalRows.filter(r => (r.surplus !== null && r.surplus >= MIN_SURPLUS)).length,
+    surplusBelowThreshold: finalRows.filter(r => (r.surplus !== null && r.surplus < MIN_SURPLUS)).length,
     blanks: {
       salePriceBlank: finalRows.filter(r => !r.salePrice).length,
       auctionDateBlank: finalRows.filter(r => !r.auctionDate).length,
+      surplusBlank: finalRows.filter(r => r.surplus === null).length,
     },
   };
 
   // Write artifacts
-  fs.writeFileSync(OUTPUT_ELEMENTS_FILE, JSON.stringify(allElements, null, 2));
-  fs.writeFileSync(OUTPUT_ROWS_FILE, JSON.stringify(finalRows, null, 2));
-  fs.writeFileSync(OUTPUT_SUMMARY_FILE, JSON.stringify(summary, null, 2));
+  try {
+    fs.writeFileSync(OUTPUT_ELEMENTS_FILE, JSON.stringify(allElements, null, 2));
+    fs.writeFileSync(OUTPUT_ROWS_FILE, JSON.stringify(finalRows, null, 2));
+    fs.writeFileSync(OUTPUT_SUMMARY_FILE, JSON.stringify(summary, null, 2));
+  } catch (err) {
+    console.error('❌ Failed to write output artifacts:', err.message || err);
+  }
 
   if (errors.length) {
-    fs.writeFileSync(OUTPUT_ERRORS_FILE, JSON.stringify(errors, null, 2));
-    console.log(`⚠️ Saved ${errors.length} error(s) → ${OUTPUT_ERRORS_FILE}`);
+    try {
+      fs.writeFileSync(OUTPUT_ERRORS_FILE, JSON.stringify(errors, null, 2));
+      console.log(`⚠️ Saved ${errors.length} error(s) → ${OUTPUT_ERRORS_FILE}`);
+    } catch (err) {
+      console.error('❌ Failed to write errors file:', err.message || err);
+    }
   }
 
   console.log(`✅ Saved ${allElements.length} elements → ${OUTPUT_ELEMENTS_FILE}`);
-  console.log(`✅ Saved ${finalRows.length} SOLD auctions → ${OUTPUT_ROWS_FILE}`);
+  console.log(`✅ Saved ${finalRows.length} parsed auctions → ${OUTPUT_ROWS_FILE}`);
   console.log(`📊 Saved summary → ${OUTPUT_SUMMARY_FILE}`);
   console.log('🏁 Done');
 })();
