@@ -19,8 +19,11 @@ jobs:
       - name: Run scraper
         run: node arcgisToCSV_stream.js
 
+      - name: List output files (debug)
+        run: ls -lah
+
       - name: Upload CSV artifact
         uses: actions/upload-artifact@v4
         with:
           name: parcels-csv
-          path: parcels.csv
+          path: parcels_*.csv
