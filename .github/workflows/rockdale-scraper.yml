@@ -1,0 +1,64 @@
+name: Rockdale GA Scraper
+
+on:
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      # -----------------------------
+      # Checkout repo
+      # -----------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------
+      # Setup Node
+      # -----------------------------
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # -----------------------------
+      # Install dependencies
+      # -----------------------------
+      - name: Install dependencies
+        run: npm install
+
+      # -----------------------------
+      # Install Google Chrome
+      # (required for Selenium)
+      # -----------------------------
+      - name: Install Google Chrome
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget gnupg
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+
+      # -----------------------------
+      # Write Google Service Account JSON
+      # -----------------------------
+      - name: Setup Google Credentials
+        run: echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
+
+      # -----------------------------
+      # Export environment variables
+      # -----------------------------
+      - name: Set environment variables
+        run: |
+          echo "SERVICE_ACCOUNT_JSON<<EOF" >> $GITHUB_ENV
+          cat service-account.json >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          echo "SHEET_ID=${{ secrets.SHEET_ID }}" >> $GITHUB_ENV
+
+      # -----------------------------
+      # Run scraper
+      # -----------------------------
+      - name: Run Rockdale scraper
+        run: node rockdaleGA.js
