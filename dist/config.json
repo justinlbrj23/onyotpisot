@@ -1,0 +1,115 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "_id": "Address-Search_People-Links",
+    "baseUrl": "https://www.peoplesearchnow.com",
+    "spreadsheetId": "19mkuw_zM_054b6zv6uHP98_ijASh-Jl3cYCDnim92I4",
+    "sheetName": "Citrus Springs",
+    "urlRange": "Citrus Springs!T2:T",
+    "startRow": 2,
+    "fastMode": true,
+    "maxPairs": 3,
+    "matchThreshold": 0.30,
+    "pageLoadSelector": "body",
+    "requestOptions": {
+      "fibDelays": { "max": 60000, "scale": 2 },
+      "incrementMs": 200,
+      "pageLoadTimeoutMs": 30000,
+      "cooldownEvery": 15,
+      "cooldownMs": 20000
+    },
+    "retryOptions": {
+      "maxTimeoutRetries": 3,
+      "rescueTimeout": 30000,
+      "retryDelayMs": { "min": 3000, "max": 30000 }
+    },
+    "errorPatterns": {
+      "noResults": [
+        "no results found",
+        "The page you're looking for cannot be found",
+        "no records",
+        "nothing here",
+        "could not find",
+        "page not found",
+        "404",
+        "yikes!",
+        "We could not find any",
+        "no results",
+        "include the city",
+        "Just a moment"
+      ],
+      "captcha": [
+        "captcha",
+        "recaptcha",
+        "turnstile",
+        "bot check",
+        "security check"
+      ],
+      "rateLimit": [
+        "exceeded the amount of requests allowed",
+        "too many requests",
+        "temporarily blocked",
+        "rate limit",
+        "access denied",
+        "try again later"
+      ]
+    },
+    "selectors": [
+      {
+        "id": "Site",
+        "selector": "span.breadcrumb-active",
+        "type": "SelectorHTML",
+        "multiple": false
+      },
+      {
+        "id": "results",
+        "parentSelectors": ["_root"],
+        "type": "SelectorElement",
+        "selector": "div[itemtype='https://schema.org/Person']",
+        "multiple": true,
+        "scroll": true
+      },
+      {
+        "id": "Names",
+        "parentSelectors": ["results"],
+        "type": "SelectorText",
+        "selector": "p[itemprop='name']",
+        "multiple": false
+      },
+      {
+        "id": "Hrefs",
+        "parentSelectors": ["results"],
+        "type": "SelectorElementAttribute",
+        "selector": "a.btn",
+        "extractAttribute": "href",
+        "multiple": true
+      }      
+    ],
+    "detailSelectors": [
+      {
+        "id": "Person-Contact-Tile",
+        "parentSelectors": ["_root"],
+        "type": "SelectorElement",
+        "selector": "div.clearfix.psn-results-container",
+        "multiple": false
+      },
+      {
+        "id": "Fullname",
+        "parentSelectors": ["Person-Contact-Tile"],
+        "type": "SelectorText",
+        "selector": "h1",
+        "multiple": false
+      },
+      {
+        "id": "Phone Number + Phone Type",
+        "parentSelectors": ["Person-Contact-Tile"],
+        "type": "SelectorText",
+        "selector": "span[itemprop='telephone'], div:nth-of-type(6) a",
+        "multiple": true
+      }
+    ],
+    "detailSheetName": "For REI Upload",
+    "writeOptions": {
+      "mode": "append",
+      "startRange": "For REI Upload!A2"
+    }
+  }

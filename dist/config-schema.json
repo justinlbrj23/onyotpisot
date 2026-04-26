@@ -1,0 +1,359 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "FastPeopleSearch Extension Config Schema",
+    "type": "object",
+    "additionalProperties": false,
+  
+    "properties": {
+      "$schema": {
+        "type": "string"
+      },
+      "_id": {
+        "type": "string"
+      },
+      "baseUrl": {
+        "type": "string",
+        "format": "uri"
+      },
+      "spreadsheetId": {
+        "type": "string"
+      },
+      "sheetName": {
+        "type": "string"
+      },
+      "urlRange": {
+        "type": "string"
+      },
+      "maxPairs": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "matchThreshold": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+      },
+      "pageLoadSelector": {
+        "type": "string"
+      },
+      "requestOptions": {
+        "$ref": "#/definitions/requestOptions"
+      },
+      "preCheck": {
+        "$ref": "#/definitions/preCheck"
+      },
+      "retryOptions": {
+        "$ref": "#/definitions/retryOptions"
+      },
+      "errorPatterns": {
+        "$ref": "#/definitions/errorPatterns"
+      },
+      "proxyRotationOnError": {
+        "type": "boolean"
+      },
+      "rotateProxyEvery": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "proxies": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "format": "uri"
+        }
+      },
+      "selectors": {
+        "type": "array",
+        "items": {
+          "$ref": "#/definitions/selector"
+        }
+      },
+      "detailSelectors": {
+        "type": "array",
+        "items": {
+          "$ref": "#/definitions/selector"
+        }
+      },
+      "detailSheetName": {
+        "type": "string"
+      },
+      "writeOptions": {
+        "$ref": "#/definitions/writeOptions"
+      },
+      "captchaOptions": {
+        "$ref": "#/definitions/captchaOptions"
+      },
+      "captureOptions": {
+        "$ref": "#/definitions/captureOptions"
+      }
+    },
+  
+    "required": [
+      "$schema",
+      "_id",
+      "baseUrl",
+      "spreadsheetId",
+      "sheetName",
+      "urlRange",
+      "maxPairs",
+      "matchThreshold",
+      "pageLoadSelector",
+      "requestOptions",
+      "preCheck",
+      "retryOptions",
+      "errorPatterns",
+      "proxyRotationOnError",
+      "rotateProxyEvery",
+      "proxies",
+      "selectors",
+      "detailSelectors",
+      "detailSheetName",
+      "writeOptions"
+    ],
+  
+    "definitions": {
+      "range": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "min": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "max": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": ["min", "max"]
+      },
+      "requestOptions": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "delayBetweenRequestsMs": {
+            "$ref": "#/definitions/range"
+          },
+          "pageLoadTimeoutMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "randomJitterFactor": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "cooldownEvery": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cooldownMs": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "delayBetweenRequestsMs",
+          "pageLoadTimeoutMs"
+        ]
+      },
+      "preCheck": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cooldownRangeMs": {
+            "$ref": "#/definitions/range"
+          }
+        },
+        "required": [
+          "timeoutMs",
+          "cooldownRangeMs"
+        ]
+      },
+      "retryBlock": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "maxRetries": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "initialDelayMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "factor": {
+            "type": "number",
+            "minimum": 0
+          },
+          "jitter": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "maxDelayMs": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "maxRetries",
+          "initialDelayMs",
+          "factor",
+          "jitter",
+          "maxDelayMs"
+        ]
+      },
+      "retryOptions": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "timeoutRetries": {
+            "$ref": "#/definitions/retryBlock"
+          },
+          "rateLimitRetries": {
+            "$ref": "#/definitions/retryBlock"
+          }
+        },
+        "required": [
+          "timeoutRetries",
+          "rateLimitRetries"
+        ]
+      },
+      "errorPatterns": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "noResults": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "captcha": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "rateLimit": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "noResults",
+          "captcha",
+          "rateLimit"
+        ]
+      },
+      "selector": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "SelectorHTML",
+              "SelectorText",
+              "SelectorElementAttribute"
+            ]
+          },
+          "multiple": {
+            "type": "boolean"
+          },
+          "extractAttribute": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "selector",
+          "type",
+          "multiple"
+        ]
+      },
+      "writeOptions": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "append",
+              "overwrite"
+            ]
+          },
+          "startRange": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "startRange"
+        ]
+      },
+      "captchaOptions": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "2captcha",
+              "turnstile",
+              "manual"
+            ]
+          },
+          "apiKey": {
+            "type": "string"
+          },
+          "maxConcurrentJobs": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "provider"
+        ]
+      },
+      "captureOptions": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "urlPatterns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "maxEntries": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "enabled"
+        ]
+      }
+    }
+  }

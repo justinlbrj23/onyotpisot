@@ -1,0 +1,63 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+  <title>OTMenT – Settings</title>
+  <style>
+    body { font-family: sans-serif; padding: 1rem; }
+    label { display: block; margin: 0.5rem 0; }
+    input, select { width: 100%; padding: 0.3rem; }
+    button { margin-top: 1rem; padding: 0.5rem 1rem; cursor: pointer; }
+    #status { margin-top: 0.5rem; font-weight: bold; transition: opacity 0.5s; }
+  </style>
+</head>
+<body>
+  <h1>OTMenT – Settings</h1>
+
+  <label>
+    2Captcha API Key:
+    <input type="text" id="apiKey" placeholder="Enter your API key">
+  </label>
+
+  <label>
+    API Mode:
+    <select id="apiMode">
+      <option value="json">JSON API (createTask/getTaskResult)</option>
+      <option value="legacy">Legacy API (in.php/res.php)</option>
+    </select>
+  </label>
+
+  <hr>
+
+  <label>
+    Google Sheet ID:
+    <input type="text" id="sheetId" placeholder="Enter Spreadsheet ID">
+  </label>
+
+  <label>
+    Sheet Name:
+    <input type="text" id="sheetName" placeholder="Sheet name (e.g., Reprocessing)">
+  </label>
+
+  <label>
+    URL Range:
+    <input type="text" id="urlRange" placeholder="Range (e.g., Reprocessing!S2:S)">
+  </label>
+
+  <label>
+    Start Row:
+    <input type="number" id="startRow" min="1" placeholder="2">
+  </label>
+
+  <hr>
+
+  <button id="save">💾 Save</button>
+  <button id="reset">♻️ Reset Scraper</button>
+  <button id="update">🔄 Reload Extension</button>
+  <button id="toggle">⏻ Toggle On/Off</button>
+
+  <div id="status"></div>
+
+  <script src="options.js"></script>
+</body>
+</html>

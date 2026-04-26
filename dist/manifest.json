@@ -1,0 +1,67 @@
+{
+  "manifest_version": 3,
+  "name": "OTMenT v3 — People Search Navigator",
+  "version": "5.6",
+  "description": "Config-driven scraper with Sheets integration, captcha detection, and dynamic orchestration.",
+
+  "permissions": [
+    "storage",
+    "tabs",
+    "cookies",
+    "activeTab",
+    "alarms",
+    "scripting"
+  ],
+
+  "host_permissions": [
+    "https://www.peoplesearchnow.com/*",
+    "https://*.challenges.cloudflare.com/*",
+    "https://*.cloudflare.com/*",
+    "https://2captcha.com/*",
+    "https://api.2captcha.com/*",
+    "https://sheets.googleapis.com/*",
+    "https://oauth2.googleapis.com/*"
+  ],
+
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+
+  "options_page": "options.html",
+
+  "action": {
+    "default_title": "OTMenT Navigator"
+  },
+
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.peoplesearchnow.com/details/*",
+        "https://www.peoplesearchnow.com/address*",
+        "https://www.peoplesearchnow.com/find/person/*",
+        "https://www.peoplesearchnow.com/name/*",
+        "https://www.peoplesearchnow.com/*"
+      ],
+      "js": [
+        "jquery-3.7.1.min.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "config.json",
+        "service-account.json"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ],
+
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}
