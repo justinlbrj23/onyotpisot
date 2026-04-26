@@ -1,12 +1,12 @@
 // arcgisToCSV_stream.js
-const fs = require("fs");
+import fs from "fs";
 
 const BASE_URL =
   "https://services.arcgis.com/Tbke9ca9DhtF4VIx/arcgis/rest/services/Parcel_Polygons_working/FeatureServer/0/query";
 
 const MAX_RECORDS = 2000;
 
-// ---- ENV INPUTS (from GitHub Actions) ----
+// ---- ENV INPUTS ----
 const WHERE = process.env.WHERE || "1=1";
 const OUT_FIELDS = process.env.OUT_FIELDS || "*";
 const OUTPUT_FILE =
@@ -72,7 +72,6 @@ async function main() {
         writeStream.write(headers.join(",") + "\n");
       }
 
-      // Write rows immediately
       for (const row of records) {
         const line = headers
           .map(h => escapeCSV(row[h]))
@@ -82,7 +81,6 @@ async function main() {
         totalRows++;
       }
 
-      // Stop if last page
       if (batch.length < MAX_RECORDS) break;
 
       offset += MAX_RECORDS;
@@ -93,7 +91,6 @@ async function main() {
     console.log(`✅ Done.`);
     console.log(`File: ${OUTPUT_FILE}`);
     console.log(`Rows: ${totalRows}`);
-    console.log(`WHERE: ${WHERE}`);
   } catch (err) {
     console.error("❌ Error:", err);
     writeStream.end();
