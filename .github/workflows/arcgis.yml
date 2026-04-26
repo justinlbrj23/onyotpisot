@@ -1,0 +1,26 @@
+name: ArcGIS CSV Scraper (Manual)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run scraper
+        run: node arcgisToCSV_stream.js
+
+      - name: Upload CSV artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: parcels-csv
+          path: parcels.csv
