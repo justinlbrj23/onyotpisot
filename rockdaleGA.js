@@ -22,6 +22,10 @@ const CHROME_PATH = process.env.CHROME_PATH || null;
 // GOOGLE SHEETS AUTH
 // -----------------------------
 async function getSheetsClient() {
+  if (!process.env.SERVICE_ACCOUNT_JSON) {
+    throw new Error('❌ SERVICE_ACCOUNT_JSON is missing');
+  }
+
   const auth = new google.auth.GoogleAuth({
     credentials: JSON.parse(process.env.SERVICE_ACCOUNT_JSON),
     scopes: ['https://www.googleapis.com/auth/spreadsheets'],
@@ -114,14 +118,11 @@ async function getTextSafe(driver, locator, timeout = ELEMENT_TIMEOUT_MS) {
 // MODAL HANDLER
 // -----------------------------
 async function dismissModalIfPresent(driver) {
-  const modal = By.css('#appBody > div.modal.in > div > div');
-  const btn = By.css(
-    '#appBody > div.modal.in > div > div > div.modal-focus-target > div.modal-footer > a.btn.btn-primary.button-1'
-  );
+  const modal = By.css('#appBody > div.modal.in');
+  const btn = By.css('#appBody a.btn.btn-primary.button-1');
 
   try {
-    const isModal = await exists(driver, modal, 5000);
-    if (isModal) {
+    if (await exists(driver, modal, 5000)) {
       console.log('[Modal] Detected popup, dismissing...');
       const button = await driver.findElement(btn);
       await driver.executeScript('arguments[0].click();', button);
@@ -136,13 +137,15 @@ async function dismissModalIfPresent(driver) {
 // MAIN SCRAPER FLOW
 // -----------------------------
 async function run() {
+  if (!SHEET_ID) {
+    throw new Error('❌ SHEET_ID is missing');
+  }
+
   const sheets = await getSheetsClient();
   const driver = await launchDriver();
 
   try {
-    // -----------------------------
-    // FETCH GOOGLE SHEETS DATA
-    // -----------------------------
+    // FETCH DATA
     const input = await sheets.spreadsheets.values.get({
       spreadsheetId: SHEET_ID,
       range: RANGE_INPUT,
@@ -174,6 +177,7 @@ async function run() {
         'https://qpublic.schneidercorp.com/Application.aspx?AppID=694&LayerID=11394&PageTypeID=2&PageID=4832'
       );
 
+      await driver.wait(until.elementLocated(By.css('body')), 10000);
       await dismissModalIfPresent(driver);
 
       // INPUT SEARCH
@@ -185,7 +189,10 @@ async function run() {
       await inputBox.clear();
       await inputBox.sendKeys(x, Key.RETURN);
 
-      // WAIT FOR RESULT PAGE
+      // small buffer (important for Schneider)
+      await driver.sleep(1500);
+
+      // RESULT CHECK
       let hasResults = false;
 
       try {
@@ -196,12 +203,10 @@ async function run() {
           15000
         );
         hasResults = true;
-      } catch {
-        hasResults = false;
-      }
+      } catch {}
 
       if (!hasResults) {
-        console.log(`[Row ${i + 2}] No results found`);
+        console.log(`[Row ${i + 2}] No results`);
         outputOwner.push(['']);
         outputDate.push(['']);
         outputSize.push(['']);
@@ -209,7 +214,7 @@ async function run() {
         continue;
       }
 
-      // SCRAPE DATA
+      // SCRAPE
       const owner = await getTextSafe(
         driver,
         By.css('#ctlBodyPane_ctl02_ctl01_lnkOwnerName_lnkSearch')
@@ -269,7 +274,7 @@ async function run() {
 
     console.log('✅ DONE');
   } catch (err) {
-    console.error(err);
+    console.error('❌ ERROR:', err);
   } finally {
     await driver.quit();
   }
