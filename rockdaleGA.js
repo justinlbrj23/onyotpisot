@@ -7,11 +7,11 @@ import { google } from 'googleapis';
 // CONFIG
 // -----------------------------
 const SHEET_ID = process.env.SHEET_ID;
-const RANGE_INPUT = 'Sheet1!AG2:AI';
-const RANGE_OUTPUT_OWNER = 'Sheet1!CM2:CM';
-const RANGE_OUTPUT_DATE = 'Sheet1!CN2:CN';
-const RANGE_OUTPUT_SIZE = 'Sheet1!CO2:CO';
-const RANGE_OUTPUT_ROAD = 'Sheet1!CP2:CP';
+const RANGE_INPUT = "'Filter 1'!AG2:AI";
+const RANGE_OUTPUT_OWNER = "'Filter 1'!CM2:CM";
+const RANGE_OUTPUT_DATE = "'Filter 1'!CN2:CN";
+const RANGE_OUTPUT_SIZE = "'Filter 1'!CO2:CO";
+const RANGE_OUTPUT_ROAD = "'Filter 1'!CP2:CP";
 
 const PAGE_LOAD_TIMEOUT_MS = 60000;
 const ELEMENT_TIMEOUT_MS = 20000;
