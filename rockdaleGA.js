@@ -1,7 +1,7 @@
-const fs = require('fs');
-const { Builder, By, Key, until } = require('selenium-webdriver');
-const chrome = require('selenium-webdriver/chrome');
-const { google } = require('googleapis');
+import fs from 'fs';
+import { Builder, By, Key, until } from 'selenium-webdriver';
+import chrome from 'selenium-webdriver/chrome.js';
+import { google } from 'googleapis';
 
 // -----------------------------
 // CONFIG
@@ -31,7 +31,7 @@ async function getSheetsClient() {
 }
 
 // -----------------------------
-// Selenium launcher (your version adapted)
+// Selenium launcher
 // -----------------------------
 async function launchDriver() {
   console.log('[Browser] Launching Chrome driver, headless:', HEADLESS);
@@ -89,7 +89,7 @@ async function launchDriver() {
 }
 
 // -----------------------------
-// DOM helpers (your version)
+// DOM helpers
 // -----------------------------
 async function exists(driver, locator, timeout = ELEMENT_TIMEOUT_MS) {
   try {
@@ -111,7 +111,7 @@ async function getTextSafe(driver, locator, timeout = ELEMENT_TIMEOUT_MS) {
 }
 
 // -----------------------------
-// MODAL HANDLER (IMPORTANT)
+// MODAL HANDLER
 // -----------------------------
 async function dismissModalIfPresent(driver) {
   const modal = By.css('#appBody > div.modal.in > div > div');
@@ -127,7 +127,7 @@ async function dismissModalIfPresent(driver) {
       await driver.executeScript('arguments[0].click();', button);
       await driver.sleep(1500);
     }
-  } catch (e) {
+  } catch {
     console.log('[Modal] No modal or already dismissed');
   }
 }
@@ -157,7 +157,6 @@ async function run() {
 
     for (let i = 0; i < rows.length; i++) {
       const [ag = '', ah = '', ai = ''] = rows[i];
-
       const x = `${ag} ${ah} ${ai}`.trim();
 
       if (!x) {
@@ -170,18 +169,14 @@ async function run() {
 
       console.log(`[Row ${i + 2}] Searching: ${x}`);
 
-      // -----------------------------
       // NAVIGATE
-      // -----------------------------
       await driver.get(
         'https://qpublic.schneidercorp.com/Application.aspx?AppID=694&LayerID=11394&PageTypeID=2&PageID=4832'
       );
 
       await dismissModalIfPresent(driver);
 
-      // -----------------------------
       // INPUT SEARCH
-      // -----------------------------
       const inputBox = await driver.wait(
         until.elementLocated(By.css('#ctlBodyPane_ctl01_ctl01_txtAddress')),
         ELEMENT_TIMEOUT_MS
@@ -190,17 +185,13 @@ async function run() {
       await inputBox.clear();
       await inputBox.sendKeys(x, Key.RETURN);
 
-      // -----------------------------
-      // WAIT FOR RESULT PAGE OR FAIL
-      // -----------------------------
+      // WAIT FOR RESULT PAGE
       let hasResults = false;
 
       try {
         await driver.wait(
           until.elementLocated(
-            By.css(
-              '#Form1 > div.container.page-container > div > div.col-md-10.page-center-pane'
-            )
+            By.css('#Form1 > div.container.page-container > div > div.col-md-10.page-center-pane')
           ),
           15000
         );
@@ -218,9 +209,7 @@ async function run() {
         continue;
       }
 
-      // -----------------------------
       // SCRAPE DATA
-      // -----------------------------
       const owner = await getTextSafe(
         driver,
         By.css('#ctlBodyPane_ctl02_ctl01_lnkOwnerName_lnkSearch')
@@ -249,9 +238,7 @@ async function run() {
       console.log(`[Row ${i + 2}] Done`);
     }
 
-    // -----------------------------
-    // WRITE BACK TO SHEETS
-    // -----------------------------
+    // WRITE BACK
     await sheets.spreadsheets.values.update({
       spreadsheetId: SHEET_ID,
       range: RANGE_OUTPUT_OWNER,
