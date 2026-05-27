@@ -1012,238 +1012,353 @@ async function processUrlsWithPool(urls, concurrencyLimit = 5) {
 }
 
 // ================================================
-// === OTMenT v3 — runNavigator (Fibonacci + Cookies, Cross-Browser Safe, Multi-Match)
+// === OTMenT v3 — Navigator Core (Stable v4)
 // ================================================
+
 async function runNavigator() {
   const cfg = await loadConfig();
-  const urls = await getTargetURLs(cfg);
+  const entries = await getTargetURLs(cfg);
 
-  if (urls.length === 0) {
+  if (!entries.length) {
     console.warn("[OTMenT] No URLs to process — aborting.");
     return;
   }
 
-  // Initialize Fibonacci system if not already
   if (!fibDelayPool) initFibDelayPool();
 
-  console.log(`[OTMenT] Starting matchmaking loop (${urls.length} URLs)...`);
+  console.log(`[OTMenT] Processing ${entries.length} URL(s)...`);
 
-  // ============================================
-  // === Normalize Configs ===
-  // ============================================
-  const { rateLimit = {}, retryOptions = {}, requestOptions = {} } = cfg;
+  const tabsApi =
+    typeof browser !== "undefined"
+      ? browser.tabs
+      : chrome.tabs;
 
-  const cooldownEvery = rateLimit.cooldownEvery ?? requestOptions.cooldownEvery ?? 10;
-  const cooldownMs = rateLimit.cooldownMs ?? requestOptions.cooldownMs ?? 30000;
+  for (const [index, entry] of entries.entries()) {
+    let tabId = null;
 
-  const retryDelayCfg = retryOptions.retryDelayMs ?? { min: 3000, max: 30000 };
-  const maxTimeoutRetries = retryOptions.maxTimeoutRetries ?? 2;
-
-  const tabsApi = typeof browser !== "undefined" ? browser.tabs : chrome.tabs;
-
-  // ============================================
-  // === Main Processing Loop ===
-  // ============================================
-  for (let [i, entry] of urls.entries()) {
-    console.log(`[OTMenT] [${i + 1}/${urls.length}] Preparing row ${entry.row}: ${entry.url}`);
-
-    const tab = await createTabFirefoxSafe(entry.url);
-    const tabId = tab.id;
+    console.log(
+      `[OTMenT] [${index + 1}/${entries.length}] Row ${entry.row}`
+    );
 
     try {
-      // --- Wait for extraction (use options object)
-      const result = await waitForExtraction(tabId, { timeout: 60000 });
-      const extracted = result.data || {};
-      console.log("[OTMenT] Extracted (from page):", extracted);
+      // ===================================================
+      // CREATE TAB
+      // ===================================================
+      const tab = await createTabFirefoxSafe(entry.url);
+      tabId = tab.id;
 
-      if (entry.url.includes("address")) {
-        // ==================================================
-        // Result page: Names + Hrefs
-        // ==================================================
-        const names = Array.isArray(extracted.Names) ? extracted.Names : [];
-        const rawHrefs = Array.isArray(extracted.Hrefs) ? extracted.Hrefs : [];
-        const hrefs = rawHrefs
-          .map(h => (h && h.startsWith("http") ? h : h ? `https://www.peoplesearchnow.com/${h}` : null))
-          .filter(Boolean);
+      // ===================================================
+      // WAIT FOR EXTRACTION
+      // ===================================================
+      const extraction = await waitForExtraction(tabId, {
+        timeout: cfg.requestOptions?.pageLoadTimeoutMs || 30000,
+      });
 
-        const pairs = [];
-        const len = Math.min(names.length, hrefs.length);
-        for (let idx = 0; idx < len; idx++) pairs.push({ name: names[idx], href: hrefs[idx] });
-        if (names.length > hrefs.length)
-          for (let idx = hrefs.length; idx < names.length; idx++) pairs.push({ name: names[idx], href: null });
-        if (hrefs.length > names.length)
-          for (let idx = names.length; idx < hrefs.length; idx++) pairs.push({ name: null, href: hrefs[idx] });
-
-        if (!pairs.length) {
-          console.warn("[OTMenT] No candidate pairs found on result page.");
-          await writeResult(entry.row, "NO DATA");
-        } else {
-          const resultFollowThreshold = Math.max(0.30, (cfg.matchThreshold || 0.50) * 0.6);
-          let matches = [];
-
-          for (const { name, href } of pairs) {
-            for (const ref of entry.refs) {
-              if (!ref || !name) continue;
-              const { score, explanation } = matchScoreWithExplanation(name, ref);
-              console.log(`[OTMenT] Candidate: "${name}" vs "${ref}" → ${score.toFixed(2)} (${explanation})`);
-              if (href && score >= resultFollowThreshold) {
-                matches.push({ ref, name, href, score, explanation });
-              }
-            }
-          }
-
-          if (!matches.length) {
-            console.warn("[OTMenT] No matches above threshold for row", entry.row);
-            await writeResult(entry.row, "NO MATCHES");
-          } else {
-            // ==================================================
-            // Navigate + log for each match
-            // ==================================================
-            for (const m of matches) {
-              console.log(`[OTMenT] Navigating for "${m.ref}" → "${m.name}" (${m.score.toFixed(2)})`);
-
-              // Cross-browser safe navigation
-              if (typeof chrome !== "undefined" && chrome.scripting) {
-                await chrome.scripting.executeScript({
-                  target: { tabId },
-                  func: (url) => { window.location.href = url; },
-                  args: [m.href],
-                });
-              } else if (tabsApi && tabsApi.executeScript) {
-                await tabsApi.executeScript(tabId, { code: `window.location.href = "${m.href}"` });
-              }
-
-              // --- Try detail extraction with retries
-              let detailResult;
-              for (let attempt = 1; attempt <= maxTimeoutRetries; attempt++) {
-                try {
-                  detailResult = await waitForExtraction(tabId, { timeout: 30000 });
-                  if (detailResult?.data) break;
-                } catch (err) {
-                  console.warn(`[OTMenT] Detail extraction attempt ${attempt} failed: ${err.message}`);
-                }
-
-                if (attempt < maxTimeoutRetries) {
-                  const fibRetryDelay = getFibDelay();
-                  console.log(`[OTMenT] Retrying after Fibonacci delay (${attempt}): ${fibRetryDelay}ms...`);
-
-                  await sleep(fibRetryDelay);
-                  await injectScript(tabId, "content.js");
-                }
-              }
-
-              const detailTiles = Array.isArray(detailResult?.data)
-                ? detailResult.data
-                : detailResult?.data
-                ? [detailResult.data]
-                : [];
-
-              console.log("[OTMenT] Detail extracted (from content.js):", detailTiles);
-
-              if (!detailTiles.length) {
-                console.warn("[OTMenT] No person tiles found on detail page");
-                await writeResult(entry.row, "NO DATA");
-              } else {
-                let detailMatches = [];
-                for (const tile of detailTiles) {
-                  for (const ref of entry.refs) {
-                    if (!ref || !tile?.Fullname || typeof tile.Fullname !== "string") continue;
-                    const { score, explanation } = matchScoreWithExplanation(tile.Fullname, ref);
-                    if (score >= resultFollowThreshold) {
-                      detailMatches.push({ score, ref, detailData: tile, explanation });
-                    }
-                  }
-                }
-
-                if (detailMatches.length) {
-                  const detailDataArray = detailMatches.map(m => m.detailData);
-                  await logToSheet(detailDataArray, entry.row, cfg, entry.siteVal);
-
-                  for (const dm of detailMatches) {
-                    const phones = dm.detailData["Phone Number + Phone Type"];
-                    console.log(`[OTMenT] Detail match: "${dm.detailData.Fullname}" vs "${dm.ref}" → ${dm.score.toFixed(2)}`);
-                    console.log(`[OTMenT] Why: ${dm.explanation}`);
-                    await writeResult(
-                      entry.row,
-                      `MATCH (${dm.score.toFixed(2)}) — ${dm.detailData.Fullname || ""}${phones?.length ? ` | Phones: ${phones.join(", ")}` : ""}`
-                    );
-                  }
-                } else {
-                  console.warn("[OTMenT] No valid matches found on detail page");
-                  await writeResult(entry.row, "NO MATCHES (detail)");
-                }
-              }
-
-              // Optional pacing between matches
-              await fibSleep();
-            }
-          }
-        }
-      } else if (entry.url.includes("//name/")) {
-        // ==================================================
-        // Direct detail page
-        // ==================================================
-        const detailTiles = Array.isArray(extracted) ? extracted : [extracted];
-        let detailMatches = [];
-
-        for (const tile of detailTiles) {
-          for (const ref of entry.refs) {
-            if (!ref || !tile?.Fullname || typeof tile.Fullname !== "string") continue;
-            const { score, explanation } = matchScoreWithExplanation(tile.Fullname, ref);
-            if (score >= (cfg.matchThreshold || 0.50) * 0.6) {
-              detailMatches.push({ score, ref, detailData: tile, explanation });
-            }
-          }
-        }
-
-        if (detailMatches.length) {
-          const detailDataArray = detailMatches.map(m => m.detailData);
-          await logToSheet(detailDataArray, entry.row, cfg, entry.siteVal);
-
-          for (const dm of detailMatches) {
-            const phones = dm.detailData["Phone Number + Phone Type"];
-            console.log(`[OTMenT] Detail match: "${dm.detailData.Fullname}" vs "${dm.ref}" → ${dm.score.toFixed(2)}`);
-            console.log(`[OTMenT] Why: ${dm.explanation}`);
-            await writeResult(
-              entry.row,
-              `MATCH (${dm.score.toFixed(2)}) — ${dm.detailData.Fullname || ""}${phones?.length ? ` | Phones: ${phones.join(", ")}` : ""}`
-            );
-          }
-        } else {
-          console.warn("[OTMenT] No valid matches found on detail page");
-          await writeResult(entry.row, "NO MATCHES (detail)");
-        }
-      } else {
-        console.warn("[OTMenT] Unknown page type, skipping.");
-        await writeResult(entry.row, "SKIPPED (unknown page type)");
+      if (!extraction?.success) {
+        throw new Error("Extraction failed");
       }
 
-      // --- Cooldown (handled by getDelay)
-      const cooldownDelay = getDelay();
-      console.log(`[OTMenT] Cooldown sleeping: ${cooldownDelay}ms`);
-      await sleep(cooldownDelay);
+      const extracted = extraction.data || {};
+
+      // ===================================================
+      // RESULT PAGE FLOW
+      // ===================================================
+      if (entry.url.includes("/address/")) {
+
+        const names = Array.isArray(extracted.Names)
+          ? extracted.Names
+          : [];
+
+        const hrefs = normalizeHrefs(
+          extracted.Hrefs || [],
+          cfg.baseUrl
+        );
+
+        console.log("[OTMenT] Result candidates:", {
+          names: names.length,
+          hrefs: hrefs.length,
+        });
+
+        if (!names.length || !hrefs.length) {
+          await writeResult(entry.row, "NO RESULTS");
+          continue;
+        }
+
+        // ===============================================
+        // BUILD MATCHES
+        // ===============================================
+        const matches = [];
+
+        const maxLen = Math.min(names.length, hrefs.length);
+
+        for (let i = 0; i < maxLen; i++) {
+          const candidateName = names[i];
+          const href = hrefs[i];
+
+          if (!candidateName || !href) continue;
+
+          for (const ref of entry.refs) {
+            if (!ref) continue;
+
+            const result = matchScoreWithExplanation(
+              candidateName,
+              ref
+            );
+
+            console.log(
+              `[OTMenT] "${candidateName}" vs "${ref}" = ${result.score.toFixed(2)}`
+            );
+
+            if (
+              result.score >=
+              ((cfg.matchThreshold || 0.4) * 0.6)
+            ) {
+              matches.push({
+                href,
+                ref,
+                candidateName,
+                score: result.score,
+              });
+            }
+          }
+        }
+
+        // ===============================================
+        // NO MATCHES
+        // ===============================================
+        if (!matches.length) {
+          await writeResult(entry.row, "NO MATCHES");
+          continue;
+        }
+
+        // ===============================================
+        // FOLLOW MATCHES
+        // ===============================================
+        for (const match of matches) {
+
+          console.log(
+            `[OTMenT] Following match: ${match.candidateName}`
+          );
+
+          await tabsApi.update(tabId, {
+            url: match.href,
+          });
+
+          await sleep(3000);
+
+          // reinject content script
+          await injectScript(tabId, "content.js");
+
+          const detailResult = await waitForExtraction(tabId, {
+            timeout: 30000,
+          });
+
+          const detailTiles = Array.isArray(detailResult?.data)
+            ? detailResult.data
+            : detailResult?.data
+            ? [detailResult.data]
+            : [];
+
+          if (!detailTiles.length) {
+            console.warn("[OTMenT] No detail tiles");
+            continue;
+          }
+
+          // ===========================================
+          // DETAIL MATCHING
+          // ===========================================
+          const validMatches = [];
+
+          for (const tile of detailTiles) {
+            for (const ref of entry.refs) {
+
+              if (!ref || !tile?.Fullname) continue;
+
+              const result = matchScoreWithExplanation(
+                tile.Fullname,
+                ref
+              );
+
+              if (
+                result.score >=
+                ((cfg.matchThreshold || 0.4) * 0.6)
+              ) {
+                validMatches.push(tile);
+
+                console.log(
+                  `[OTMenT] Detail match: ${tile.Fullname}`
+                );
+              }
+            }
+          }
+
+          // dedupe
+          const deduped = [];
+          const seen = new Set();
+
+          for (const item of validMatches) {
+            const key = JSON.stringify(item);
+
+            if (!seen.has(key)) {
+              seen.add(key);
+              deduped.push(item);
+            }
+          }
+
+          if (deduped.length) {
+            await logToSheet(
+              deduped,
+              entry.row,
+              cfg,
+              entry.siteVal
+            );
+
+            await writeResult(
+              entry.row,
+              `MATCHED (${deduped.length})`
+            );
+          } else {
+            await writeResult(
+              entry.row,
+              "NO DETAIL MATCH"
+            );
+          }
+
+          await fibSleep();
+        }
+      }
+
+      // ===================================================
+      // DIRECT DETAIL PAGE
+      // ===================================================
+      else if (entry.url.includes("/name/")) {
+
+        const detailTiles = Array.isArray(extracted)
+          ? extracted
+          : [extracted];
+
+        const validMatches = [];
+
+        for (const tile of detailTiles) {
+
+          if (!tile?.Fullname) continue;
+
+          for (const ref of entry.refs) {
+
+            if (!ref) continue;
+
+            const result = matchScoreWithExplanation(
+              tile.Fullname,
+              ref
+            );
+
+            if (
+              result.score >=
+              ((cfg.matchThreshold || 0.4) * 0.6)
+            ) {
+              validMatches.push(tile);
+
+              console.log(
+                `[OTMenT] Direct detail match: ${tile.Fullname}`
+              );
+            }
+          }
+        }
+
+        // dedupe
+        const deduped = [];
+        const seen = new Set();
+
+        for (const item of validMatches) {
+          const key = JSON.stringify(item);
+
+          if (!seen.has(key)) {
+            seen.add(key);
+            deduped.push(item);
+          }
+        }
+
+        if (deduped.length) {
+
+          await logToSheet(
+            deduped,
+            entry.row,
+            cfg,
+            entry.siteVal
+          );
+
+          await writeResult(
+            entry.row,
+            `MATCHED (${deduped.length})`
+          );
+
+        } else {
+
+          await writeResult(
+            entry.row,
+            "NO DETAIL MATCH"
+          );
+        }
+      }
+
+      // ===================================================
+      // UNKNOWN
+      // ===================================================
+      else {
+
+        console.warn(
+          "[OTMenT] Unknown URL type:",
+          entry.url
+        );
+
+        await writeResult(
+          entry.row,
+          "UNKNOWN PAGE TYPE"
+        );
+      }
+
+      // ===================================================
+      // COOLDOWN
+      // ===================================================
+      const delay = getDelay();
+
+      console.log(
+        `[OTMenT] Sleeping ${delay}ms`
+      );
+
+      await sleep(delay);
 
     } catch (err) {
-      console.warn(`[OTMenT] Error on ${entry.url}:`, err.message);
-      console.error("[OTMenT] Error stack:", err);
-      await writeResult(entry.row, `ERROR: ${err.message}`);
+
+      console.error(
+        `[OTMenT] Fatal row error (${entry.row}):`,
+        err
+      );
+
+      await writeResult(
+        entry.row,
+        `ERROR: ${err.message}`
+      );
+
     } finally {
-      // --- Always apply a fib delay between runs
-      const fibDelay = getFibDelay();
-      console.log(`[OTMenT] Sleeping (Fibonacci-based): ${fibDelay}ms`);
-      await sleep(fibDelay);
 
       if (tabId) {
         try {
           await tabsApi.remove(tabId);
-        } catch (e) {
-          console.warn("[OTMenT] Failed to close tab:", e);
-        }
+        } catch (_) {}
       }
+
+      const fibDelay = getFibDelay();
+
+      console.log(
+        `[OTMenT] Fibonacci sleep: ${fibDelay}ms`
+      );
+
+      await sleep(fibDelay);
     }
   }
 
-  console.log("[OTMenT] Matchmaking process complete.");
+  console.log("[OTMenT] Navigator complete.");
 }
 
 // ===================================================
