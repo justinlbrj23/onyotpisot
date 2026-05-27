@@ -1,0 +1,71 @@
+name: Corporate Tracer
+
+on:
+  workflow_dispatch:
+
+jobs:
+  corpTracer:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ==========================================
+      # CHECKOUT REPOSITORY
+      # ==========================================
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # ==========================================
+      # SETUP NODE
+      # ==========================================
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
+
+      # ==========================================
+      # INSTALL DEPENDENCIES
+      # ==========================================
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      # ==========================================
+      # WRITE GOOGLE SERVICE ACCOUNT JSON
+      # ==========================================
+      - name: Write Service Account JSON
+        run: |
+          echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
+
+      # ==========================================
+      # VALIDATE JSON
+      # ==========================================
+      - name: Validate Service Account JSON
+        run: |
+          python3 <<EOF
+          import json
+
+          with open("service-account.json", "r", encoding="utf-8") as f:
+              j = json.load(f)
+
+          required = ["private_key", "client_email", "project_id"]
+
+          for key in required:
+              if key not in j:
+                  raise Exception(f"Missing required field: {key}")
+
+          print("====================================")
+          print("Google Service Account Loaded OK")
+          print("Client Email:", j["client_email"])
+          print("Project ID:", j["project_id"])
+          print("====================================")
+          EOF
+
+      # ==========================================
+      # RUN SCRAPER
+      # ==========================================
+      - name: Run corpTracr scraper
+        run: node corpTracr.js
