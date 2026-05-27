@@ -9,85 +9,85 @@ jobs:
 
     steps:
 
-      # ==================================================
+      # ==========================================
       # CHECKOUT REPOSITORY
-      # ==================================================
+      # ==========================================
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # ==================================================
+      # ==========================================
       # SETUP PYTHON
-      # ==================================================
+      # ==========================================
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # ==================================================
-      # INSTALL PYTHON DEPENDENCIES
-      # ==================================================
+      # ==========================================
+      # INSTALL DEPENDENCIES
+      # ==========================================
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pandas gspread google-auth
 
-      # ==================================================
+      # ==========================================
       # WRITE GOOGLE SERVICE ACCOUNT JSON
-      # ==================================================
+      # ==========================================
       - name: Write Service Account JSON
         run: |
           echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
 
-      # ==================================================
-      # VALIDATE GOOGLE SERVICE ACCOUNT JSON
-      # ==================================================
+      # ==========================================
+      # VALIDATE JSON
+      # ==========================================
       - name: Validate Service Account JSON
         run: |
-          python -c "
-import json
+          python <<EOF
+          import json
 
-with open('service-account.json', 'r', encoding='utf-8') as f:
-    j = json.load(f)
+          with open("service-account.json", "r", encoding="utf-8") as f:
+              j = json.load(f)
 
-required = ['private_key', 'client_email', 'project_id']
+          required = ["private_key", "client_email", "project_id"]
 
-for key in required:
-    if key not in j:
-        raise Exception(f'Missing required field: {key}')
+          for key in required:
+              if key not in j:
+                  raise Exception(f"Missing required field: {key}")
 
-print('====================================')
-print('Google Service Account Loaded OK')
-print('Client Email:', j['client_email'])
-print('Project ID:', j['project_id'])
-print('====================================')
-"
+          print("====================================")
+          print("Google Service Account Loaded OK")
+          print("Client Email:", j["client_email"])
+          print("Project ID:", j["project_id"])
+          print("====================================")
+          EOF
 
-      # ==================================================
-      # VERIFY TARGET SCRIPT EXISTS
-      # ==================================================
+      # ==========================================
+      # VERIFY SCRIPT EXISTS
+      # ==========================================
       - name: Verify Python Script
         run: |
           ls -la
           test -f GHL-lead-mgr.py
 
-      # ==================================================
-      # RUN PROCESSOR
-      # ==================================================
+      # ==========================================
+      # RUN PYTHON SCRIPT
+      # ==========================================
       - name: Run Python Script
         run: |
           python GHL-lead-mgr.py
 
-      # ==================================================
-      # VERIFY OUTPUT FILE EXISTS
-      # ==================================================
+      # ==========================================
+      # VERIFY OUTPUT FILE
+      # ==========================================
       - name: Verify Output CSV
         run: |
           ls -la
           test -f processed_output.csv
 
-      # ==================================================
-      # UPLOAD CSV ARTIFACT
-      # ==================================================
+      # ==========================================
+      # UPLOAD ARTIFACT
+      # ==========================================
       - name: Upload Processed CSV
         uses: actions/upload-artifact@v4
         with:
