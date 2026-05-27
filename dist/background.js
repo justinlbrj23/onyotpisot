@@ -430,7 +430,7 @@ async function getTargetURLs(cfg, resumeRow = null, processedUrls = new Set()) {
   const token = await getServiceAccountToken();
 
   // ===========================================================
-  // FETCH URL COLUMN (S2:S)
+  // FETCH URL COLUMN (T2:T)
   // ===========================================================
   const urlRes = await fetch(
     `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(urlRange)}?majorDimension=ROWS`,
@@ -443,7 +443,7 @@ async function getTargetURLs(cfg, resumeRow = null, processedUrls = new Set()) {
   // ===========================================================
   // FETCH F–L (7 columns)
   // ===========================================================
-  const refRange = `${sheetName}!E${startRow}:K${endRow}`;
+  const refRange = `${sheetName}!F${startRow}:L${endRow}`;
   const refRes = await fetch(
     `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(refRange)}?majorDimension=ROWS`,
     { headers: { Authorization: `Bearer ${token}` } }
@@ -461,9 +461,9 @@ async function getTargetURLs(cfg, resumeRow = null, processedUrls = new Set()) {
   const { values: siteVals = [] } = await siteRes.json();
 
   // ===========================================================
-  // FETCH LOG COLUMN (T)
+  // FETCH LOG COLUMN (U)
   // ===========================================================
-  const logRange = `${sheetName}!T${startRow}:T${endRow}`;
+  const logRange = `${sheetName}!U${startRow}:U${endRow}`;
   const logRes = await fetch(
     `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(logRange)}?majorDimension=ROWS`,
     { headers: { Authorization: `Bearer ${token}` } }
@@ -743,7 +743,7 @@ function normalizeAndSort(s) {
 async function writeResult(row, resultText) {
   const token = await getServiceAccountToken();
   const { spreadsheetId, sheetName } = config;
-  const range = `${sheetName}!T${row}`;
+  const range = `${sheetName}!U${row}`;
   const body = { values: [[resultText]] };
 
   const res = await fetch(
@@ -963,7 +963,7 @@ async function createTabFirefoxSafe(url, retries = 4, baseDelayMs = 1000) {
     if (attempt < retries) {
       const waitMs = baseDelayMs * attempt + Math.floor(Math.random() * 250);
       console.log(`[OTMenT] Waiting ${waitMs}ms before retrying...`);
-      await wait(waitMs);
+      await sleep(waitMs);
     }
   }
 
