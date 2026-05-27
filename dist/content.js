@@ -177,18 +177,18 @@
   async function waitForSelector(selector, timeout = 5000) {
 
     const start = Date.now();
-
+  
     while (Date.now() - start < timeout) {
-
-      if ($(selector).length > 0) {
+  
+      if (document.querySelector(selector)) {
         return true;
       }
-
-      await sleep(rand(120, 900));
+  
+      await sleep(rand(60, 300));
     }
-
+  
     warn("[OTMenT] Timeout waiting for selector:", selector);
-
+  
     return false;
   }
 
@@ -203,7 +203,7 @@
     try {
 
       // Simulate reading before extraction
-      if (chance(75)) {
+      if (chance(45)) {
         await simulateReadingBehavior();
       }
 
@@ -324,7 +324,7 @@
       await sendHandshake();
 
       // Occasional early fake reading
-      if (chance(35)) {
+      if (chance(18)) {
         await simulateReadingBehavior();
       }
 
