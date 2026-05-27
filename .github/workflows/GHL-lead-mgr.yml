@@ -1,4 +1,4 @@
-name: Google Sheets CSV Processor
+name: GHL CSV Processor
 
 on:
   workflow_dispatch:
