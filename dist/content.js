@@ -57,19 +57,19 @@
         break;
 
       case "thinking":
-        await sleepRandom(2500, 9000);
+        await sleepRandom(2500, 7000);
         break;
 
       case "reading":
-        await sleepRandom(5000, 18000);
+        await sleepRandom(3000, 9000);
         break;
 
       case "idle":
-        await sleepRandom(15000, 60000);
+        await sleepRandom(8000, 30000);
         break;
 
       default:
-        await sleepRandom(500, 4500);
+        await sleepRandom(500, 3500);
     }
   }
 
