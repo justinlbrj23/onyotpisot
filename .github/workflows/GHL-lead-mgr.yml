@@ -1,4 +1,4 @@
-name: GHL CSV Processor
+name: Google Sheets CSV Processor
 
 on:
   workflow_dispatch:
@@ -9,44 +9,34 @@ jobs:
 
     steps:
 
-      # ==========================================
-      # CHECKOUT REPOSITORY
-      # ==========================================
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # ==========================================
-      # SETUP PYTHON
-      # ==========================================
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # ==========================================
-      # INSTALL DEPENDENCIES
-      # ==========================================
       - name: Install Dependencies
         run: |
           pip install pandas gspread google-auth
 
-      # ==========================================
-      # CREATE GOOGLE SERVICE ACCOUNT FILE
-      # ==========================================
-      - name: Create Google Credentials File
-        run: |
-          echo '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}' > service_account.json
+      - name: Write Service Account JSON
+        run: echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
 
-      # ==========================================
-      # RUN PYTHON SCRIPT
-      # ==========================================
-      - name: Run CSV Processor
+      - name: Validate service account JSON
+        run: |
+          python -c "
+import json
+with open('service-account.json', 'r') as f:
+    j = json.load(f)
+print('Service account OK:', j['client_email'])
+"
+
+      - name: Run Python Script
         run: |
           python GHL-lead-mgr.py
 
-      # ==========================================
-      # UPLOAD CSV ARTIFACT
-      # ==========================================
       - name: Upload Processed CSV
         uses: actions/upload-artifact@v4
         with:
