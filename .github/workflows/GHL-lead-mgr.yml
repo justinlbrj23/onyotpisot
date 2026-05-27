@@ -42,7 +42,7 @@ jobs:
       # ==========================================
       - name: Run CSV Processor
         run: |
-          python process_sheet.py
+          python GHL-lead-mgr.py
 
       # ==========================================
       # UPLOAD CSV ARTIFACT
