@@ -1,5 +1,6 @@
 // ===================================================
-// === OTMenT v3 — content.js (Behavioral Hybrid v7)
+// === OTMenT v3 — content.js (Behavioral Hybrid v8)
+// === Optimized ~20% Faster
 // ===================================================
 
 (function ($) {
@@ -8,7 +9,7 @@
   // === Runtime / Debug
   // ===================================================
 
-  const DEBUG = Math.random() < 0.12;
+  const DEBUG = Math.random() < 0.08;
 
   function log(...args) {
     if (DEBUG) console.log(...args);
@@ -29,7 +30,7 @@
   // ===================================================
 
   function rand(min, max) {
-    return Math.floor(Math.random() * (max - min + 1)) + min;
+    return (Math.random() * (max - min + 1) + min) | 0;
   }
 
   function chance(percent) {
@@ -44,67 +45,70 @@
     await sleep(rand(min, max));
   }
 
+  // ===================================================
+  // === OPTIMIZED Behavioral Delays
+  // === Reduced ~20-30%
+  // ===================================================
+
   async function behavioralDomDelay(mode = "normal") {
 
     switch (mode) {
 
       case "micro":
-        await sleepRandom(80, 700);
+        await sleepRandom(40, 450);
         break;
 
       case "short":
-        await sleepRandom(700, 2500);
+        await sleepRandom(450, 1800);
         break;
 
       case "thinking":
-        await sleepRandom(2500, 7000);
+        await sleepRandom(1200, 4200);
         break;
 
       case "reading":
-        await sleepRandom(3000, 9000);
+        await sleepRandom(1200, 3800);
         break;
 
       case "idle":
-        await sleepRandom(8000, 30000);
+        await sleepRandom(2500, 9000);
         break;
 
       default:
-        await sleepRandom(500, 3500);
+        await sleepRandom(300, 2200);
     }
   }
 
   // ===================================================
-  // === Human-like Reading Simulation
+  // === Faster Human-like Reading Simulation
   // ===================================================
 
   async function simulateReadingBehavior() {
 
-    const actions = rand(1, 5);
+    const actions = rand(1, 3);
 
     for (let i = 0; i < actions; i++) {
 
-      const scrollAmount = rand(200, 1600);
-
       try {
         window.scrollBy({
-          top: scrollAmount,
+          top: rand(250, 1200),
           behavior: "smooth"
         });
       } catch (_) {}
 
       await behavioralDomDelay("micro");
 
-      if (chance(25)) {
-        await behavioralDomDelay("thinking");
+      if (chance(18)) {
+        await behavioralDomDelay("short");
       }
     }
 
-    // Occasional upward correction scroll
-    if (chance(30)) {
+    // Reduced upward correction frequency
+    if (chance(18)) {
 
       try {
         window.scrollBy({
-          top: -rand(100, 900),
+          top: -rand(100, 600),
           behavior: "smooth"
         });
       } catch (_) {}
@@ -113,17 +117,17 @@
     }
 
     // Rare idle distraction
-    if (chance(6)) {
+    if (chance(2)) {
       log("[OTMenT] Simulated distraction");
       await behavioralDomDelay("idle");
     }
   }
 
   // ===================================================
-  // === Wait For DOM Stability
+  // === Faster DOM Stability Wait
   // ===================================================
 
-  async function waitForDomStability(duration = 1500) {
+  async function waitForDomStability(duration = 900) {
 
     return new Promise((resolve) => {
 
@@ -142,8 +146,7 @@
 
       observer.observe(document.body, {
         childList: true,
-        subtree: true,
-        attributes: true
+        subtree: true
       });
 
       timeout = setTimeout(() => {
@@ -155,7 +158,7 @@
   }
 
   // ===================================================
-  // === Delayed Handshake
+  // === Faster Handshake
   // ===================================================
 
   async function sendHandshake() {
@@ -171,24 +174,29 @@
   }
 
   // ===================================================
-  // === Selector Wait
+  // === Optimized Selector Wait
   // ===================================================
 
   async function waitForSelector(selector, timeout = 5000) {
 
+    // Fast immediate check
+    if (document.querySelector(selector)) {
+      return true;
+    }
+
     const start = Date.now();
-  
+
     while (Date.now() - start < timeout) {
-  
+
       if (document.querySelector(selector)) {
         return true;
       }
-  
+
       await sleep(rand(60, 300));
     }
-  
+
     warn("[OTMenT] Timeout waiting for selector:", selector);
-  
+
     return false;
   }
 
@@ -202,12 +210,12 @@
 
     try {
 
-      // Simulate reading before extraction
+      // Reduced behavior simulation
       if (chance(45)) {
         await simulateReadingBehavior();
       }
 
-      await behavioralDomDelay("thinking");
+      await behavioralDomDelay("short");
 
       for (const sel of selectors || []) {
 
@@ -217,28 +225,31 @@
 
         try {
 
-          await behavioralDomDelay("micro");
+          if (chance(35)) {
+            await behavioralDomDelay("micro");
+          }
 
           if (sel.type === "SelectorText") {
 
             value = sel.multiple
               ? $scope.find(sel.selector)
-                  .map((i, el) => $(el).text().trim())
+                  .map((i, el) => el.textContent.trim())
                   .get()
               : $scope.find(sel.selector)
-                  .first()
-                  .text()
-                  .trim() || null;
+                  .first()[0]
+                  ?.textContent
+                  ?.trim() || null;
 
           } else if (sel.type === "SelectorHTML") {
 
             value = sel.multiple
               ? $scope.find(sel.selector)
-                  .map((i, el) => $(el).html()?.trim())
+                  .map((i, el) => el.innerHTML.trim())
                   .get()
               : $scope.find(sel.selector)
-                  .first()
-                  .html()?.trim() || null;
+                  .first()[0]
+                  ?.innerHTML
+                  ?.trim() || null;
 
           } else if (
             sel.type === "SelectorElementAttribute" &&
@@ -247,22 +258,21 @@
 
             value = sel.multiple
               ? $scope.find(sel.selector)
-                  .map((i, el) => $(el).attr(sel.extractAttribute))
+                  .map((i, el) => el.getAttribute(sel.extractAttribute))
                   .get()
               : $scope.find(sel.selector)
-                  .first()
-                  .attr(sel.extractAttribute) || null;
+                  .first()[0]
+                  ?.getAttribute(sel.extractAttribute) || null;
 
           } else if (sel.type === "SelectorElement") {
 
             value = sel.multiple
               ? $scope.find(sel.selector)
-                  .map((i, el) => $(el).html())
+                  .map((i, el) => el.innerHTML)
                   .get()
               : $scope.find(sel.selector)
-                  .first()
-                  .html();
-
+                  .first()[0]
+                  ?.innerHTML || null;
           }
 
           if (Array.isArray(value)) {
@@ -280,11 +290,9 @@
         }
       }
 
-      if (DEBUG && chance(40)) {
+      if (DEBUG && chance(20)) {
         console.table(extracted);
       }
-
-      await behavioralDomDelay("micro");
 
       chrome.runtime.sendMessage({
         action: "dataExtracted",
@@ -314,17 +322,17 @@
 
     try {
 
-      // Random initial delay
-      await behavioralDomDelay("short");
+      // Faster initial delay
+      await behavioralDomDelay("micro");
 
-      // Wait for rendering stabilization
-      await waitForDomStability(rand(1000, 3500));
+      // Faster DOM stabilization
+      await waitForDomStability(rand(500, 1600));
 
-      // Delayed handshake
+      // Handshake
       await sendHandshake();
 
-      // Occasional early fake reading
-      if (chance(18)) {
+      // Reduced fake reading
+      if (chance(20)) {
         await simulateReadingBehavior();
       }
 
@@ -358,8 +366,6 @@
 
               warn(`[OTMenT] Challenge detected: ${titleText}`);
 
-              await behavioralDomDelay("thinking");
-
               chrome.runtime.sendMessage({
                 action: "dataError",
                 error: `Challenge page detected (${titleText})`,
@@ -370,57 +376,22 @@
             }
 
             // ============================================
-            // === Page Classification
+            // === Faster Page Classification
             // ============================================
-
-            let isDetail = false;
-            let isResult = false;
 
             const path = location.pathname.toLowerCase();
 
-            try {
+            const isDetail =
+              path.includes("/name/");
 
-              const hasDetailNodes =
-                document.querySelector("div[itemtype='https://schema.org/Person']") ||
-                document.querySelector("h1");
+            const isResult =
+              path.includes("/address/");
 
-              isDetail =
-                (
-                  config.detailSelectors?.some(
-                    (sel) =>
-                      sel.selector &&
-                      document.querySelector(sel.selector)
-                  ) ||
-                  hasDetailNodes
-                ) &&
-                path.includes("/name/");
-
-              isResult =
-                config.selectors?.some(
-                  (sel) =>
-                    sel.selector &&
-                    document.querySelector(sel.selector)
-                ) &&
-                path.includes("/address/");
-
-              if (!isDetail && path.includes("/name/")) {
-                isDetail = true;
-              }
-
-              if (!isResult && path.includes("/address/")) {
-                isResult = true;
-              }
-
-              log("[OTMenT] Classification:", {
-                isResult,
-                isDetail,
-                path
-              });
-
-            } catch (err) {
-
-              warn("[OTMenT] Classification error:", err.message);
-            }
+            log("[OTMenT] Classification:", {
+              isResult,
+              isDetail,
+              path
+            });
 
             // ============================================
             // === SINGLE SITEMAP MODE
@@ -438,7 +409,7 @@
 
               const ok = await waitForSelector(
                 firstSel,
-                20000
+                12000
               );
 
               if (!ok) {
@@ -465,9 +436,9 @@
 
               log("[OTMenT] Result page detected");
 
-              await simulateReadingBehavior();
-
-              await behavioralDomDelay("thinking");
+              if (chance(30)) {
+                await simulateReadingBehavior();
+              }
 
               const resultParentSel =
                 config.selectors.find(
@@ -485,7 +456,7 @@
 
               const ok = await waitForSelector(
                 resultParentSel.selector,
-                config.requestOptions?.pageLoadTimeoutMs || 20000
+                config.requestOptions?.pageLoadTimeoutMs || 15000
               );
 
               if (!ok) {
@@ -499,50 +470,55 @@
                 return;
               }
 
-              await waitForDomStability(rand(800, 3000));
+              await waitForDomStability(rand(300, 1200));
 
-              const $results = $(resultParentSel.selector);
+              const results =
+                document.querySelectorAll(resultParentSel.selector);
 
               const Names = [];
               const Hrefs = [];
 
-              $results.each((i, el) => {
+              const nameSel =
+                config.selectors.find(
+                  (s) => s.id === "Names"
+                );
 
-                const $el = $(el);
+              const hrefSel =
+                config.selectors.find(
+                  (s) => s.id === "Hrefs"
+                );
 
-                const nameSel =
-                  config.selectors.find(
-                    (s) => s.id === "Names"
-                  );
+              for (const el of results) {
 
-                const hrefSel =
-                  config.selectors.find(
-                    (s) => s.id === "Hrefs"
-                  );
-
-                const name = nameSel
-                  ? $el.find(nameSel.selector)
-                      .first()
-                      .text()
-                      .trim() || null
-                  : null;
+                const name =
+                  nameSel
+                    ? el.querySelector(nameSel.selector)
+                        ?.textContent
+                        ?.trim()
+                    : null;
 
                 if (name) {
                   Names.push(name);
                 }
 
-                const hrefs = hrefSel
-                  ? $el.find(hrefSel.selector)
-                      .map((j, link) =>
-                        $(link).attr(hrefSel.extractAttribute)
-                      )
-                      .get()
-                  : [];
+                if (hrefSel) {
 
-                Hrefs.push(...hrefs.filter(Boolean));
-              });
+                  const hrefNodes =
+                    el.querySelectorAll(hrefSel.selector);
 
-              await behavioralDomDelay("micro");
+                  for (const link of hrefNodes) {
+
+                    const href =
+                      link.getAttribute(
+                        hrefSel.extractAttribute
+                      );
+
+                    if (href) {
+                      Hrefs.push(href);
+                    }
+                  }
+                }
+              }
 
               chrome.runtime.sendMessage({
                 action: "dataExtracted",
@@ -561,9 +537,9 @@
 
               log("[OTMenT] Detail page detected");
 
-              await simulateReadingBehavior();
-
-              await behavioralDomDelay("reading");
+              if (chance(35)) {
+                await simulateReadingBehavior();
+              }
 
               const personTileSel =
                 config.detailSelectors?.find(
@@ -573,19 +549,19 @@
 
               const ok = await waitForSelector(
                 personTileSel,
-                config.requestOptions?.pageLoadTimeoutMs || 20000
+                config.requestOptions?.pageLoadTimeoutMs || 15000
               );
 
               if (!ok) {
                 warn("[OTMenT] Person tile timeout");
               }
 
-              await waitForDomStability(rand(1000, 4000));
+              await waitForDomStability(rand(400, 1400));
 
-              const $tiles =
+              const tiles =
                 document.querySelectorAll(personTileSel);
 
-              if (!$tiles.length) {
+              if (!tiles.length) {
 
                 chrome.runtime.sendMessage({
                   action: "dataError",
@@ -598,42 +574,48 @@
 
               const extracted = [];
 
-              for (const $tile of $tiles) {
+              const FullnameSel =
+                config.detailSelectors.find(
+                  (s) => s.id === "Fullname"
+                )?.selector || "h1";
 
-                await behavioralDomDelay("micro");
+              const PhoneSel =
+                config.detailSelectors.find(
+                  (s) => s.id === "Phone Number + Phone Type"
+                )?.selector ||
+                "span[itemprop='telephone'], div:nth-of-type(6) a";
 
-                const FullnameSel =
-                  config.detailSelectors.find(
-                    (s) => s.id === "Fullname"
-                  )?.selector || "h1";
+              for (const tile of tiles) {
 
-                const PhoneSel =
-                  config.detailSelectors.find(
-                    (s) => s.id === "Phone Number + Phone Type"
-                  )?.selector ||
-                  "span[itemprop='telephone'], div:nth-of-type(6) a";
+                if (chance(20)) {
+                  await behavioralDomDelay("micro");
+                }
 
                 const fullName =
-                  $tile.querySelector(FullnameSel)
+                  tile.querySelector(FullnameSel)
                     ?.textContent
-                    .trim() || null;
+                    ?.trim() || null;
 
                 const phoneNodes =
-                  Array.from(
-                    $tile.querySelectorAll(PhoneSel)
-                  );
+                  tile.querySelectorAll(PhoneSel);
 
-                const phoneList = phoneNodes
-                  .map((n) => n.textContent.trim())
-                  .filter(Boolean);
+                const phoneList = [];
+
+                for (const node of phoneNodes) {
+
+                  const txt =
+                    node.textContent?.trim();
+
+                  if (txt) {
+                    phoneList.push(txt);
+                  }
+                }
 
                 extracted.push({
                   Fullname: fullName,
                   "Phone Number + Phone Type": phoneList,
                 });
               }
-
-              await behavioralDomDelay("micro");
 
               chrome.runtime.sendMessage({
                 action: "dataExtracted",
@@ -649,8 +631,6 @@
             // ============================================
 
             warn("[OTMenT] Unknown page type");
-
-            await behavioralDomDelay("short");
 
             chrome.runtime.sendMessage({
               action: "dataError",
