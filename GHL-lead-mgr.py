@@ -1,8 +1,8 @@
 import pandas as pd
+import csv
+import re
 import gspread
 from google.oauth2.service_account import Credentials
-import re
-import io
 
 # ===================================================
 # CONFIG
@@ -11,20 +11,17 @@ import io
 SPREADSHEET_ID = "1n1daep0zpdeC4ITPoRTYeW7-ayx_rcEh2nGYAeavCL0"
 SHEET_NAME = "For REI Upload"
 
+SERVICE_ACCOUNT_FILE = "service-account.json"
+
 OUTPUT_FILE = "processed_output.csv"
-
-# ===================================================
-# GOOGLE SHEETS AUTH
-# ===================================================
-# REQUIREMENTS:
-# pip install pandas gspread google-auth
-
-# Replace with your Google Service Account JSON file path
-SERVICE_ACCOUNT_FILE = "service_account.json"
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets.readonly"
 ]
+
+# ===================================================
+# GOOGLE SHEETS AUTH
+# ===================================================
 
 credentials = Credentials.from_service_account_file(
     SERVICE_ACCOUNT_FILE,
@@ -49,7 +46,7 @@ def clean_email(email):
 # MAIN PROCESS
 # ===================================================
 
-def process_google_sheet():
+def process_data():
 
     print("[INFO] Connecting to Google Sheets...")
 
@@ -59,52 +56,63 @@ def process_google_sheet():
     # Open worksheet
     worksheet = spreadsheet.worksheet(SHEET_NAME)
 
-    print("[INFO] Fetching data from sheet...")
+    print("[INFO] Fetching sheet records...")
 
-    # Get all records
+    # Fetch all rows
     input_data = worksheet.get_all_records()
+
+    print(f"[INFO] Retrieved {len(input_data)} rows")
+
+    # ===================================================
+    # OUTPUT STORAGE
+    # ===================================================
 
     output_data = []
 
-    print(f"[INFO] Processing {len(input_data)} rows...")
+    # ===================================================
+    # PROCESS EACH ROW
+    # ===================================================
 
-    # Process each row
     for row in input_data:
 
         address = row.get('Address', '')
         first_name = row.get('First Name', '')
         last_name = row.get('Last Name', '')
 
-        # ==========================
+        # ==========================================
         # PHONE NUMBERS
-        # ==========================
+        # ==========================================
+
         phone_numbers = [
-            row.get(f'Phone {i}', '')
+            str(row.get(f'Phone {i}', '')).strip()
             for i in range(1, 6)
             if str(row.get(f'Phone {i}', '')).strip()
         ]
 
-        # ==========================
+        # ==========================================
         # PHONE TYPES
-        # ==========================
+        # ==========================================
+
         phone_types = [
-            row.get(f'Phone Type {i}', '')
+            str(row.get(f'Phone Type {i}', '')).strip()
             for i in range(1, 6)
             if str(row.get(f'Phone Type {i}', '')).strip()
         ]
 
-        # ==========================
+        # ==========================================
         # EMAILS
-        # ==========================
+        # ==========================================
+
         emails = [
             clean_email(row.get(f'Email {i}', ''))
             for i in range(1, 4)
             if str(row.get(f'Email {i}', '')).strip()
         ]
 
-        # ==========================
-        # MAX ROWS
-        # ==========================
+        # ==========================================
+        # DETERMINE MAX ROWS
+        # ==========================================
+
         max_rows = max(
             len(phone_numbers),
             len(phone_types),
@@ -112,9 +120,10 @@ def process_google_sheet():
             1
         )
 
-        # ==========================
-        # BUILD OUTPUT
-        # ==========================
+        # ==========================================
+        # BUILD OUTPUT ROWS
+        # ==========================================
+
         for i in range(max_rows):
 
             output_data.append({
@@ -130,7 +139,7 @@ def process_google_sheet():
     # EXPORT CSV
     # ===================================================
 
-    print("[INFO] Generating CSV...")
+    print("[INFO] Creating CSV file...")
 
     output_df = pd.DataFrame(output_data)
 
@@ -140,7 +149,7 @@ def process_google_sheet():
         encoding='utf-8-sig'
     )
 
-    print(f"[SUCCESS] CSV saved as: {OUTPUT_FILE}")
+    print(f"[SUCCESS] CSV exported: {OUTPUT_FILE}")
 
 
 # ===================================================
@@ -148,4 +157,10 @@ def process_google_sheet():
 # ===================================================
 
 if __name__ == "__main__":
-    process_google_sheet()
+
+    try:
+        process_data()
+
+    except Exception as e:
+        print(f"[ERROR] {str(e)}")
+        raise
