@@ -9,36 +9,88 @@ jobs:
 
     steps:
 
+      # ==================================================
+      # CHECKOUT REPOSITORY
+      # ==================================================
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      # ==================================================
+      # SETUP PYTHON
+      # ==================================================
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # ==================================================
+      # INSTALL PYTHON DEPENDENCIES
+      # ==================================================
       - name: Install Dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install pandas gspread google-auth
 
+      # ==================================================
+      # WRITE GOOGLE SERVICE ACCOUNT JSON
+      # ==================================================
       - name: Write Service Account JSON
-        run: echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
+        run: |
+          echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
 
-      - name: Validate service account JSON
+      # ==================================================
+      # VALIDATE GOOGLE SERVICE ACCOUNT JSON
+      # ==================================================
+      - name: Validate Service Account JSON
         run: |
           python -c "
 import json
-with open('service-account.json', 'r') as f:
+
+with open('service-account.json', 'r', encoding='utf-8') as f:
     j = json.load(f)
-print('Service account OK:', j['client_email'])
+
+required = ['private_key', 'client_email', 'project_id']
+
+for key in required:
+    if key not in j:
+        raise Exception(f'Missing required field: {key}')
+
+print('====================================')
+print('Google Service Account Loaded OK')
+print('Client Email:', j['client_email'])
+print('Project ID:', j['project_id'])
+print('====================================')
 "
 
+      # ==================================================
+      # VERIFY TARGET SCRIPT EXISTS
+      # ==================================================
+      - name: Verify Python Script
+        run: |
+          ls -la
+          test -f GHL-lead-mgr.py
+
+      # ==================================================
+      # RUN PROCESSOR
+      # ==================================================
       - name: Run Python Script
         run: |
           python GHL-lead-mgr.py
 
+      # ==================================================
+      # VERIFY OUTPUT FILE EXISTS
+      # ==================================================
+      - name: Verify Output CSV
+        run: |
+          ls -la
+          test -f processed_output.csv
+
+      # ==================================================
+      # UPLOAD CSV ARTIFACT
+      # ==================================================
       - name: Upload Processed CSV
         uses: actions/upload-artifact@v4
         with:
           name: processed-csv
           path: processed_output.csv
+          if-no-files-found: error
