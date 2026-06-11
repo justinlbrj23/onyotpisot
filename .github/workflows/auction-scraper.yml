@@ -26,7 +26,15 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
+          package-manager-cache: false
+
+      # ==========================================
+      # SHOW NODE / NPM VERSIONS
+      # ==========================================
+      - name: Show Node and npm Versions
+        run: |
+          node -v
+          npm -v
 
       # ==========================================
       # INSTALL DEPENDENCIES
