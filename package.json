@@ -25,6 +25,7 @@
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
     "googleapis": "^159.0.0",
+    "playwright": "^1.54.0",
     "puppeteer": "^22.0.0",
     "selenium-webdriver": "^4.23.0",
     "xlsx": "^0.18.5",
