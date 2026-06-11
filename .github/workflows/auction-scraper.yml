@@ -25,8 +25,8 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
-          cache: "npm"
+          node-version: '20'
+          cache: 'npm'
 
       # ==========================================
       # INSTALL DEPENDENCIES
@@ -45,33 +45,31 @@ jobs:
       # ==========================================
       - name: Write Service Account JSON
         run: |
-          echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
+          cat > service-account.json <<'JSON'
+          ${{ secrets.SERVICE_ACCOUNT_JSON }}
+          JSON
 
       # ==========================================
       # VALIDATE JSON
       # ==========================================
       - name: Validate Service Account JSON
         run: |
-          node - <<'EOF'
-          const fs = require("fs");
-
-          const raw = fs.readFileSync("service-account.json", "utf8");
+          node -e "
+          const fs = require('fs');
+          const raw = fs.readFileSync('service-account.json', 'utf8');
           const j = JSON.parse(raw);
-
-          const required = ["private_key", "client_email", "project_id"];
-
+          const required = ['private_key', 'client_email', 'project_id'];
           for (const key of required) {
             if (!(key in j)) {
-              throw new Error(`Missing required field: ${key}`);
+              throw new Error('Missing required field: ' + key);
             }
           }
-
-          console.log("====================================");
-          console.log("Google Service Account Loaded OK");
-          console.log("Client Email:", j.client_email);
-          console.log("Project ID:", j.project_id);
-          console.log("====================================");
-          EOF
+          console.log('====================================');
+          console.log('Google Service Account Loaded OK');
+          console.log('Client Email:', j.client_email);
+          console.log('Project ID:', j.project_id);
+          console.log('====================================');
+          "
 
       # ==========================================
       # VERIFY JS SCRIPT EXISTS
@@ -87,6 +85,4 @@ jobs:
       - name: Run Auction Scraper
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
-        run: |
-          node auction-scraper.js
-``
+        run: node auction-scraper.js
