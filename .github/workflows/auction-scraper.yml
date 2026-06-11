@@ -85,7 +85,7 @@ jobs:
       - name: Verify JS Script
         run: |
           ls -la
-          test -f auction-scraper.js
+          test -f auction-scraper.cjs
 
       # ==========================================
       # RUN SCRAPER
@@ -93,4 +93,4 @@ jobs:
       - name: Run Auction Scraper
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
-        run: node auction-scraper.js
+        run: node auction-scraper.cjs
