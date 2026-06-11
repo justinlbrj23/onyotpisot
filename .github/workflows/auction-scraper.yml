@@ -1,0 +1,92 @@
+name: Auction.com Daily Scraper to Google Sheets
+
+on:
+  schedule:
+    # Run at both UTC times so the script can self-select 7 AM America/Chicago
+    - cron: '0 12 * * *'
+    - cron: '0 13 * * *'
+  workflow_dispatch:
+
+jobs:
+  scrape-auction-and-log:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      # ==========================================
+      # CHECKOUT REPOSITORY
+      # ==========================================
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # ==========================================
+      # SETUP NODE
+      # ==========================================
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      # ==========================================
+      # INSTALL DEPENDENCIES
+      # ==========================================
+      - name: Install Dependencies
+        run: npm install
+
+      # ==========================================
+      # INSTALL PLAYWRIGHT CHROMIUM
+      # ==========================================
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      # ==========================================
+      # WRITE GOOGLE SERVICE ACCOUNT JSON
+      # ==========================================
+      - name: Write Service Account JSON
+        run: |
+          echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
+
+      # ==========================================
+      # VALIDATE JSON
+      # ==========================================
+      - name: Validate Service Account JSON
+        run: |
+          node - <<'EOF'
+          const fs = require("fs");
+
+          const raw = fs.readFileSync("service-account.json", "utf8");
+          const j = JSON.parse(raw);
+
+          const required = ["private_key", "client_email", "project_id"];
+
+          for (const key of required) {
+            if (!(key in j)) {
+              throw new Error(`Missing required field: ${key}`);
+            }
+          }
+
+          console.log("====================================");
+          console.log("Google Service Account Loaded OK");
+          console.log("Client Email:", j.client_email);
+          console.log("Project ID:", j.project_id);
+          console.log("====================================");
+          EOF
+
+      # ==========================================
+      # VERIFY JS SCRIPT EXISTS
+      # ==========================================
+      - name: Verify JS Script
+        run: |
+          ls -la
+          test -f auction-scraper.js
+
+      # ==========================================
+      # RUN SCRAPER
+      # ==========================================
+      - name: Run Auction Scraper
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          node auction-scraper.js
+``
