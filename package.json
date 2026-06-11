@@ -8,6 +8,7 @@
     "start": "node organizer_headers_tssf.js",
     "fetch:auctions": "node dac_scraper.cjs",
     "fetch:titleSearch": "node titleSearch.cjs",
+    "fetch:auctionDaily": "node auction-scraper.cjs",
     "ocr": "node ocr_pipeline.js",
     "ocr:img": "cross-env OCR_POLARITY=light-on-dark OCR_PSM=7 OCR_WHITELIST=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 node ocr_pipeline.js ./sample.png",
     "ocr:img:dark": "cross-env OCR_POLARITY=dark-on-light node ocr_pipeline.js ./sample.png",
