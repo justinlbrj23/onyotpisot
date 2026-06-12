@@ -299,13 +299,11 @@ async function scrapeCountyPage(page, url) {
   console.log(`\n[COUNTY] Visiting: ${url}`);
   await safeGoto(page, url);
 
-  try {
-    await page.waitForSelector(SELECTORS.pageH1, { timeout: 20000 });
-  } catch {
-    // continue even if H1 not found
-  }
+  try { await page.waitForSelector(SELECTORS.pageH1, { timeout: 20000 }); } catch {}
   const h1Text = await getTextOrEmpty(page.locator(SELECTORS.pageH1));
   console.log(`[COUNTY] h1 = ${h1Text}`);
+
+  // If H1 contains "near" skip (preserve existing behavior)
   if (normalizeText(h1Text).includes("near")) {
     console.log(`[COUNTY] "near" detected in h1. Skipping this county page.`);
     return [];
@@ -330,8 +328,8 @@ async function scrapeCountyPage(page, url) {
     lastCount = count;
   }
 
-  // Extract links from anchors, data attributes, and onclick handlers
-  const links = await page.evaluate(() => {
+  // Extract candidate links (anchors, data-* and onclick fallbacks)
+  const rawLinks = await page.evaluate(() => {
     const out = new Set();
     const cardSelectors = ['div.b__asset-root--VmozO', 'div.asset-list-row', '.asset-card', '.asset'];
     for (const sel of cardSelectors) {
@@ -363,31 +361,37 @@ async function scrapeCountyPage(page, url) {
     return Array.from(out);
   });
 
-  if (links && links.length) {
-    console.log(`[COUNTY] Extracted ${links.length} candidate link(s).`);
-    return links;
+  console.log(`[COUNTY] Extracted ${rawLinks.length} candidate link(s) (pre-filter).`);
+
+  // Filter to only /details links (case-insensitive)
+  const detailsLinks = Array.from(new Set(rawLinks.filter(h => h && h.toLowerCase().includes('/details'))));
+
+  console.log(`[COUNTY] Filtered to ${detailsLinks.length} /details link(s).`);
+
+  // If H1 contains a numeric count (e.g., "17 Properties in ..."), limit to that count
+  let expectedCount = 0;
+  try {
+    const m = h1Text.match(/(\d{1,3})\s+Properties?/i);
+    if (m && m[1]) expectedCount = Number(m[1]);
+  } catch (e) {
+    expectedCount = 0;
   }
 
-  try {
-    const anchors = await page.$$eval('a[href]', (as) => Array.from(new Set(as.map(a => a.href))));
-    if (anchors && anchors.length) {
-      console.log(`[COUNTY] Fallback anchors found ${anchors.length} link(s).`);
-      return anchors;
+  if (expectedCount > 0) {
+    // If we have more detail links than expected, keep the first expectedCount unique links
+    if (detailsLinks.length > expectedCount) {
+      console.log(`[COUNTY] H1 indicates ${expectedCount} properties; trimming ${detailsLinks.length} -> ${expectedCount}`);
+      return detailsLinks.slice(0, expectedCount);
     }
-  } catch (err) {
-    console.warn(`[COUNTY] Fallback anchors error: ${err.message}`);
   }
 
-  try {
-    const html = await page.content();
-    const debugPath = path.join(process.cwd(), "debug-county.html");
-    fs.writeFileSync(debugPath, html, "utf8");
-    console.warn(`[COUNTY] No property links found. Saved debug HTML to ${debugPath}`);
-  } catch (err) {
-    console.warn("[COUNTY] Failed to save debug HTML:", err.message);
+  // If no /details links found but anchors exist, fall back to anchors (rare)
+  if (detailsLinks.length === 0 && rawLinks.length > 0) {
+    console.log(`[COUNTY] No /details links found; returning ${rawLinks.length} raw anchor(s) as fallback.`);
+    return Array.from(new Set(rawLinks));
   }
 
-  return [];
+  return detailsLinks;
 }
 
 async function scrapePropertyDetail(page, detailUrl) {
