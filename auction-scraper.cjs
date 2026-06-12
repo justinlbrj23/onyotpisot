@@ -476,8 +476,11 @@ async function main() {
         try {
           const { address, saleDate, snippet } = await scrapePropertyDetail(page, detailUrl);
 
-          // Trim address to zipcode for storage and dedupe
-          const trimmedAddress = trimAddressToZip(address);
+          // Keep the original extracted address exactly as returned by the detail page
+          const originalAddress = address || "";
+
+          // Use a trimmed, single-line version for dedupe and state/county checks
+          const trimmedAddress = trimAddressToZip(originalAddress);
           const normalizedAddress = normalizeText(trimmedAddress);
 
           // --- Begin robust state + county verification ---
@@ -498,7 +501,6 @@ async function main() {
 
           // 2) Fallbacks if direct state-before-zip extraction fails
           if (!stateFound) {
-            // look for " KS " or " MO " tokens anywhere in the address (or full names)
             const tokenMatch = addrForCheck.match(/\b(ks|mo|kansas|missouri)\b/);
             if (tokenMatch && tokenMatch[1]) {
               const t = tokenMatch[1];
@@ -508,7 +510,6 @@ async function main() {
             }
           }
           if (!stateFound) {
-            // check snippet or URL for state hints
             if (snippetLower.match(/\b(kansas|ks)\b/) || urlLower.includes("/ks/") || urlLower.includes("/kansas/")) {
               stateFound = "ks";
               console.log(`[VERIFY] Detected state from snippet/URL: ks`);
@@ -559,8 +560,9 @@ async function main() {
 
           const formattedDate = parseSaleDateToMDY(saleDate);
 
+          // Build row using the original extracted address exactly as returned by the detail page
           const row = buildRowForEL({
-            address: trimmedAddress,
+            address: originalAddress,
             detailUrl,
             formattedDate
           });
@@ -568,7 +570,7 @@ async function main() {
           rowsToAppend.push(row);
           seenThisRun.add(normalizedAddress);
 
-          console.log(`[SHEET] Queued => ${trimmedAddress} | ${formattedDate} | ${detailUrl}`);
+          console.log(`[SHEET] Queued => ${originalAddress} | ${formattedDate} | ${detailUrl}`);
         } catch (err) {
           console.error(`[DETAIL] Failed on ${detailUrl}: ${err.message}`);
         }
