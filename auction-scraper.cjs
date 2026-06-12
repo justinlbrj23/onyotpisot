@@ -6,9 +6,9 @@ const { google } = require("googleapis");
 const URLS = [
   "https://www.auction.com/residential/KS/Johnson-county/active_lt/auction_date_order_st/y_nbs/foreclosures_at",
   "https://www.auction.com/residential/KS/Wyandotte-county/active_lt/auction_date_order_st/y_nbs/foreclosures_at",
-  "https://www.auction.com/residential/KS/Clay-county/active_lt/auction_date_order_st/y_nbs/foreclosures_at",
-  "https://www.auction.com/residential/KS/Jackson-county/active_lt/auction_date_order_st/y_nbs/foreclosures_at",
-  "https://www.auction.com/residential/KS/Platte-county/active_lt/auction_date_order_st/y_nbs/foreclosures_at"
+  "https://www.auction.com/residential/MO/Clay-county/active_lt/auction_date_order_st/y_nbs/foreclosures_at",
+  "https://www.auction.com/residential/MO/Jackson-county/active_lt/auction_date_order_st/y_nbs/foreclosures_at",
+  "https://www.auction.com/residential/MO/Platte-county/active_lt/auction_date_order_st/y_nbs/foreclosures_at"
 ];
 
 const SPREADSHEET_ID = "15L4mwR_4mdYfWolEVimtzCTPPNpFN0rsFo2U-J7d8jw";
