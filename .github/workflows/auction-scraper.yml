@@ -2,9 +2,12 @@ name: Auction.com Daily Scraper to Google Sheets
 
 on:
   schedule:
-    # Run at both UTC times so the script can self-select 7 AM America/Chicago
-    - cron: '0 12 * * *'
+    # 8:00 AM CDT (UTC-5)
     - cron: '0 13 * * *'
+
+    # 8:00 AM CST (UTC-6)
+    - cron: '0 14 * * *'
+
   workflow_dispatch:
 
 jobs:
@@ -18,6 +21,22 @@ jobs:
       # ==========================================
       - name: Checkout Repository
         uses: actions/checkout@v4
+
+      # ==========================================
+      # VERIFY CHICAGO TIME IS 8 AM
+      # ==========================================
+      - name: Verify Chicago Time
+        run: |
+          CHICAGO_HOUR=$(TZ=America/Chicago date +%H)
+
+          echo "Current Chicago Hour: $CHICAGO_HOUR"
+
+          if [ "$CHICAGO_HOUR" != "08" ]; then
+            echo "Not 8 AM in Chicago. Exiting."
+            exit 0
+          fi
+
+          echo "8 AM Chicago time confirmed. Continuing..."
 
       # ==========================================
       # SETUP NODE
@@ -66,12 +85,19 @@ jobs:
           const fs = require('fs');
           const raw = fs.readFileSync('service-account.json', 'utf8');
           const j = JSON.parse(raw);
-          const required = ['private_key', 'client_email', 'project_id'];
+
+          const required = [
+            'private_key',
+            'client_email',
+            'project_id'
+          ];
+
           for (const key of required) {
             if (!(key in j)) {
               throw new Error('Missing required field: ' + key);
             }
           }
+
           console.log('====================================');
           console.log('Google Service Account Loaded OK');
           console.log('Client Email:', j.client_email);
