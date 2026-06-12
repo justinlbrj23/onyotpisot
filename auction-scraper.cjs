@@ -1,4 +1,4 @@
-// county-aware-scraper.js
+// county-verify-on-detail-scraper.js
 const fs = require("fs");
 const path = require("path");
 const { chromium } = require("playwright");
@@ -187,12 +187,8 @@ function extractCountySlug(countyUrl) {
 }
 
 /**
- * Robust county page scraper:
- * - scrolls to load lazy items
- * - clicks "Load more" if present
- * - tries multiple extraction strategies
- * - filters links to those matching the county slug or short name
- * - saves debug HTML if no links found
+ * Scrape county page and return ALL candidate property links (no county filtering here).
+ * Filtering is done later on the detail page.
  */
 async function scrapeCountyPage(page, url) {
   console.log(`\n[COUNTY] Visiting: ${url}`);
@@ -214,21 +210,6 @@ async function scrapeCountyPage(page, url) {
   await tryClickLoadMore(page);
   await autoScroll(page, 18, 600);
 
-  // extract county slug/short for filtering
-  const { slug: countySlug, short: countyShort } = extractCountySlug(url);
-  const countySlugLower = countySlug ? countySlug.toLowerCase() : null;
-  const countyShortLower = countyShort ? countyShort.toLowerCase() : null;
-
-  // helper to filter links by county
-  const filterByCounty = (href) => {
-    if (!href) return false;
-    const h = href.toLowerCase();
-    if (countySlugLower && h.includes(countySlugLower)) return true;
-    if (countyShortLower && h.includes(countyShortLower)) return true;
-    // sometimes county appears as query param or different token; allow state+city patterns too
-    return false;
-  };
-
   // Strategy A: known asset card selector
   try {
     const linksA = await page.$$eval(SELECTORS.assetCards, (cards) => {
@@ -239,12 +220,11 @@ async function scrapeCountyPage(page, url) {
       }
       return Array.from(new Set(out));
     });
-    const filteredA = linksA.filter(filterByCounty);
-    if (filteredA.length) {
-      console.log(`[COUNTY] Strategy A found ${filteredA.length} county-matching link(s).`);
-      return filteredA;
+    if (linksA && linksA.length) {
+      console.log(`[COUNTY] Strategy A found ${linksA.length} link(s).`);
+      return linksA;
     } else {
-      console.log(`[COUNTY] Strategy A found 0 county-matching links (total found: ${linksA.length}).`);
+      console.log(`[COUNTY] Strategy A found 0 links.`);
     }
   } catch (err) {
     console.warn(`[COUNTY] Strategy A error: ${err.message}`);
@@ -260,12 +240,11 @@ async function scrapeCountyPage(page, url) {
       }
       return Array.from(new Set(out));
     });
-    const filteredB = linksB.filter(filterByCounty);
-    if (filteredB.length) {
-      console.log(`[COUNTY] Strategy B found ${filteredB.length} county-matching link(s).`);
-      return filteredB;
+    if (linksB && linksB.length) {
+      console.log(`[COUNTY] Strategy B found ${linksB.length} link(s).`);
+      return linksB;
     } else {
-      console.log(`[COUNTY] Strategy B found 0 county-matching links (total found: ${linksB.length}).`);
+      console.log(`[COUNTY] Strategy B found 0 links.`);
     }
   } catch (err) {
     console.warn(`[COUNTY] Strategy B error: ${err.message}`);
@@ -284,23 +263,22 @@ async function scrapeCountyPage(page, url) {
       }
       return Array.from(new Set(out));
     });
-    const filteredC = linksC.filter(filterByCounty);
-    if (filteredC.length) {
-      console.log(`[COUNTY] Strategy C found ${filteredC.length} county-matching link(s).`);
-      return filteredC;
+    if (linksC && linksC.length) {
+      console.log(`[COUNTY] Strategy C found ${linksC.length} link(s).`);
+      return linksC;
     } else {
-      console.log(`[COUNTY] Strategy C found 0 county-matching links (total found: ${linksC.length}).`);
+      console.log(`[COUNTY] Strategy C found 0 links.`);
     }
   } catch (err) {
     console.warn(`[COUNTY] Strategy C error: ${err.message}`);
   }
 
-  // If nothing found, save a debug HTML snapshot for inspection
+  // Save debug HTML for inspection
   try {
     const html = await page.content();
-    const debugPath = path.join(process.cwd(), "debug-jackson.html");
+    const debugPath = path.join(process.cwd(), "debug-county.html");
     fs.writeFileSync(debugPath, html, "utf8");
-    console.warn(`[COUNTY] No county-matching property links found. Saved debug HTML to ${debugPath}`);
+    console.warn(`[COUNTY] No property links found. Saved debug HTML to ${debugPath}`);
   } catch (err) {
     console.warn("[COUNTY] Failed to save debug HTML:", err.message);
   }
@@ -308,6 +286,9 @@ async function scrapeCountyPage(page, url) {
   return [];
 }
 
+/**
+ * Scrape detail page and return address, saleDate, and the page content for verification.
+ */
 async function scrapePropertyDetail(page, detailUrl) {
   console.log(`[DETAIL] Visiting: ${detailUrl}`);
   await safeGoto(page, detailUrl);
@@ -318,9 +299,17 @@ async function scrapePropertyDetail(page, detailUrl) {
   }
   const address = await getTextOrEmpty(page.locator(SELECTORS.pageH1));
   const saleDate = await getTextOrEmpty(page.locator(SELECTORS.saleDate));
+  // also capture some page text for verification (small snippet)
+  let snippet = "";
+  try {
+    snippet = await page.locator("body").innerText({ timeout: 5000 });
+    snippet = snippet ? snippet.slice(0, 2000).toLowerCase() : "";
+  } catch {
+    snippet = "";
+  }
   console.log(`[DETAIL] Address: ${address}`);
   console.log(`[DETAIL] Sale Date: ${saleDate}`);
-  return { address, saleDate, detailUrl };
+  return { address, saleDate, detailUrl, snippet };
 }
 
 async function main() {
@@ -358,6 +347,11 @@ async function main() {
     for (const countyUrl of URLS) {
       console.log(`\n[MAIN] Processing county URL: ${countyUrl}`);
 
+      // extract county slug/short for verification on detail page
+      const { slug: countySlug, short: countyShort } = extractCountySlug(countyUrl);
+      const countySlugLower = countySlug ? countySlug.toLowerCase() : null;
+      const countyShortLower = countyShort ? countyShort.toLowerCase() : null;
+
       let propertyLinks = [];
       try {
         propertyLinks = await scrapeCountyPage(page, countyUrl);
@@ -366,26 +360,48 @@ async function main() {
         continue;
       }
 
-      console.log(`[MAIN] ${propertyLinks.length} property link(s) returned for ${countyUrl}`);
+      console.log(`[MAIN] ${propertyLinks.length} candidate property link(s) returned for ${countyUrl}`);
 
       for (const detailUrl of propertyLinks) {
         try {
-          const { address, saleDate } = await scrapePropertyDetail(page, detailUrl);
+          const { address, saleDate, snippet } = await scrapePropertyDetail(page, detailUrl);
           const normalizedAddress = normalizeText(address);
+
+          // Verify the detail page belongs to the county by checking:
+          // 1) address or H1 contains county short or slug
+          // 2) or the page snippet contains the county short or slug
+          // 3) or the detailUrl contains the county short or slug (fallback)
+          let belongsToCounty = false;
+          if (countySlugLower && (normalizedAddress.includes(countySlugLower) || snippet.includes(countySlugLower) || detailUrl.toLowerCase().includes(countySlugLower))) {
+            belongsToCounty = true;
+          }
+          if (!belongsToCounty && countyShortLower && (normalizedAddress.includes(countyShortLower) || snippet.includes(countyShortLower) || detailUrl.toLowerCase().includes(countyShortLower))) {
+            belongsToCounty = true;
+          }
+
+          if (!belongsToCounty) {
+            console.log(`[VERIFY] Detail page does not appear to belong to ${countySlug || countyShort || "this county"}. Skipping: ${detailUrl}`);
+            continue;
+          }
+
           if (!normalizedAddress) {
             console.log(`[DETAIL] Empty address. Skipping.`);
             continue;
           }
+
           if (existing.has(normalizedAddress)) {
             console.log(`[SHEET] Already exists in column E. Skipping: ${address}`);
             continue;
           }
+
           if (seenThisRun.has(normalizedAddress)) {
             console.log(`[SHEET] Duplicate in current run. Skipping: ${address}`);
             continue;
           }
+
           rowsToAppend.push([address, saleDate]);
           seenThisRun.add(normalizedAddress);
+
           console.log(`[SHEET] Queued => ${address} | ${saleDate}`);
         } catch (err) {
           console.error(`[DETAIL] Failed on ${detailUrl}: ${err.message}`);
