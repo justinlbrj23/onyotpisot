@@ -266,11 +266,7 @@ async function scrapeCountyPage(page, url) {
   console.log(`\n[COUNTY] Visiting: ${url}`);
   await safeGoto(page, url);
 
-  try {
-    await page.waitForSelector(SELECTORS.pageH1, { timeout: 20000 });
-  } catch {
-    // continue even if H1 not found
-  }
+  try { await page.waitForSelector(SELECTORS.pageH1, { timeout: 20000 }); } catch {}
   const h1Text = await getTextOrEmpty(page.locator(SELECTORS.pageH1));
   console.log(`[COUNTY] h1 = ${h1Text}`);
   if (normalizeText(h1Text).includes("near")) {
@@ -278,71 +274,93 @@ async function scrapeCountyPage(page, url) {
     return [];
   }
 
-  // load more + scroll to trigger lazy loading
+  // Repeatedly click "Load more" if present, then auto-scroll until the number of visible cards stabilizes
   await tryClickLoadMore(page);
-  await autoScroll(page, 18, 600);
 
-  // Strategy A: known asset card selector
-  try {
-    const linksA = await page.$$eval(SELECTORS.assetCards, (cards) => {
-      const out = [];
-      for (const c of cards) {
-        const a = c.querySelector("a[href]");
-        if (a && a.href) out.push(a.href);
-      }
-      return Array.from(new Set(out));
+  // Wait for list container to populate and then stabilize
+  const maxAttempts = 12;
+  let lastCount = 0;
+  for (let i = 0; i < maxAttempts; i++) {
+    // scroll to bottom to trigger lazy load
+    await page.evaluate(() => window.scrollBy(0, window.innerHeight));
+    await page.waitForTimeout(800);
+
+    // try clicking load more again if it reappears
+    await tryClickLoadMore(page);
+
+    // count candidate card containers (use multiple fallbacks)
+    const count = await page.evaluate(() => {
+      const byAsset = document.querySelectorAll('div.b__asset-root--VmozO').length;
+      const byRow = document.querySelectorAll('div.asset-list-row').length;
+      // choose the larger of the two as the visible card count
+      return Math.max(byAsset, byRow);
     });
-    if (linksA && linksA.length) {
-      console.log(`[COUNTY] Strategy A found ${linksA.length} link(s).`);
-      return linksA;
-    } else {
-      console.log(`[COUNTY] Strategy A found 0 links.`);
+
+    console.log(`[COUNTY] visible card count attempt ${i+1}: ${count}`);
+
+    if (count === lastCount && count > 0) {
+      // stable count observed
+      break;
     }
-  } catch (err) {
-    console.warn(`[COUNTY] Strategy A error: ${err.message}`);
+    lastCount = count;
   }
 
-  // Strategy B: anchors inside list rows
-  try {
-    const linksB = await page.$$eval(SELECTORS.listRow, (rows) => {
-      const out = [];
-      for (const r of rows) {
-        const a = r.querySelector("a[href]");
-        if (a && a.href) out.push(a.href);
-      }
-      return Array.from(new Set(out));
-    });
-    if (linksB && linksB.length) {
-      console.log(`[COUNTY] Strategy B found ${linksB.length} link(s).`);
-      return linksB;
-    } else {
-      console.log(`[COUNTY] Strategy B found 0 links.`);
+  // Extraction: collect links from multiple possible places
+  const links = await page.evaluate(() => {
+    const out = new Set();
+
+    // 1) anchors inside known card containers
+    const cardSelectors = ['div.b__asset-root--VmozO', 'div.asset-list-row', '.asset-card', '.asset']; // add fallbacks
+    for (const sel of cardSelectors) {
+      document.querySelectorAll(sel).forEach((card) => {
+        const a = card.querySelector('a[href]');
+        if (a && a.href) out.add(a.href);
+      });
     }
-  } catch (err) {
-    console.warn(`[COUNTY] Strategy B error: ${err.message}`);
+
+    // 2) anchors anywhere that look like detail pages
+    document.querySelectorAll('a[href]').forEach((a) => {
+      const href = a.href || '';
+      const low = href.toLowerCase();
+      if (low.includes('/property/') || low.includes('/asset/') || low.includes('/details/') || low.includes('/residential/')) {
+        out.add(href);
+      }
+    });
+
+    // 3) data attributes on clickable elements (data-href, data-url, data-link)
+    document.querySelectorAll('[data-href],[data-url],[data-link]').forEach((el) => {
+      const href = el.getAttribute('data-href') || el.getAttribute('data-url') || el.getAttribute('data-link');
+      if (href) {
+        try { out.add(new URL(href, location.origin).href); } catch { out.add(href); }
+      }
+    });
+
+    // 4) onclick handlers that navigate (e.g., onclick="location.href='/details/...'")
+    document.querySelectorAll('[onclick]').forEach((el) => {
+      const onclick = el.getAttribute('onclick') || '';
+      const m = onclick.match(/location\.href\s*=\s*['"]([^'"]+)['"]/i);
+      if (m && m[1]) {
+        try { out.add(new URL(m[1], location.origin).href); } catch { out.add(m[1]); }
+      }
+    });
+
+    return Array.from(out);
+  });
+
+  if (links && links.length) {
+    console.log(`[COUNTY] Extracted ${links.length} candidate link(s).`);
+    return links;
   }
 
-  // Strategy C: any anchor that looks like a property detail
+  // fallback: try anchors inside the whole page (already covered above, but keep for safety)
   try {
-    const linksC = await page.$$eval("a[href]", (anchors) => {
-      const out = [];
-      for (const a of anchors) {
-        const href = (a.href || "").toLowerCase();
-        if (!href) continue;
-        if (href.includes("/property/") || href.includes("/asset/") || href.includes("/residential/")) {
-          out.push(a.href);
-        }
-      }
-      return Array.from(new Set(out));
-    });
-    if (linksC && linksC.length) {
-      console.log(`[COUNTY] Strategy C found ${linksC.length} link(s).`);
-      return linksC;
-    } else {
-      console.log(`[COUNTY] Strategy C found 0 links.`);
+    const anchors = await page.$$eval('a[href]', (as) => Array.from(new Set(as.map(a => a.href))));
+    if (anchors && anchors.length) {
+      console.log(`[COUNTY] Fallback anchors found ${anchors.length} link(s).`);
+      return anchors;
     }
   } catch (err) {
-    console.warn(`[COUNTY] Strategy C error: ${err.message}`);
+    console.warn(`[COUNTY] Fallback anchors error: ${err.message}`);
   }
 
   // Save debug HTML for inspection
