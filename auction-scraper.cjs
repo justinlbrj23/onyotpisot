@@ -1,10 +1,4 @@
-// county-verify-on-detail-scraper.js (updated)
-// Modifications:
-// 1) Address stored in sheet trimmed up through ZIP code.
-// 2) Dates formatted as M/D/YYYY and written to column L.
-// 3) Detail page URL written to column I.
-// 4) Append writes columns E through L.
-
+// county-verify-on-detail-scraper.js (explicit-range update + verification + retries)
 const fs = require("fs");
 const path = require("path");
 const { chromium } = require("playwright");
@@ -37,27 +31,20 @@ function normalizeText(value) {
 }
 
 // Trim address to include up through the 5-digit (or 5+4) ZIP code if present.
-// If no zip found, return the original address trimmed.
 function trimAddressToZip(address) {
   if (!address) return "";
   const txt = address.trim();
-  // match up to and including 5-digit or 5+4 zip (e.g., 12345 or 12345-6789)
   const m = txt.match(/^(.*?\b\d{5}(?:-\d{4})?)/);
   if (m && m[1]) return m[1].trim();
-  // fallback: try to stop at state abbreviation (e.g., ", MO" or ", KS")
   const m2 = txt.match(/^(.*?\b[A-Z]{2}\b)/);
   return (m2 && m2[1]) ? m2[1].trim() : txt;
 }
 
 // Parse a saleDate string and return M/D/YYYY (no leading zeros).
-// Accepts strings like "Thursday, Jun 18, 2026 – Add to calendar" or "Jun 18, 2026".
 function parseSaleDateToMDY(raw) {
   if (!raw) return "";
-  // Remove common trailing text and dashes
   let s = raw.replace(/\u2013|\u2014|–|—/g, " ").replace(/–.*$/,"").replace(/—.*$/,"").trim();
-  // Remove "Add to calendar" or similar trailing phrases
   s = s.replace(/\badd to calendar\b/i, "").replace(/\b–.*$/,"").trim();
-  // Try to find MonthName Day, Year
   const m = s.match(/([A-Za-z]+)\s+0?(\d{1,2}),?\s*(\d{4})/);
   if (m) {
     const monthName = m[1].toLowerCase();
@@ -72,13 +59,11 @@ function parseSaleDateToMDY(raw) {
     const mnum = months[key] || months[monthName] || NaN;
     if (!isNaN(mnum)) return `${mnum}/${day}/${year}`;
   }
-  // Try numeric formats or ISO parse
   const iso = Date.parse(s);
   if (!isNaN(iso)) {
     const d = new Date(iso);
     return `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}`;
   }
-  // Try to extract numeric date patterns like 06/18/2026 or 6/18/2026
   const m2 = s.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
   if (m2) {
     const mm = Number(m2[1]);
@@ -148,7 +133,6 @@ async function getExistingAddressesAndNextRow(sheets) {
   for (let i = 0; i < rows.length; i++) {
     const rowNum = i + 1;
     const val = (rows[i] && rows[i][0]) ? rows[i][0] : "";
-    // Trim existing sheet addresses to zip for consistent dedupe
     const trimmed = trimAddressToZip(val);
     const norm = normalizeText(trimmed);
     if (norm) {
@@ -160,20 +144,94 @@ async function getExistingAddressesAndNextRow(sheets) {
   return { existing, nextRow };
 }
 
-// Append rows into columns E through L (8 columns)
+// --- New: strict row builder, padder, writeExactRange, verify, retry ---
+
+// Build a row mapped to columns E..L (8 columns)
+function buildRowForEL({ address, detailUrl, formattedDate }) {
+  return [
+    address || "",     // E
+    "",                // F
+    "",                // G
+    "",                // H
+    detailUrl || "",   // I
+    "",                // J
+    "",                // K
+    formattedDate || ""// L
+  ];
+}
+
+// Ensure each row has exactly width columns
+function padRows(rows, width = 8) {
+  return rows.map((r) => {
+    const copy = Array.from(r);
+    while (copy.length < width) copy.push("");
+    return copy.slice(0, width);
+  });
+}
+
+// Read back and verify written values match expected payload
+async function verifyWrite(sheets, startRow, endRow, expectedRows) {
+  const range = `${SHEET_NAME}!E${startRow}:L${endRow}`;
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range });
+  const actual = res.data.values || [];
+  for (let i = 0; i < expectedRows.length; i++) {
+    const exp = expectedRows[i];
+    const act = actual[i] || [];
+    for (let c = 0; c < exp.length; c++) {
+      if ((act[c] || "") !== (exp[c] || "")) {
+        throw new Error(`Verification failed at row ${startRow + i} col ${String.fromCharCode(69 + c)}: expected "${exp[c]}", got "${act[c] || ''}"`);
+      }
+    }
+  }
+  return true;
+}
+
+// Write exact range E{start}:L{end} with retries and verification
+async function writeExactRangeWithRetries(sheets, startRow, rows, maxRetries = 3) {
+  const normalized = padRows(rows, 8);
+  const endRow = startRow + normalized.length - 1;
+  const range = `${SHEET_NAME}!E${startRow}:L${endRow}`;
+
+  let attempt = 0;
+  let lastErr = null;
+
+  while (attempt < maxRetries) {
+    attempt++;
+    try {
+      console.log(`[SHEETS] Writing ${normalized.length} row(s) to ${range} (attempt ${attempt})`);
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SPREADSHEET_ID,
+        range,
+        valueInputOption: "RAW",
+        requestBody: { values: normalized }
+      });
+
+      // Read back and verify
+      await verifyWrite(sheets, startRow, endRow, normalized);
+      console.log(`[SHEETS] Verification succeeded for ${range}`);
+      return { range, startRow, endRow };
+    } catch (err) {
+      lastErr = err;
+      console.warn(`[SHEETS] Write attempt ${attempt} failed: ${err.message}`);
+      // Exponential backoff
+      const backoffMs = 200 * Math.pow(3, attempt - 1);
+      await new Promise((res) => setTimeout(res, backoffMs));
+    }
+  }
+
+  // If we reach here, all attempts failed
+  throw new Error(`Failed to write and verify range ${range} after ${maxRetries} attempts. Last error: ${lastErr && lastErr.message}`);
+}
+
+// --- End new sheet-write helpers ---
+
 async function appendRowsToSheet(sheets, rowsToAppend) {
+  // kept for compatibility but not used in main flow when using explicit writes
   if (!rowsToAppend.length) {
     console.log("No new rows to append.");
     return;
   }
-
-  // Ensure each row has exactly 8 columns (E..L)
-  const normalizedRows = rowsToAppend.map((r) => {
-    const copy = Array.from(r);
-    while (copy.length < 8) copy.push("");
-    return copy.slice(0, 8);
-  });
-
+  const normalizedRows = padRows(rowsToAppend, 8);
   await sheets.spreadsheets.values.append({
     spreadsheetId: SPREADSHEET_ID,
     range: `${SHEET_NAME}!E:L`,
@@ -181,7 +239,6 @@ async function appendRowsToSheet(sheets, rowsToAppend) {
     insertDataOption: "INSERT_ROWS",
     requestBody: { values: normalizedRows }
   });
-
   console.log(`Appended ${normalizedRows.length} row(s) to ${SHEET_NAME}!E:L`);
 }
 
@@ -239,11 +296,6 @@ async function tryClickLoadMore(page) {
   return false;
 }
 
-/**
- * Extract county slug from a county URL.
- * Example: ".../MO/Jackson-county/..." -> "jackson-county"
- * Also returns a short name without "-county": "jackson"
- */
 function extractCountySlug(countyUrl) {
   try {
     const m = countyUrl.match(/\/([A-Za-z0-9-]+-county)(?:\/|$)/i);
@@ -258,15 +310,15 @@ function extractCountySlug(countyUrl) {
   return { slug: null, short: null };
 }
 
-/**
- * Scrape county page and return ALL candidate property links (no county filtering here).
- * Filtering is done later on the detail page.
- */
 async function scrapeCountyPage(page, url) {
   console.log(`\n[COUNTY] Visiting: ${url}`);
   await safeGoto(page, url);
 
-  try { await page.waitForSelector(SELECTORS.pageH1, { timeout: 20000 }); } catch {}
+  try {
+    await page.waitForSelector(SELECTORS.pageH1, { timeout: 20000 });
+  } catch {
+    // continue even if H1 not found
+  }
   const h1Text = await getTextOrEmpty(page.locator(SELECTORS.pageH1));
   console.log(`[COUNTY] h1 = ${h1Text}`);
   if (normalizeText(h1Text).includes("near")) {
@@ -274,51 +326,35 @@ async function scrapeCountyPage(page, url) {
     return [];
   }
 
-  // Repeatedly click "Load more" if present, then auto-scroll until the number of visible cards stabilizes
   await tryClickLoadMore(page);
 
-  // Wait for list container to populate and then stabilize
+  // Stabilize visible card count by scrolling and clicking load more
   const maxAttempts = 12;
   let lastCount = 0;
   for (let i = 0; i < maxAttempts; i++) {
-    // scroll to bottom to trigger lazy load
     await page.evaluate(() => window.scrollBy(0, window.innerHeight));
     await page.waitForTimeout(800);
-
-    // try clicking load more again if it reappears
     await tryClickLoadMore(page);
-
-    // count candidate card containers (use multiple fallbacks)
     const count = await page.evaluate(() => {
       const byAsset = document.querySelectorAll('div.b__asset-root--VmozO').length;
       const byRow = document.querySelectorAll('div.asset-list-row').length;
-      // choose the larger of the two as the visible card count
       return Math.max(byAsset, byRow);
     });
-
     console.log(`[COUNTY] visible card count attempt ${i+1}: ${count}`);
-
-    if (count === lastCount && count > 0) {
-      // stable count observed
-      break;
-    }
+    if (count === lastCount && count > 0) break;
     lastCount = count;
   }
 
-  // Extraction: collect links from multiple possible places
+  // Extract links from anchors, data attributes, and onclick handlers
   const links = await page.evaluate(() => {
     const out = new Set();
-
-    // 1) anchors inside known card containers
-    const cardSelectors = ['div.b__asset-root--VmozO', 'div.asset-list-row', '.asset-card', '.asset']; // add fallbacks
+    const cardSelectors = ['div.b__asset-root--VmozO', 'div.asset-list-row', '.asset-card', '.asset'];
     for (const sel of cardSelectors) {
       document.querySelectorAll(sel).forEach((card) => {
         const a = card.querySelector('a[href]');
         if (a && a.href) out.add(a.href);
       });
     }
-
-    // 2) anchors anywhere that look like detail pages
     document.querySelectorAll('a[href]').forEach((a) => {
       const href = a.href || '';
       const low = href.toLowerCase();
@@ -326,16 +362,12 @@ async function scrapeCountyPage(page, url) {
         out.add(href);
       }
     });
-
-    // 3) data attributes on clickable elements (data-href, data-url, data-link)
     document.querySelectorAll('[data-href],[data-url],[data-link]').forEach((el) => {
       const href = el.getAttribute('data-href') || el.getAttribute('data-url') || el.getAttribute('data-link');
       if (href) {
         try { out.add(new URL(href, location.origin).href); } catch { out.add(href); }
       }
     });
-
-    // 4) onclick handlers that navigate (e.g., onclick="location.href='/details/...'")
     document.querySelectorAll('[onclick]').forEach((el) => {
       const onclick = el.getAttribute('onclick') || '';
       const m = onclick.match(/location\.href\s*=\s*['"]([^'"]+)['"]/i);
@@ -343,7 +375,6 @@ async function scrapeCountyPage(page, url) {
         try { out.add(new URL(m[1], location.origin).href); } catch { out.add(m[1]); }
       }
     });
-
     return Array.from(out);
   });
 
@@ -352,7 +383,6 @@ async function scrapeCountyPage(page, url) {
     return links;
   }
 
-  // fallback: try anchors inside the whole page (already covered above, but keep for safety)
   try {
     const anchors = await page.$$eval('a[href]', (as) => Array.from(new Set(as.map(a => a.href))));
     if (anchors && anchors.length) {
@@ -363,7 +393,6 @@ async function scrapeCountyPage(page, url) {
     console.warn(`[COUNTY] Fallback anchors error: ${err.message}`);
   }
 
-  // Save debug HTML for inspection
   try {
     const html = await page.content();
     const debugPath = path.join(process.cwd(), "debug-county.html");
@@ -376,9 +405,6 @@ async function scrapeCountyPage(page, url) {
   return [];
 }
 
-/**
- * Scrape detail page and return address, saleDate, and the page content for verification.
- */
 async function scrapePropertyDetail(page, detailUrl) {
   console.log(`[DETAIL] Visiting: ${detailUrl}`);
   await safeGoto(page, detailUrl);
@@ -389,7 +415,6 @@ async function scrapePropertyDetail(page, detailUrl) {
   }
   const address = await getTextOrEmpty(page.locator(SELECTORS.pageH1));
   const saleDate = await getTextOrEmpty(page.locator(SELECTORS.saleDate));
-  // also capture some page text for verification (small snippet)
   let snippet = "";
   try {
     snippet = await page.locator("body").innerText({ timeout: 5000 });
@@ -412,8 +437,9 @@ async function main() {
   }
 
   const sheets = await createSheetsClient();
-  const { existing } = await getExistingAddressesAndNextRow(sheets);
+  const { existing, nextRow } = await getExistingAddressesAndNextRow(sheets);
   console.log(`Existing addresses in column E: ${existing.size}`);
+  console.log(`Computed nextRow (before scraping): ${nextRow}`);
 
   const browser = await chromium.launch({
     headless: process.env.FORCE_RUN === "true" ? false : true,
@@ -437,7 +463,6 @@ async function main() {
     for (const countyUrl of URLS) {
       console.log(`\n[MAIN] Processing county URL: ${countyUrl}`);
 
-      // extract county slug/short for verification on detail page
       const { slug: countySlug, short: countyShort } = extractCountySlug(countyUrl);
       const countySlugLower = countySlug ? countySlug.toLowerCase() : null;
       const countyShortLower = countyShort ? countyShort.toLowerCase() : null;
@@ -456,14 +481,9 @@ async function main() {
         try {
           const { address, saleDate, snippet } = await scrapePropertyDetail(page, detailUrl);
 
-          // Trim address to zipcode for storage and dedupe
           const trimmedAddress = trimAddressToZip(address);
           const normalizedAddress = normalizeText(trimmedAddress);
 
-          // Verify the detail page belongs to the county by checking:
-          // 1) address or H1 contains county short or slug
-          // 2) or the page snippet contains the county short or slug
-          // 3) or the detailUrl contains the county short or slug (fallback)
           let belongsToCounty = false;
           if (countySlugLower && (normalizedAddress.includes(countySlugLower) || snippet.includes(countySlugLower) || detailUrl.toLowerCase().includes(countySlugLower))) {
             belongsToCounty = true;
@@ -492,21 +512,14 @@ async function main() {
             continue;
           }
 
-          // Format date to M/D/YYYY and prepare row with placeholders for columns F,G,H,J,K
           const formattedDate = parseSaleDateToMDY(saleDate);
 
-          // Build row for columns E through L (E,F,G,H,I,J,K,L)
-          // Populate E (address), I (detailUrl), and L (date). Other columns left empty.
-          const row = [
-            trimmedAddress, // E
-            "",             // F
-            "",             // G
-            "",             // H
-            detailUrl,      // I
-            "",             // J
-            "",             // K
-            formattedDate   // L
-          ];
+          // Build row for E..L
+          const row = buildRowForEL({
+            address: trimmedAddress,
+            detailUrl,
+            formattedDate
+          });
 
           rowsToAppend.push(row);
           seenThisRun.add(normalizedAddress);
@@ -527,7 +540,31 @@ async function main() {
     }
   }
 
-  await appendRowsToSheet(sheets, rowsToAppend);
+  if (!rowsToAppend.length) {
+    console.log("No new rows to append.");
+    return;
+  }
+
+  // Recompute nextRow immediately before writing to minimize race window
+  const { existing: existingAfter, nextRow: startRow } = await getExistingAddressesAndNextRow(sheets);
+  console.log(`Starting write at row ${startRow} (recomputed before write).`);
+
+  try {
+    const result = await writeExactRangeWithRetries(sheets, startRow, rowsToAppend, 3);
+    console.log(`[SHEETS] Write completed: ${JSON.stringify(result)}`);
+  } catch (err) {
+    console.error(`[SHEETS] Failed to write rows: ${err.message}`);
+    // Save payload for manual inspection
+    try {
+      const dumpPath = path.join(process.cwd(), `failed-write-payload-${Date.now()}.json`);
+      fs.writeFileSync(dumpPath, JSON.stringify(rowsToAppend, null, 2), "utf8");
+      console.error(`[SHEETS] Saved failed payload to ${dumpPath}`);
+    } catch (saveErr) {
+      console.error(`[SHEETS] Failed to save payload: ${saveErr.message}`);
+    }
+    throw err;
+  }
+
   console.log("Done.");
 }
 
