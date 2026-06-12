@@ -1,6 +1,6 @@
-// county-verify-on-detail-scraper.js (final update)
+// county-verify-on-detail-scraper.js (updated final)
 // - Only accepts properties in KS or MO (state whitelist).
-// - Verifies county as before, but rejects pages outside KS/MO.
+// - Verifies county as before, and enforces county match plus state whitelist.
 // - Writes trimmed address (through ZIP) to column E, detail URL to I, date (M/D/YYYY) to L.
 // - Writes exactly to columns E:L using explicit-range update with verification and retries.
 
@@ -44,7 +44,7 @@ function trimAddressToZip(address) {
   if (!address) return "";
   // Normalize whitespace and newlines into single spaces
   let txt = address.replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim();
-  // Try to match up through ZIP (5 or 5-4)
+  // Try to match up through ZIP (5 or 5-4) with a state token before the zip
   const m = txt.match(/^(.*?\b[A-Za-z]{2}\b[\s,]*\d{5}(?:-\d{4})?)/);
   if (m && m[1]) return m[1].trim();
   // Fallback: match up through ZIP without requiring state
