@@ -1,4 +1,9 @@
-// county-verify-on-detail-scraper.js (explicit-range update + verification + retries)
+// county-verify-on-detail-scraper.js (final update)
+// - Only accepts properties in KS or MO (state whitelist).
+// - Verifies county as before, but rejects pages outside KS/MO.
+// - Writes trimmed address (through ZIP) to column E, detail URL to I, date (M/D/YYYY) to L.
+// - Writes exactly to columns E:L using explicit-range update with verification and retries.
+
 const fs = require("fs");
 const path = require("path");
 const { chromium } = require("playwright");
@@ -12,11 +17,14 @@ const URLS = [
   "https://www.auction.com/residential/MO/Platte-county/active_lt/auction_date_order_st/y_nbs/foreclosures_at"
 ];
 
-const SPREADSHEET_ID = "1e8XB5weSssnEl4cOmNxWf_r5z4kV8SHRFxrMDcoIDOQ";
+const SPREADSHEET_ID = "15L4mwR_4mdYfWolEVimtzCTPPNpFN0rsFo2U-J7d8jw";
 const SHEET_NAME = "Main List";
 const SERVICE_ACCOUNT_FILE = path.join(process.cwd(), "service-account.json");
 const TIMEZONE = "America/Chicago";
 const DATA_START_ROW = 2;
+
+// Accept only these state abbreviations for target properties
+const STATE_WHITELIST = new Set(["ks", "mo"]);
 
 const SELECTORS = {
   pageH1: "h1",
@@ -144,8 +152,6 @@ async function getExistingAddressesAndNextRow(sheets) {
   return { existing, nextRow };
 }
 
-// --- New: strict row builder, padder, writeExactRange, verify, retry ---
-
 // Build a row mapped to columns E..L (8 columns)
 function buildRowForEL({ address, detailUrl, formattedDate }) {
   return [
@@ -213,33 +219,12 @@ async function writeExactRangeWithRetries(sheets, startRow, rows, maxRetries = 3
     } catch (err) {
       lastErr = err;
       console.warn(`[SHEETS] Write attempt ${attempt} failed: ${err.message}`);
-      // Exponential backoff
       const backoffMs = 200 * Math.pow(3, attempt - 1);
       await new Promise((res) => setTimeout(res, backoffMs));
     }
   }
 
-  // If we reach here, all attempts failed
   throw new Error(`Failed to write and verify range ${range} after ${maxRetries} attempts. Last error: ${lastErr && lastErr.message}`);
-}
-
-// --- End new sheet-write helpers ---
-
-async function appendRowsToSheet(sheets, rowsToAppend) {
-  // kept for compatibility but not used in main flow when using explicit writes
-  if (!rowsToAppend.length) {
-    console.log("No new rows to append.");
-    return;
-  }
-  const normalizedRows = padRows(rowsToAppend, 8);
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_NAME}!E:L`,
-    valueInputOption: "RAW",
-    insertDataOption: "INSERT_ROWS",
-    requestBody: { values: normalizedRows }
-  });
-  console.log(`Appended ${normalizedRows.length} row(s) to ${SHEET_NAME}!E:L`);
 }
 
 async function safeGoto(page, url) {
@@ -484,14 +469,38 @@ async function main() {
           const trimmedAddress = trimAddressToZip(address);
           const normalizedAddress = normalizeText(trimmedAddress);
 
+          const addrLower = (trimmedAddress || "").toLowerCase();
+          const urlLower = (detailUrl || "").toLowerCase();
+          const snippetLower = (snippet || "").toLowerCase();
+
+          // 1) State verification: require KS or MO
+          let stateFound = null;
+          const stateMatch = addrLower.match(/\b(kansas|ks|missouri|mo)\b/);
+          if (stateMatch) {
+            const token = stateMatch[0];
+            if (token === "kansas" || token === "ks") stateFound = "ks";
+            if (token === "missouri" || token === "mo") stateFound = "mo";
+          }
+          if (!stateFound) {
+            if (snippetLower.includes(" kansas") || urlLower.includes("/ks/") || urlLower.includes("/kansas/")) stateFound = "ks";
+            if (snippetLower.includes(" missouri") || urlLower.includes("/mo/") || urlLower.includes("/missouri/")) stateFound = "mo";
+          }
+
+          if (!stateFound || !STATE_WHITELIST.has(stateFound)) {
+            console.log(`[VERIFY] Skipping because state not in whitelist (found: ${stateFound || "none"}). URL: ${detailUrl}`);
+            continue;
+          }
+
+          // 2) County verification (existing logic)
           let belongsToCounty = false;
-          if (countySlugLower && (normalizedAddress.includes(countySlugLower) || snippet.includes(countySlugLower) || detailUrl.toLowerCase().includes(countySlugLower))) {
+          if (countySlugLower && (addrLower.includes(countySlugLower) || snippetLower.includes(countySlugLower) || urlLower.includes(countySlugLower))) {
             belongsToCounty = true;
           }
-          if (!belongsToCounty && countyShortLower && (normalizedAddress.includes(countyShortLower) || snippet.includes(countyShortLower) || detailUrl.toLowerCase().includes(countyShortLower))) {
+          if (!belongsToCounty && countyShortLower && (addrLower.includes(countyShortLower) || snippetLower.includes(countyShortLower) || urlLower.includes(countyShortLower))) {
             belongsToCounty = true;
           }
 
+          // Enforce county match as additional guard; comment out the next block if you want to accept any KS/MO property
           if (!belongsToCounty) {
             console.log(`[VERIFY] Detail page does not appear to belong to ${countySlug || countyShort || "this county"}. Skipping: ${detailUrl}`);
             continue;
@@ -514,7 +523,6 @@ async function main() {
 
           const formattedDate = parseSaleDateToMDY(saleDate);
 
-          // Build row for E..L
           const row = buildRowForEL({
             address: trimmedAddress,
             detailUrl,
@@ -554,7 +562,6 @@ async function main() {
     console.log(`[SHEETS] Write completed: ${JSON.stringify(result)}`);
   } catch (err) {
     console.error(`[SHEETS] Failed to write rows: ${err.message}`);
-    // Save payload for manual inspection
     try {
       const dumpPath = path.join(process.cwd(), `failed-write-payload-${Date.now()}.json`);
       fs.writeFileSync(dumpPath, JSON.stringify(rowsToAppend, null, 2), "utf8");
