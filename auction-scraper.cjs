@@ -57,7 +57,12 @@ function nowInChicago() {
 }
 
 function shouldRunNow() {
-  // Allow manual testing anytime
+  // Allow manual testing anytime via FORCE_RUN env var
+  if (process.env.FORCE_RUN === "true") {
+    return true;
+  }
+
+  // Allow manual GitHub workflow dispatch
   if (process.env.GITHUB_EVENT_NAME === "workflow_dispatch") {
     return true;
   }
@@ -68,12 +73,18 @@ function shouldRunNow() {
 }
 
 async function createSheetsClient() {
-  if (!fs.existsSync(SERVICE_ACCOUNT_FILE)) {
-    throw new Error(`Missing ${SERVICE_ACCOUNT_FILE}`);
+  // Support either explicit service-account.json or GOOGLE_APPLICATION_CREDENTIALS env var
+  let keyFile = SERVICE_ACCOUNT_FILE;
+  if (!fs.existsSync(keyFile)) {
+    if (process.env.GOOGLE_APPLICATION_CREDENTIALS && fs.existsSync(process.env.GOOGLE_APPLICATION_CREDENTIALS)) {
+      keyFile = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    } else {
+      throw new Error(`Missing service account credentials. Put a service-account.json in the project root or set GOOGLE_APPLICATION_CREDENTIALS.`);
+    }
   }
 
   const auth = new google.auth.GoogleAuth({
-    keyFile: SERVICE_ACCOUNT_FILE,
+    keyFile,
     scopes: ["https://www.googleapis.com/auth/spreadsheets"]
   });
 
@@ -112,25 +123,24 @@ async function getExistingAddressesAndNextRow(sheets) {
   return { existing, nextRow };
 }
 
-async function appendRowsToSheet(sheets, rowsToAppend, startRow) {
+async function appendRowsToSheet(sheets, rowsToAppend) {
   if (!rowsToAppend.length) {
     console.log("No new rows to append.");
     return;
   }
 
-  const endRow = startRow + rowsToAppend.length - 1;
-  const range = `${SHEET_NAME}!E${startRow}:F${endRow}`;
-
-  await sheets.spreadsheets.values.update({
+  // Use the append endpoint so we don't need to compute exact range
+  await sheets.spreadsheets.values.append({
     spreadsheetId: SPREADSHEET_ID,
-    range,
+    range: `${SHEET_NAME}!E:F`,
     valueInputOption: "RAW",
+    insertDataOption: "INSERT_ROWS",
     requestBody: {
       values: rowsToAppend
     }
   });
 
-  console.log(`Appended ${rowsToAppend.length} row(s) to ${range}`);
+  console.log(`Appended ${rowsToAppend.length} row(s) to sheet ${SHEET_NAME}`);
 }
 
 async function safeGoto(page, url) {
@@ -206,32 +216,39 @@ async function main() {
   if (!shouldRunNow()) {
     const t = nowInChicago();
     console.log(
-      `Skipping run. Local ${TIMEZONE} time is ${String(t.hour).padStart(2, "0")}:${String(t.minute).padStart(2, "0")}, not 07:00.`
+      `Skipping run. Local ${TIMEZONE} time is ${String(t.hour).padStart(2, "0")}:${String(t.minute).padStart(2, "0")}. Set FORCE_RUN=true to override.`
     );
     return;
   }
 
   const sheets = await createSheetsClient();
-  const { existing, nextRow } = await getExistingAddressesAndNextRow(sheets);
+  const { existing } = await getExistingAddressesAndNextRow(sheets);
 
   console.log(`Existing addresses in column E: ${existing.size}`);
-  console.log(`Next target row: ${nextRow}`);
 
   const browser = await chromium.launch({ headless: true });
-
-  const context = await browser.newContext({
-    viewport: { width: 1440, height: 2200 },
-    userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-  });
-
-  const page = await context.newPage();
+  let context;
+  let page;
 
   const rowsToAppend = [];
   const seenThisRun = new Set();
 
   try {
+    context = await browser.newContext({
+      viewport: { width: 1440, height: 2200 },
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    });
+
+    page = await context.newPage();
+
     for (const countyUrl of URLS) {
+      // Only process Jackson County URLs (case-insensitive)
+      if (!/jackson-county/i.test(countyUrl)) {
+        console.log(`[SKIP] Not Jackson County. Skipping: ${countyUrl}`);
+        continue;
+      }
+
       let propertyLinks = [];
 
       try {
@@ -271,10 +288,16 @@ async function main() {
       }
     }
   } finally {
-    await browser.close();
+    try {
+      if (page) await page.close();
+      if (context) await context.close();
+      await browser.close();
+    } catch (closeErr) {
+      console.warn("Error closing browser resources:", closeErr.message);
+    }
   }
 
-  await appendRowsToSheet(sheets, rowsToAppend, nextRow);
+  await appendRowsToSheet(sheets, rowsToAppend);
   console.log("Done.");
 }
 
