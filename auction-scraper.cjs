@@ -12,7 +12,7 @@ const URLS = [
   "https://www.auction.com/residential/MO/Platte-county/active_lt/auction_date_order_st/y_nbs/foreclosures_at"
 ];
 
-const SPREADSHEET_ID = "15L4mwR_4mdYfWolEVimtzCTPPNpFN0rsFo2U-J7d8jw";
+const SPREADSHEET_ID = "1e8XB5weSssnEl4cOmNxWf_r5z4kV8SHRFxrMDcoIDOQ";
 const SHEET_NAME = "Main List";
 const SERVICE_ACCOUNT_FILE = path.join(process.cwd(), "service-account.json");
 const TIMEZONE = "America/Chicago";
