@@ -39,13 +39,19 @@ function normalizeText(value) {
 }
 
 // Trim address to include up through the 5-digit (or 5+4) ZIP code if present.
+// Normalize newlines and commas so state extraction works reliably.
 function trimAddressToZip(address) {
   if (!address) return "";
-  const txt = address.trim();
-  const m = txt.match(/^(.*?\b\d{5}(?:-\d{4})?)/);
+  // Normalize whitespace and newlines into single spaces
+  let txt = address.replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim();
+  // Try to match up through ZIP (5 or 5-4)
+  const m = txt.match(/^(.*?\b[A-Za-z]{2}\b[\s,]*\d{5}(?:-\d{4})?)/);
   if (m && m[1]) return m[1].trim();
-  const m2 = txt.match(/^(.*?\b[A-Z]{2}\b)/);
-  return (m2 && m2[1]) ? m2[1].trim() : txt;
+  // Fallback: match up through ZIP without requiring state
+  const m2 = txt.match(/^(.*?\b\d{5}(?:-\d{4})?)/);
+  if (m2 && m2[1]) return m2[1].trim();
+  // Final fallback: return normalized single-line address
+  return txt;
 }
 
 // Parse a saleDate string and return M/D/YYYY (no leading zeros).
@@ -470,37 +476,61 @@ async function main() {
         try {
           const { address, saleDate, snippet } = await scrapePropertyDetail(page, detailUrl);
 
+          // Trim address to zipcode for storage and dedupe
           const trimmedAddress = trimAddressToZip(address);
           const normalizedAddress = normalizeText(trimmedAddress);
 
-          const addrLower = (trimmedAddress || "").toLowerCase();
+          // --- Begin robust state + county verification ---
+
+          // Normalize for checks (single-line address)
+          const singleLineAddr = (trimmedAddress || "").replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim();
+          const addrForCheck = singleLineAddr.toLowerCase();
           const urlLower = (detailUrl || "").toLowerCase();
           const snippetLower = (snippet || "").toLowerCase();
 
-          // 1) State verification: require KS or MO
+          // 1) Extract state as the two-letter token immediately before the 5-digit ZIP
           let stateFound = null;
-          const stateMatch = addrLower.match(/\b(kansas|ks|missouri|mo)\b/);
-          if (stateMatch) {
-            const token = stateMatch[0];
-            if (token === "kansas" || token === "ks") stateFound = "ks";
-            if (token === "missouri" || token === "mo") stateFound = "mo";
-          }
-          if (!stateFound) {
-            if (snippetLower.includes(" kansas") || urlLower.includes("/ks/") || urlLower.includes("/kansas/")) stateFound = "ks";
-            if (snippetLower.includes(" missouri") || urlLower.includes("/mo/") || urlLower.includes("/missouri/")) stateFound = "mo";
+          const stateMatch = singleLineAddr.match(/,\s*([A-Za-z]{2})\s+\d{5}(?:-\d{4})?$/);
+          if (stateMatch && stateMatch[1]) {
+            stateFound = stateMatch[1].toLowerCase();
+            console.log(`[VERIFY] Detected state from address-before-zip: ${stateFound}`);
           }
 
+          // 2) Fallbacks if direct state-before-zip extraction fails
+          if (!stateFound) {
+            // look for " KS " or " MO " tokens anywhere in the address (or full names)
+            const tokenMatch = addrForCheck.match(/\b(ks|mo|kansas|missouri)\b/);
+            if (tokenMatch && tokenMatch[1]) {
+              const t = tokenMatch[1];
+              if (t === "ks" || t === "kansas") stateFound = "ks";
+              if (t === "mo" || t === "missouri") stateFound = "mo";
+              console.log(`[VERIFY] Detected state from address token fallback: ${stateFound}`);
+            }
+          }
+          if (!stateFound) {
+            // check snippet or URL for state hints
+            if (snippetLower.match(/\b(kansas|ks)\b/) || urlLower.includes("/ks/") || urlLower.includes("/kansas/")) {
+              stateFound = "ks";
+              console.log(`[VERIFY] Detected state from snippet/URL: ks`);
+            }
+            if (snippetLower.match(/\b(missouri|mo)\b/) || urlLower.includes("/mo/") || urlLower.includes("/missouri/")) {
+              stateFound = "mo";
+              console.log(`[VERIFY] Detected state from snippet/URL: mo`);
+            }
+          }
+
+          // If state not in whitelist, skip
           if (!stateFound || !STATE_WHITELIST.has(stateFound)) {
             console.log(`[VERIFY] Skipping because state not in whitelist (found: ${stateFound || "none"}). URL: ${detailUrl}`);
             continue;
           }
 
-          // 2) County verification (existing logic)
+          // 3) County verification (existing logic)
           let belongsToCounty = false;
-          if (countySlugLower && (addrLower.includes(countySlugLower) || snippetLower.includes(countySlugLower) || urlLower.includes(countySlugLower))) {
+          if (countySlugLower && (addrForCheck.includes(countySlugLower) || snippetLower.includes(countySlugLower) || urlLower.includes(countySlugLower))) {
             belongsToCounty = true;
           }
-          if (!belongsToCounty && countyShortLower && (addrLower.includes(countyShortLower) || snippetLower.includes(countyShortLower) || urlLower.includes(countyShortLower))) {
+          if (!belongsToCounty && countyShortLower && (addrForCheck.includes(countyShortLower) || snippetLower.includes(countyShortLower) || urlLower.includes(countyShortLower))) {
             belongsToCounty = true;
           }
 
@@ -509,6 +539,8 @@ async function main() {
             console.log(`[VERIFY] Detail page does not appear to belong to ${countySlug || countyShort || "this county"}. Skipping: ${detailUrl}`);
             continue;
           }
+
+          // --- End robust state + county verification ---
 
           if (!normalizedAddress) {
             console.log(`[DETAIL] Empty address after trimming. Skipping.`);
