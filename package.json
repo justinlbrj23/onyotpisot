@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node organizer_headers_tssf.js",
     "fetch:auctions": "node dac_scraper.cjs",
+    "parse-DLT": "node tax-sale-scraper.cjs",
     "fetch:titleSearch": "node titleSearch.cjs",
     "fetch:auctionDaily": "node auction-scraper.cjs",
     "ocr": "node ocr_pipeline.js",
