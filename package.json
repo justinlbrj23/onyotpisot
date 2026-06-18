@@ -22,6 +22,7 @@
   "dependencies": {
     "@google-cloud/vision": "^4.3.2",
     "axios": "^1.6.0",
+    "axios-cookiejar-support": "^3.0.1",
     "chromedriver": "^140.0.4",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
@@ -41,7 +42,8 @@
     "uuidv4": "^6.2.13",
     "node-fetch": "^2.7.0",
     "p-limit": "^7.2.0",
-    "cheerio": "^1.1.2"
+    "cheerio": "^1.1.2",
+    "tough-cookie": "^4.1.2"
   },
   "devDependencies": {
     "cross-env": "^7.0.3",
