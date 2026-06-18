@@ -15,35 +15,45 @@ const SHEET_NAME = process.env.SHEET_NAME || 'Tax Sale Tracker';
 const SERVICE_ACCOUNT_FILE = path.join(process.cwd(), 'service-account.json');
 const DEBUG_DIR = path.join(process.cwd(), 'debug_ocr');
 
-/**
- * Crop coordinates tuned to the rendered parcel form layout.
- * If the site layout changes later, only the RECTS section should need tuning.
- */
-const VIEWPORT = { width: 640, height: 480 };
-const BASE_SHOT = { width: 640, height: 480 };
+const VIEWPORT = { width: 1280, height: 900 };
 
 /**
- * Rect coordinates in CSS pixels for a 640x480 screenshot.
- * These target the visible input/value boxes rather than labels.
+ * Baseline label positions from the page layout.
+ * We use OCR-detected label position(s) to shift field crop boxes dynamically.
  */
-const RECTS = {
-  suitNo:         { x: 96,  y: 92,  width: 162, height: 25 },
-  parcelNo:       { x: 366, y: 92,  width: 214, height: 25 },
-  owner:          { x: 96,  y: 118, width: 364, height: 25 },
+const LABEL_BASE = {
+  suitNo: { x: 25, y: 126 },
+  parcelNo: { x: 327, y: 126 },
+  owner: { x: 22, y: 155 },
+  propertyAddress: { x: 25, y: 215 },
+  dateSold: { x: 25, y: 324 },
+  purchasePrice: { x: 25, y: 352 },
+  judgment: { x: 326, y: 352 },
+  excess: { x: 499, y: 352 },
+  purchaser: { x: 25, y: 379 }
+};
 
-  propertyStreet: { x: 65,  y: 177, width: 295, height: 25 },
-  propertyCity:   { x: 364, y: 177, width: 105, height: 25 },
-  propertyState:  { x: 461, y: 177, width: 53,  height: 25 },
+/**
+ * Baseline value-box crop rectangles.
+ * These are adjusted dynamically based on detected labels.
+ */
+const VALUE_BASE = {
+  suitNo:         { x: 103, y: 117, width: 163, height: 29 },
+  parcelNo:       { x: 374, y: 117, width: 215, height: 29 },
+  owner:          { x: 103, y: 145, width: 372, height: 29 },
 
-  dateSold:       { x: 111, y: 252, width: 248, height: 25 },
-  purchasePrice:  { x: 111, y: 279, width: 149, height: 25 },
-  judgment:       { x: 366, y: 279, width: 94,  height: 25 },
-  excess:         { x: 528, y: 279, width: 60,  height: 25 },
+  propertyStreet: { x: 66,  y: 206, width: 296, height: 29 },
+  propertyCity:   { x: 364, y: 206, width: 105, height: 29 },
+  propertyState:  { x: 461, y: 206, width: 53,  height: 29 },
 
-  purchaser:      { x: 96,  y: 305, width: 364, height: 25 },
+  dateSold:       { x: 111, y: 315, width: 249, height: 29 },
+  purchasePrice:  { x: 111, y: 342, width: 149, height: 29 },
+  judgment:       { x: 366, y: 342, width: 95,  height: 29 },
+  excess:         { x: 529, y: 342, width: 61,  height: 29 },
 
-  // Debug crop for the visible form region
-  formArea:       { x: 55,  y: 70,  width: 545, height: 290 }
+  purchaser:      { x: 96,  y: 368, width: 379, height: 29 },
+
+  formArea:       { x: 0,   y: 70,  width: 650, height: 520 }
 };
 
 function clean(value) {
@@ -57,9 +67,13 @@ function clean(value) {
 
 function stripLeadingNoise(value) {
   return clean(value)
-    .replace(/^[\]\[\(\)\{\}~`'".,:;_-]+/, '')
-    .replace(/[\]\[\(\)\{\}~`'".,:;_-]+$/, '')
+    .replace(/^[\]\[\(\)\{\}~`'".,:;_\-]+/, '')
+    .replace(/[\]\[\(\)\{\}~`'".,:;_\-]+$/, '')
     .trim();
+}
+
+function normalizeWord(value) {
+  return clean(value).toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
 function cleanupName(value) {
@@ -69,7 +83,6 @@ function cleanupName(value) {
     .replace(/\s+/g, ' ')
     .trim();
 
-  // Common OCR cleanup
   v = v.replace(/\bLLC\.$/i, 'LLC');
   return v;
 }
@@ -124,68 +137,99 @@ function makeSheetSignature(record) {
   ].join(' | ');
 }
 
+function looksLikeMoney(v) {
+  return /^\$?\d[\d,]*\.?\d*$/.test(clean(v));
+}
+
+function looksLikeDate(v) {
+  return /^\d{1,2}[\/.-]\d{1,2}[\/.-]\d{2,4}$/.test(clean(v));
+}
+
+function looksLikeOwner(v) {
+  const s = clean(v);
+  return s.length >= 6 && /[A-Za-z]/.test(s);
+}
+
+function looksLikeAddress(v) {
+  const s = clean(v);
+  return s.length >= 8 && /\d/.test(s) && /[A-Za-z]/.test(s);
+}
+
+function looksLikePurchaser(v) {
+  const s = clean(v);
+  return s.length >= 4 && /[A-Za-z]/.test(s);
+}
+
+function recordQuality(record) {
+  let score = 0;
+
+  if (looksLikeOwner(record.owner)) score += 2;
+  if (looksLikeAddress(record.propertyAddress)) score += 3;
+  if (looksLikeDate(record.dateSold)) score += 2;
+  if (looksLikeMoney(record.purchasePrice)) score += 1;
+  if (looksLikeMoney(record.judgment)) score += 1;
+  if (looksLikeMoney(record.excess)) score += 1;
+  if (looksLikePurchaser(record.purchaser)) score += 1;
+
+  return score;
+}
+
 function isRecordUsable(record) {
-  return Boolean(
-    clean(record.propertyAddress) ||
-    clean(record.owner) ||
-    clean(record.dateSold) ||
-    clean(record.judgment) ||
-    clean(record.purchasePrice) ||
-    clean(record.excess) ||
-    clean(record.purchaser)
-  );
+  return recordQuality(record) >= 5;
 }
 
 async function ensureDir(dir) {
   await fs.promises.mkdir(dir, { recursive: true });
 }
 
-function scaledRect(rect, actualWidth, actualHeight) {
-  const scaleX = actualWidth / BASE_SHOT.width;
-  const scaleY = actualHeight / BASE_SHOT.height;
-
-  return {
-    left: Math.max(0, Math.round(rect.x * scaleX)),
-    top: Math.max(0, Math.round(rect.y * scaleY)),
-    width: Math.max(1, Math.round(rect.width * scaleX)),
-    height: Math.max(1, Math.round(rect.height * scaleY))
-  };
+function imageHash(filePath) {
+  const buf = fs.readFileSync(filePath);
+  return crypto.createHash('md5').update(buf).digest('hex');
 }
 
-async function cropAndPreprocess(rawShotPath, outPath, rect, options = {}) {
+async function capturePage(page, index) {
+  await ensureDir(DEBUG_DIR);
+
+  const rawShotPath = path.join(
+    DEBUG_DIR,
+    `record-${String(index).padStart(4, '0')}-raw.png`
+  );
+
+  await page.screenshot({
+    path: rawShotPath,
+    fullPage: false
+  });
+
+  return rawShotPath;
+}
+
+async function cropImage(inputPath, outputPath, rect, preprocess = {}) {
   const {
+    pad = 4,
     threshold = 185,
     enlarge = 3,
     grayscale = true,
-    sharpen = true,
     normalize = true,
-    pad = 2
-  } = options;
+    sharpen = true
+  } = preprocess;
 
-  const meta = await sharp(rawShotPath).metadata();
-  const actualWidth = meta.width || BASE_SHOT.width;
-  const actualHeight = meta.height || BASE_SHOT.height;
+  const meta = await sharp(inputPath).metadata();
+  const imgW = meta.width;
+  const imgH = meta.height;
 
-  const r = scaledRect(rect, actualWidth, actualHeight);
+  const left = Math.max(0, Math.round(rect.x - pad));
+  const top = Math.max(0, Math.round(rect.y - pad));
+  const width = Math.min(imgW - left, Math.round(rect.width + pad * 2));
+  const height = Math.min(imgH - top, Math.round(rect.height + pad * 2));
 
-  const safeLeft = Math.max(0, r.left - pad);
-  const safeTop = Math.max(0, r.top - pad);
-  const safeWidth = Math.min(actualWidth - safeLeft, r.width + pad * 2);
-  const safeHeight = Math.min(actualHeight - safeTop, r.height + pad * 2);
-
-  let img = sharp(rawShotPath).extract({
-    left: safeLeft,
-    top: safeTop,
-    width: safeWidth,
-    height: safeHeight
-  });
+  let img = sharp(inputPath).extract({ left, top, width, height });
 
   if (grayscale) img = img.grayscale();
   if (normalize) img = img.normalize();
 
   img = img.resize({
-    width: safeWidth * enlarge,
-    height: safeHeight * enlarge,
+    width: width * enlarge,
+    height: height * enlarge,
     fit: 'fill'
   });
 
@@ -193,10 +237,10 @@ async function cropAndPreprocess(rawShotPath, outPath, rect, options = {}) {
 
   img = img.threshold(threshold).png();
 
-  await img.toFile(outPath);
+  await img.toFile(outputPath);
 }
 
-async function runTesseract(imagePath, opts = {}) {
+async function runTesseractText(imagePath, opts = {}) {
   const {
     psm = 7,
     whitelist = ''
@@ -217,75 +261,169 @@ async function runTesseract(imagePath, opts = {}) {
     args.push('-c', `tessedit_char_whitelist=${whitelist}`);
   }
 
-  const { stdout, stderr } = await execFileAsync('tesseract', args);
-
-  if (stderr && stderr.trim()) {
-    console.log('Tesseract stderr:', stderr.trim());
-  }
-
-  return clean(
-    String(stdout || '')
-      .replace(/\r/g, '\n')
-      .replace(/\n+/g, ' ')
-  );
+  const { stdout } = await execFileAsync('tesseract', args);
+  return clean(String(stdout || '').replace(/\r/g, '\n').replace(/\n+/g, ' '));
 }
 
-async function ocrField(rawShotPath, fieldName, rect, ocrOpts, preprocessVariants = []) {
-  const base = path.join(DEBUG_DIR, fieldName);
+async function runTesseractTsv(imagePath, opts = {}) {
+  const psm = opts.psm || 11;
 
-  const variants = preprocessVariants.length
-    ? preprocessVariants
+  const args = [
+    imagePath,
+    'stdout',
+    '--psm',
+    String(psm),
+    '-l',
+    'eng',
+    'tsv'
+  ];
+
+  const { stdout } = await execFileAsync('tesseract', args);
+  return String(stdout || '');
+}
+
+function parseTsv(tsv) {
+  const lines = String(tsv || '').split('\n').filter(Boolean);
+  if (!lines.length) return [];
+
+  const header = lines[0].split('\t');
+  const rows = [];
+
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split('\t');
+    if (cols.length < header.length) continue;
+
+    const obj = {};
+    for (let j = 0; j < header.length; j++) {
+      obj[header[j]] = cols[j];
+    }
+
+    const text = clean(obj.text || '');
+    const conf = Number(obj.conf || -1);
+
+    if (!text) continue;
+
+    rows.push({
+      text,
+      norm: normalizeWord(text),
+      conf,
+      left: Number(obj.left || 0),
+      top: Number(obj.top || 0),
+      width: Number(obj.width || 0),
+      height: Number(obj.height || 0)
+    });
+  }
+
+  return rows;
+}
+
+function findPhrase(words, phraseTokens) {
+  const target = phraseTokens.map(normalizeWord);
+
+  for (let i = 0; i <= words.length - target.length; i++) {
+    let ok = true;
+    for (let j = 0; j < target.length; j++) {
+      if (words[i + j].norm !== target[j]) {
+        ok = false;
+        break;
+      }
+    }
+
+    if (ok) {
+      const group = words.slice(i, i + target.length);
+      const left = Math.min(...group.map(w => w.left));
+      const top = Math.min(...group.map(w => w.top));
+      const right = Math.max(...group.map(w => w.left + w.width));
+      const bottom = Math.max(...group.map(w => w.top + w.height));
+
+      return {
+        left,
+        top,
+        width: right - left,
+        height: bottom - top
+      };
+    }
+  }
+
+  return null;
+}
+
+function computeDynamicRects(words) {
+  const ownerLabel = findPhrase(words, ['Owner']);
+  const propertyLabel = findPhrase(words, ['Property', 'Address']);
+  const dateLabel = findPhrase(words, ['Date', 'Sold']);
+
+  let dx = 0;
+  let dy = 0;
+
+  if (ownerLabel) {
+    dx = ownerLabel.left - LABEL_BASE.owner.x;
+    dy = ownerLabel.top - LABEL_BASE.owner.y;
+  } else if (propertyLabel) {
+    dx = propertyLabel.left - LABEL_BASE.propertyAddress.x;
+    dy = propertyLabel.top - LABEL_BASE.propertyAddress.y;
+  } else if (dateLabel) {
+    dx = dateLabel.left - LABEL_BASE.dateSold.x;
+    dy = dateLabel.top - LABEL_BASE.dateSold.y;
+  }
+
+  const rects = {};
+  for (const [key, rect] of Object.entries(VALUE_BASE)) {
+    rects[key] = {
+      x: rect.x + dx,
+      y: rect.y + dy,
+      width: rect.width,
+      height: rect.height
+    };
+  }
+
+  return rects;
+}
+
+async function ocrField(rawShotPath, baseName, rect, ocrOpts, variants = []) {
+  const list = variants.length
+    ? variants
     : [
-        { threshold: 170, enlarge: 3, pad: 2 },
-        { threshold: 185, enlarge: 3, pad: 2 },
-        { threshold: 200, enlarge: 4, pad: 2 }
+        { threshold: 170, enlarge: 3, pad: 4 },
+        { threshold: 185, enlarge: 3, pad: 4 },
+        { threshold: 200, enlarge: 4, pad: 4 }
       ];
 
   const results = [];
 
-  for (let i = 0; i < variants.length; i++) {
-    const outPath = `${base}-v${i + 1}.png`;
-    await cropAndPreprocess(rawShotPath, outPath, rect, variants[i]);
+  for (let i = 0; i < list.length; i++) {
+    const outPath = path.join(DEBUG_DIR, `${baseName}-v${i + 1}.png`);
+    await cropImage(rawShotPath, outPath, rect, list[i]);
 
-    const text = await runTesseract(outPath, ocrOpts).catch(() => '');
-    results.push(clean(text));
+    const text = await runTesseractText(outPath, ocrOpts).catch(() => '');
+    results.push(stripLeadingNoise(text));
   }
 
-  const best = results
-    .map((v) => stripLeadingNoise(v))
-    .sort((a, b) => b.length - a.length)[0] || '';
-
+  const best = results.sort((a, b) => b.length - a.length)[0] || '';
   return best;
 }
 
-async function saveDebugFormCrop(rawShotPath, index) {
+async function saveFormAreaDebug(rawShotPath, rects, index) {
+  const formRect = rects.formArea || VALUE_BASE.formArea;
   const outPath = path.join(DEBUG_DIR, `record-${String(index).padStart(4, '0')}-form.png`);
-  await cropAndPreprocess(rawShotPath, outPath, RECTS.formArea, {
+
+  await cropImage(rawShotPath, outPath, formRect, {
     threshold: 180,
     enlarge: 2,
-    pad: 4
+    pad: 6
   });
 }
 
-async function capturePage(page, index) {
-  await ensureDir(DEBUG_DIR);
+async function extractRecordWithDynamicOCR(rawShotPath, index) {
+  const pageTsv = await runTesseractTsv(rawShotPath, { psm: 11 });
+  const words = parseTsv(pageTsv);
 
-  const rawShotPath = path.join(
-    DEBUG_DIR,
-    `record-${String(index).padStart(4, '0')}-raw.png`
-  );
+  const tsvPath = path.join(DEBUG_DIR, `record-${String(index).padStart(4, '0')}-page.tsv`);
+  await fs.promises.writeFile(tsvPath, pageTsv, 'utf8');
 
-  await page.screenshot({
-    path: rawShotPath,
-    fullPage: false
-  });
+  const rects = computeDynamicRects(words);
+  await saveFormAreaDebug(rawShotPath, rects, index);
 
-  await saveDebugFormCrop(rawShotPath, index);
-
-  return rawShotPath;
-}
-
-async function extractRecordWithFieldOCR(rawShotPath, index) {
   const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
   const MONEY = '0123456789$,.';
   const DATE = '0123456789/.';
@@ -295,77 +433,77 @@ async function extractRecordWithFieldOCR(rawShotPath, index) {
   const suitNo = await ocrField(
     rawShotPath,
     `record-${String(index).padStart(4, '0')}-suitNo`,
-    RECTS.suitNo,
+    rects.suitNo,
     { psm: 7, whitelist: `${ALNUM}-` }
   );
 
   const parcelNo = await ocrField(
     rawShotPath,
     `record-${String(index).padStart(4, '0')}-parcelNo`,
-    RECTS.parcelNo,
+    rects.parcelNo,
     { psm: 7, whitelist: `${ALNUM}-` }
   );
 
   const owner = await ocrField(
     rawShotPath,
     `record-${String(index).padStart(4, '0')}-owner`,
-    RECTS.owner,
+    rects.owner,
     { psm: 7, whitelist: NAME }
   );
 
   const propertyStreet = await ocrField(
     rawShotPath,
     `record-${String(index).padStart(4, '0')}-propertyStreet`,
-    RECTS.propertyStreet,
+    rects.propertyStreet,
     { psm: 7, whitelist: ADDRESS }
   );
 
   const propertyCity = await ocrField(
     rawShotPath,
     `record-${String(index).padStart(4, '0')}-propertyCity`,
-    RECTS.propertyCity,
+    rects.propertyCity,
     { psm: 7, whitelist: ADDRESS }
   );
 
   const propertyState = await ocrField(
     rawShotPath,
     `record-${String(index).padStart(4, '0')}-propertyState`,
-    RECTS.propertyState,
+    rects.propertyState,
     { psm: 7, whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' }
   );
 
   const dateSold = await ocrField(
     rawShotPath,
     `record-${String(index).padStart(4, '0')}-dateSold`,
-    RECTS.dateSold,
+    rects.dateSold,
     { psm: 7, whitelist: DATE }
   );
 
   const purchasePrice = await ocrField(
     rawShotPath,
     `record-${String(index).padStart(4, '0')}-purchasePrice`,
-    RECTS.purchasePrice,
+    rects.purchasePrice,
     { psm: 7, whitelist: MONEY }
   );
 
   const judgment = await ocrField(
     rawShotPath,
     `record-${String(index).padStart(4, '0')}-judgment`,
-    RECTS.judgment,
+    rects.judgment,
     { psm: 7, whitelist: MONEY }
   );
 
   const excess = await ocrField(
     rawShotPath,
     `record-${String(index).padStart(4, '0')}-excess`,
-    RECTS.excess,
+    rects.excess,
     { psm: 7, whitelist: MONEY }
   );
 
   const purchaser = await ocrField(
     rawShotPath,
     `record-${String(index).padStart(4, '0')}-purchaser`,
-    RECTS.purchaser,
+    rects.purchaser,
     { psm: 7, whitelist: NAME }
   );
 
@@ -387,15 +525,21 @@ async function extractRecordWithFieldOCR(rawShotPath, index) {
     purchaser: cleanupName(purchaser)
   };
 
+  const quality = recordQuality(record);
+
   const outJson = path.join(
     DEBUG_DIR,
     `record-${String(index).padStart(4, '0')}-parsed.json`
   );
-  await fs.promises.writeFile(outJson, JSON.stringify(record, null, 2), 'utf8');
+  await fs.promises.writeFile(
+    outJson,
+    JSON.stringify({ quality, record }, null, 2),
+    'utf8'
+  );
 
-  console.log(`Parsed record [${index}]:`, JSON.stringify(record, null, 2));
+  console.log(`Parsed record [${index}] quality=${quality}:`, JSON.stringify(record, null, 2));
 
-  return record;
+  return { record, quality };
 }
 
 async function getGoogleSheetsClient() {
@@ -490,18 +634,13 @@ async function tryClickNext(page) {
     } catch (_) {}
   }
 
-  // Coordinate fallback based on the visible "Next" position in the rendered layout
+  // coordinate fallback
   try {
-    await page.mouse.click(286, 79);
+    await page.mouse.click(291, 107);
     return true;
   } catch (_) {}
 
   return false;
-}
-
-function imageHash(filePath) {
-  const buf = fs.readFileSync(filePath);
-  return crypto.createHash('md5').update(buf).digest('hex');
 }
 
 async function scrapeAllParcels() {
@@ -514,8 +653,8 @@ async function scrapeAllParcels() {
   });
 
   const records = [];
-  const seenRecordSigs = new Set();
   const seenImageHashes = new Set();
+  const seenRecordSigs = new Set();
 
   try {
     console.log('Starting scraper...');
@@ -526,13 +665,11 @@ async function scrapeAllParcels() {
       timeout: 60000
     });
 
-    await page.waitForTimeout(3500);
+    await page.waitForTimeout(4000);
 
     const MAX_PAGES = Number(process.env.MAX_PAGES || 5000);
 
     for (let i = 1; i <= MAX_PAGES; i++) {
-      await page.waitForTimeout(1800);
-
       const rawShotPath = await capturePage(page, i);
       const shotHash = imageHash(rawShotPath);
 
@@ -542,16 +679,17 @@ async function scrapeAllParcels() {
       }
       seenImageHashes.add(shotHash);
 
-      const record = await extractRecordWithFieldOCR(rawShotPath, i);
-      const sig = makeSignature(record);
+      const { record, quality } = await extractRecordWithDynamicOCR(rawShotPath, i);
 
       if (isRecordUsable(record)) {
+        const sig = makeSignature(record);
+
         if (!seenRecordSigs.has(sig)) {
           seenRecordSigs.add(sig);
           records.push(record);
 
           console.log(
-            `[${records.length}] ` +
+            `[${records.length}] quality=${quality} | ` +
             `Suit No="${record.suitNo}" | ` +
             `Parcel No="${record.parcelNo}" | ` +
             `Property Address="${record.propertyAddress}" | ` +
@@ -563,10 +701,12 @@ async function scrapeAllParcels() {
             `Purchaser="${record.purchaser}"`
           );
         } else {
-          console.log('Duplicate OCR record in current run; skipping.');
+          console.log('Duplicate valid OCR record in current run; skipping.');
         }
       } else {
-        console.log('OCR record had no usable data.');
+        console.log(
+          `Rejected OCR record [${i}] due to low quality score (${quality}). Not adding to output.`
+        );
       }
 
       const clicked = await tryClickNext(page);
@@ -575,10 +715,10 @@ async function scrapeAllParcels() {
         break;
       }
 
-      await page.waitForTimeout(2500);
+      await page.waitForTimeout(3000);
     }
 
-    console.log(`Scraping complete. Collected ${records.length} unique record(s).`);
+    console.log(`Scraping complete. Collected ${records.length} valid unique record(s).`);
     return records;
   } finally {
     await page.close().catch(() => null);
@@ -590,7 +730,7 @@ async function main() {
   const records = await scrapeAllParcels();
 
   if (!records.length) {
-    console.log('No records scraped. Exiting without Sheets update.');
+    console.log('No valid records scraped. Exiting without Sheets update.');
     return;
   }
 
@@ -600,7 +740,12 @@ async function main() {
   const newRecords = records.filter((r) => !existingSignatures.has(makeSheetSignature(r)));
 
   console.log(`Existing sheet signatures: ${existingSignatures.size}`);
-  console.log(`New records to append: ${newRecords.length}`);
+  console.log(`New valid records to append: ${newRecords.length}`);
+
+  if (!newRecords.length) {
+    console.log('No new valid records to append.');
+    return;
+  }
 
   await appendRowsToSheet(sheets, newRecords);
 
