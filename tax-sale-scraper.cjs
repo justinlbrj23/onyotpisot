@@ -1,5 +1,16 @@
 const fs = require('fs');
-const path = require('path_ID = process.env.SHEET_ID || '1fdj-Lk5RIjuo4ekGiAHUPoW7JKqTuiy35b_Q8w2xTyg';const path = require('path');
+const path = require('path');
+const crypto = require('crypto');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
+const sharp = require('sharp');
+const { chromium } = require('playwright');
+const { google } = require('googleapis');
+
+const execFileAsync = promisify(execFile);
+
+const TARGET_URL = 'https://www.16thcircuit.org/browse-all-parcels';
+const SHEET_ID = process.env.SHEET_ID || '1fdj-Lk5RIjuo4ekGiAHUPoW7JKqTuiy35b_Q8w2xTyg';
 const SHEET_NAME = process.env.SHEET_NAME || 'Tax Sale Tracker';
 const SERVICE_ACCOUNT_FILE = path.join(process.cwd(), 'service-account.json');
 const DEBUG_DIR = path.join(process.cwd(), 'debug_ocr');
@@ -8,18 +19,18 @@ const VIEWPORT = { width: 1280, height: 900 };
 
 /**
  * Full-page screenshot -> crop ONLY the parcel form area first.
- * Tuned from the uploaded raw screenshot.
+ * Tuned from the actual screenshot you shared.
  */
 const FORM_RECT = {
-  x: 176,
-  y: 312,
-  width: 642,
-  height: 306
+  x: 185,
+  y: 260,
+  width: 660,
+  height: 330
 };
 
 /**
  * Field boxes relative to FORM_RECT.
- * Only OCR the fields requested for Google Sheets:
+ * These target ONLY the requested fields:
  * - Property Address
  * - Owner
  * - Date Sold
@@ -29,18 +40,18 @@ const FORM_RECT = {
  * - Purchaser
  */
 const FORM_FIELD_RECTS = {
-  owner:          { x: 103, y: 34,  width: 402, height: 29 },
+  owner:          { x: 110, y: 48,  width: 400, height: 28 },
 
-  propertyStreet: { x: 103, y: 136, width: 293, height: 29 },
-  propertyCity:   { x: 401, y: 136, width: 103, height: 29 },
-  propertyState:  { x: 507, y: 136, width: 47,  height: 29 },
+  propertyStreet: { x: 110, y: 115, width: 295, height: 28 },
+  propertyCity:   { x: 410, y: 115, width: 110, height: 28 },
+  propertyState:  { x: 525, y: 115, width: 55,  height: 28 },
 
-  dateSold:       { x: 103, y: 204, width: 293, height: 29 },
-  purchasePrice:  { x: 103, y: 236, width: 180, height: 29 },
-  judgment:       { x: 401, y: 236, width: 104, height: 29 },
-  excess:         { x: 577, y: 236, width: 58,  height: 29 },
+  dateSold:       { x: 110, y: 185, width: 300, height: 28 },
+  purchasePrice:  { x: 110, y: 215, width: 200, height: 28 },
+  judgment:       { x: 410, y: 215, width: 120, height: 28 },
+  excess:         { x: 560, y: 215, width: 70,  height: 28 },
 
-  purchaser:      { x: 103, y: 268, width: 402, height: 29 }
+  purchaser:      { x: 110, y: 245, width: 420, height: 28 }
 };
 
 function clean(value) {
@@ -142,7 +153,7 @@ function looksLikePurchaser(v) {
 }
 
 /**
- * Very strict gate to prevent junk rows from being appended.
+ * Strict validation gate so garbage OCR doesn't get appended.
  */
 function isRecordUsable(record) {
   return (
@@ -576,9 +587,9 @@ async function tryClickNext(page) {
     } catch (_) {}
   }
 
-  // Fallback coordinate based on uploaded raw screenshot
+  // Fallback coordinate based on the screenshot
   try {
-    await page.mouse.click(489, 299);
+    await page.mouse.click(470, 305);
     await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => null);
     return true;
   } catch (_) {}
@@ -669,6 +680,14 @@ async function scrapeAllParcels() {
 }
 
 async function main() {
+  if (!SHEET_ID) {
+    throw new Error('Missing SHEET_ID environment variable.');
+  }
+
+  if (!SHEET_NAME) {
+    throw new Error('Missing SHEET_NAME environment variable.');
+  }
+
   const records = await scrapeAllParcels();
 
   if (!records.length) {
@@ -698,13 +717,3 @@ main().catch((err) => {
   console.error('Fatal error:', err);
   process.exit(1);
 });
-const crypto = require('crypto');
-const { execFile } = require('child_process');
-const { promisify } = require('util');
-const sharp = require('sharp');
-const { chromium } = require('playwright');
-const { google } = require('googleapis');
-
-const execFileAsync = promisify(execFile);
-
-const TARGET_URL = 'https://www.16thcircuit.org/browse-all-parcels';
