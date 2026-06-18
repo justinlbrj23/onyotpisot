@@ -18,40 +18,41 @@ const DEBUG_DIR = path.join(process.cwd(), 'debug_ocr');
 const VIEWPORT = { width: 1280, height: 900 };
 
 /**
- * Full-page screenshot -> crop ONLY the parcel form area first.
- * Tuned from the actual screenshot you shared.
+ * Updated crop based on the latest uploaded form-base image.
+ * Changes vs previous version:
+ * - slightly taller crop so Purchaser row is included
+ * - slightly better vertical alignment for the actual field rows
  */
 const FORM_RECT = {
-  x: 185,
-  y: 260,
-  width: 660,
-  height: 330
+  x: 182,
+  y: 258,
+  width: 668,
+  height: 390
 };
 
 /**
- * Field boxes relative to FORM_RECT.
- * These target ONLY the requested fields:
- * - Property Address
- * - Owner
- * - Date Sold
- * - Judgment
- * - Purchase Price
- * - Excess
- * - Purchaser
+ * OCR boxes relative to FORM_RECT.
+ * Tuned from the latest "record-0001-form-base.png" result.
+ *
+ * Main fixes:
+ * - owner moved DOWN
+ * - property address moved DOWN
+ * - date/money rows moved DOWN
+ * - purchaser moved DOWN significantly
  */
 const FORM_FIELD_RECTS = {
-  owner:          { x: 110, y: 48,  width: 400, height: 28 },
+  owner:          { x: 96,  y: 67,  width: 405, height: 30 },
 
-  propertyStreet: { x: 110, y: 115, width: 295, height: 28 },
-  propertyCity:   { x: 410, y: 115, width: 110, height: 28 },
-  propertyState:  { x: 525, y: 115, width: 55,  height: 28 },
+  propertyStreet: { x: 96,  y: 160, width: 298, height: 30 },
+  propertyCity:   { x: 398, y: 160, width: 108, height: 30 },
+  propertyState:  { x: 510, y: 160, width: 58,  height: 30 },
 
-  dateSold:       { x: 110, y: 185, width: 300, height: 28 },
-  purchasePrice:  { x: 110, y: 215, width: 200, height: 28 },
-  judgment:       { x: 410, y: 215, width: 120, height: 28 },
-  excess:         { x: 560, y: 215, width: 70,  height: 28 },
+  dateSold:       { x: 96,  y: 236, width: 300, height: 30 },
+  purchasePrice:  { x: 96,  y: 267, width: 185, height: 30 },
+  judgment:       { x: 398, y: 267, width: 112, height: 30 },
+  excess:         { x: 554, y: 267, width: 64,  height: 30 },
 
-  purchaser:      { x: 110, y: 245, width: 420, height: 28 }
+  purchaser:      { x: 96,  y: 298, width: 405, height: 30 }
 };
 
 function clean(value) {
@@ -153,7 +154,7 @@ function looksLikePurchaser(v) {
 }
 
 /**
- * Strict validation gate so garbage OCR doesn't get appended.
+ * Strict validation gate to prevent bad OCR rows.
  */
 function isRecordUsable(record) {
   return (
@@ -587,7 +588,7 @@ async function tryClickNext(page) {
     } catch (_) {}
   }
 
-  // Fallback coordinate based on the screenshot
+  // Fallback click point for the visible "Next" button at 1280x900
   try {
     await page.mouse.click(470, 305);
     await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => null);
