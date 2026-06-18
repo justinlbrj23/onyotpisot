@@ -1,0 +1,124 @@
+name: 16th Circuit Tax Sale Tracker to Google Sheets
+
+on:
+  schedule:
+    # 8:00 AM America/Chicago during CDT (UTC-5)
+    - cron: '0 13 * * *'
+
+    # 8:00 AM America/Chicago during CST (UTC-6)
+    - cron: '0 14 * * *'
+
+  workflow_dispatch:
+
+jobs:
+  scrape-tax-sale-and-log:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      # ==========================================
+      # CHECKOUT REPOSITORY
+      # ==========================================
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # ==========================================
+      # VERIFY CHICAGO TIME IS 8 AM
+      # ==========================================
+      - name: Verify Chicago Time
+        run: |
+          CHICAGO_HOUR=$(TZ=America/Chicago date +%H)
+
+          echo "Current Chicago Hour: $CHICAGO_HOUR"
+
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$CHICAGO_HOUR" != "08" ]; then
+            echo "Not 8 AM in Chicago. Exiting."
+            exit 0
+          fi
+
+          echo "Chicago time check passed. Continuing..."
+
+      # ==========================================
+      # SETUP NODE
+      # ==========================================
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          package-manager-cache: false
+
+      # ==========================================
+      # SHOW NODE / NPM VERSIONS
+      # ==========================================
+      - name: Show Node and npm Versions
+        run: |
+          node -v
+          npm -v
+
+      # ==========================================
+      # INSTALL DEPENDENCIES
+      # ==========================================
+      - name: Install Dependencies
+        run: npm install
+
+      # ==========================================
+      # INSTALL PLAYWRIGHT CHROMIUM
+      # ==========================================
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      # ==========================================
+      # WRITE GOOGLE SERVICE ACCOUNT JSON
+      # ==========================================
+      - name: Write Service Account JSON
+        run: |
+          cat > service-account.json <<'JSON'
+          ${{ secrets.SERVICE_ACCOUNT_JSON }}
+          JSON
+
+      # ==========================================
+      # VALIDATE JSON
+      # ==========================================
+      - name: Validate Service Account JSON
+        run: |
+          node -e "
+          const fs = require('fs');
+          const raw = fs.readFileSync('service-account.json', 'utf8');
+          const j = JSON.parse(raw);
+
+          const required = [
+            'private_key',
+            'client_email',
+            'project_id'
+          ];
+
+          for (const key of required) {
+            if (!(key in j)) {
+              throw new Error('Missing required field: ' + key);
+            }
+          }
+
+          console.log('====================================');
+          console.log('Google Service Account Loaded OK');
+          console.log('Client Email:', j.client_email);
+          console.log('Project ID:', j.project_id);
+          console.log('====================================');
+          "
+
+      # ==========================================
+      # VERIFY JS SCRIPT EXISTS
+      # ==========================================
+      - name: Verify JS Script
+        run: |
+          ls -la
+          test -f tax-sale-scraper.cjs
+
+      # ==========================================
+      # RUN SCRAPER
+      # ==========================================
+      - name: Run Tax Sale Scraper
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          SHEET_ID: 1fdj-Lk5RIjuo4ekGiAHUPoW7JKqTuiy35b_Q8w2xTyg
+          SHEET_NAME: Tax Sale Tracker
+        run: node tax-sale-scraper.cjs
