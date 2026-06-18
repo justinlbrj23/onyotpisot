@@ -1,7 +1,43 @@
 const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
-  judgment:       { x: 401, y: 236, width: 104, height: 29 },const { execFile } = require('child_process');
+const path = require('path_ID = process.env.SHEET_ID || '1fdj-Lk5RIjuo4ekGiAHUPoW7JKqTuiy35b_Q8w2xTyg';const path = require('path');
+const SHEET_NAME = process.env.SHEET_NAME || 'Tax Sale Tracker';
+const SERVICE_ACCOUNT_FILE = path.join(process.cwd(), 'service-account.json');
+const DEBUG_DIR = path.join(process.cwd(), 'debug_ocr');
+
+const VIEWPORT = { width: 1280, height: 900 };
+
+/**
+ * Full-page screenshot -> crop ONLY the parcel form area first.
+ * Tuned from the uploaded raw screenshot.
+ */
+const FORM_RECT = {
+  x: 176,
+  y: 312,
+  width: 642,
+  height: 306
+};
+
+/**
+ * Field boxes relative to FORM_RECT.
+ * Only OCR the fields requested for Google Sheets:
+ * - Property Address
+ * - Owner
+ * - Date Sold
+ * - Judgment
+ * - Purchase Price
+ * - Excess
+ * - Purchaser
+ */
+const FORM_FIELD_RECTS = {
+  owner:          { x: 103, y: 34,  width: 402, height: 29 },
+
+  propertyStreet: { x: 103, y: 136, width: 293, height: 29 },
+  propertyCity:   { x: 401, y: 136, width: 103, height: 29 },
+  propertyState:  { x: 507, y: 136, width: 47,  height: 29 },
+
+  dateSold:       { x: 103, y: 204, width: 293, height: 29 },
+  purchasePrice:  { x: 103, y: 236, width: 180, height: 29 },
+  judgment:       { x: 401, y: 236, width: 104, height: 29 },
   excess:         { x: 577, y: 236, width: 58,  height: 29 },
 
   purchaser:      { x: 103, y: 268, width: 402, height: 29 }
@@ -662,6 +698,8 @@ main().catch((err) => {
   console.error('Fatal error:', err);
   process.exit(1);
 });
+const crypto = require('crypto');
+const { execFile } = require('child_process');
 const { promisify } = require('util');
 const sharp = require('sharp');
 const { chromium } = require('playwright');
@@ -670,41 +708,3 @@ const { google } = require('googleapis');
 const execFileAsync = promisify(execFile);
 
 const TARGET_URL = 'https://www.16thcircuit.org/browse-all-parcels';
-const SHEET_ID = process.env.SHEET_ID || '1fdj-Lk5RIjuo4ekGiAHUPoW7JKqTuiy35b_Q8w2xTyg';
-const SHEET_NAME = process.env.SHEET_NAME || 'Tax Sale Tracker';
-const SERVICE_ACCOUNT_FILE = path.join(process.cwd(), 'service-account.json');
-const DEBUG_DIR = path.join(process.cwd(), 'debug_ocr');
-
-const VIEWPORT = { width: 1280, height: 900 };
-
-/**
- * Full-page screenshot -> crop ONLY the parcel form area first.
- * Tuned from the uploaded raw screenshot.
- */
-const FORM_RECT = {
-  x: 176,
-  y: 312,
-  width: 642,
-  height: 306
-};
-
-/**
- * Field boxes relative to FORM_RECT.
- * Only OCR the fields requested for Google Sheets:
- * - Property Address
- * - Owner
- * - Date Sold
- * - Judgment
- * - Purchase Price
- * - Excess
- * - Purchaser
- */
-const FORM_FIELD_RECTS = {
-  owner:          { x: 103, y: 34,  width: 402, height: 29 },
-
-  propertyStreet: { x: 103, y: 136, width: 293, height: 29 },
-  propertyCity:   { x: 401, y: 136, width: 103, height: 29 },
-  propertyState:  { x: 507, y: 136, width: 47,  height: 29 },
-
-  dateSold:       { x: 103, y: 204, width: 293, height: 29 },
-  purchasePrice:  { x: 103, y: 236, width: 180, height: 29 },
