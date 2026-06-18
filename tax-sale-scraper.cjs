@@ -18,8 +18,8 @@ const DEBUG_DIR = path.join(process.cwd(), 'debug_ocr');
 const VIEWPORT = { width: 1280, height: 900 };
 
 /**
- * Baseline label positions from the page layout.
- * We use OCR-detected label position(s) to shift field crop boxes dynamically.
+ * Baseline label positions from the visible page layout.
+ * We use OCR-detected label positions to shift value crop boxes dynamically.
  */
 const LABEL_BASE = {
   suitNo: { x: 25, y: 126 },
@@ -35,7 +35,7 @@ const LABEL_BASE = {
 
 /**
  * Baseline value-box crop rectangles.
- * These are adjusted dynamically based on detected labels.
+ * These are adjusted dynamically based on detected label positions.
  */
 const VALUE_BASE = {
   suitNo:         { x: 103, y: 117, width: 163, height: 29 },
@@ -53,6 +53,7 @@ const VALUE_BASE = {
 
   purchaser:      { x: 96,  y: 368, width: 379, height: 29 },
 
+  // Debug crop for the visible parcel form area
   formArea:       { x: 0,   y: 70,  width: 650, height: 520 }
 };
 
@@ -175,7 +176,8 @@ function recordQuality(record) {
 }
 
 function isRecordUsable(record) {
-  return recordQuality(record) >= 5;
+  // Stricter threshold to avoid bad OCR rows being appended
+  return recordQuality(record) >= 7;
 }
 
 async function ensureDir(dir) {
@@ -213,14 +215,44 @@ async function cropImage(inputPath, outputPath, rect, preprocess = {}) {
     sharpen = true
   } = preprocess;
 
-  const meta = await sharp(inputPath).metadata();
-  const imgW = meta.width;
-  const imgH = meta.height;
+  if (!rect || !Number.isFinite(rect.x) || !Number.isFinite(rect.y) ||
+      !Number.isFinite(rect.width) || !Number.isFinite(rect.height)) {
+    return false;
+  }
 
-  const left = Math.max(0, Math.round(rect.x - pad));
-  const top = Math.max(0, Math.round(rect.y - pad));
-  const width = Math.min(imgW - left, Math.round(rect.width + pad * 2));
-  const height = Math.min(imgH - top, Math.round(rect.height + pad * 2));
+  const meta = await sharp(inputPath).metadata();
+  const imgW = meta.width || 0;
+  const imgH = meta.height || 0;
+
+  if (imgW <= 0 || imgH <= 0) {
+    return false;
+  }
+
+  const rawLeft = Math.round(rect.x - pad);
+  const rawTop = Math.round(rect.y - pad);
+  const rawWidth = Math.round(rect.width + pad * 2);
+  const rawHeight = Math.round(rect.height + pad * 2);
+
+  if (rawWidth <= 0 || rawHeight <= 0) {
+    return false;
+  }
+
+  if (rawLeft >= imgW || rawTop >= imgH) {
+    return false;
+  }
+
+  const left = Math.max(0, rawLeft);
+  const top = Math.max(0, rawTop);
+
+  const maxWidth = imgW - left;
+  const maxHeight = imgH - top;
+
+  const width = Math.min(maxWidth, rawWidth - Math.max(0, left - rawLeft));
+  const height = Math.min(maxHeight, rawHeight - Math.max(0, top - rawTop));
+
+  if (width <= 1 || height <= 1) {
+    return false;
+  }
 
   let img = sharp(inputPath).extract({ left, top, width, height });
 
@@ -228,8 +260,8 @@ async function cropImage(inputPath, outputPath, rect, preprocess = {}) {
   if (normalize) img = img.normalize();
 
   img = img.resize({
-    width: width * enlarge,
-    height: height * enlarge,
+    width: Math.max(2, width * enlarge),
+    height: Math.max(2, height * enlarge),
     fit: 'fill'
   });
 
@@ -238,6 +270,7 @@ async function cropImage(inputPath, outputPath, rect, preprocess = {}) {
   img = img.threshold(threshold).png();
 
   await img.toFile(outputPath);
+  return true;
 }
 
 async function runTesseractText(imagePath, opts = {}) {
@@ -317,11 +350,13 @@ function parseTsv(tsv) {
   return rows;
 }
 
-function findPhrase(words, phraseTokens) {
+function findPhraseCandidates(words, phraseTokens) {
   const target = phraseTokens.map(normalizeWord);
+  const matches = [];
 
   for (let i = 0; i <= words.length - target.length; i++) {
     let ok = true;
+
     for (let j = 0; j < target.length; j++) {
       if (words[i + j].norm !== target[j]) {
         ok = false;
@@ -329,42 +364,106 @@ function findPhrase(words, phraseTokens) {
       }
     }
 
-    if (ok) {
-      const group = words.slice(i, i + target.length);
-      const left = Math.min(...group.map(w => w.left));
-      const top = Math.min(...group.map(w => w.top));
-      const right = Math.max(...group.map(w => w.left + w.width));
-      const bottom = Math.max(...group.map(w => w.top + w.height));
+    if (!ok) continue;
 
-      return {
-        left,
-        top,
-        width: right - left,
-        height: bottom - top
-      };
+    const group = words.slice(i, i + target.length);
+    const left = Math.min(...group.map(w => w.left));
+    const top = Math.min(...group.map(w => w.top));
+    const right = Math.max(...group.map(w => w.left + w.width));
+    const bottom = Math.max(...group.map(w => w.top + w.height));
+
+    matches.push({
+      left,
+      top,
+      width: right - left,
+      height: bottom - top
+    });
+  }
+
+  return matches;
+}
+
+function pickBestCandidate(candidates, expected) {
+  if (!candidates.length) return null;
+
+  let best = null;
+  let bestScore = Infinity;
+
+  for (const c of candidates) {
+    const dx = c.left - expected.x;
+    const dy = c.top - expected.y;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+
+    if (distance < bestScore) {
+      bestScore = distance;
+      best = c;
     }
   }
 
-  return null;
+  // Too far away = probably wrong OCR phrase match
+  if (bestScore > 180) return null;
+
+  return best;
+}
+
+function cloneBaseRects() {
+  const out = {};
+  for (const [key, rect] of Object.entries(VALUE_BASE)) {
+    out[key] = { ...rect };
+  }
+  return out;
 }
 
 function computeDynamicRects(words) {
-  const ownerLabel = findPhrase(words, ['Owner']);
-  const propertyLabel = findPhrase(words, ['Property', 'Address']);
-  const dateLabel = findPhrase(words, ['Date', 'Sold']);
+  const ownerCandidate = pickBestCandidate(
+    findPhraseCandidates(words, ['Owner']),
+    LABEL_BASE.owner
+  );
 
-  let dx = 0;
-  let dy = 0;
+  const propertyCandidate = pickBestCandidate(
+    findPhraseCandidates(words, ['Property', 'Address']),
+    LABEL_BASE.propertyAddress
+  );
 
-  if (ownerLabel) {
-    dx = ownerLabel.left - LABEL_BASE.owner.x;
-    dy = ownerLabel.top - LABEL_BASE.owner.y;
-  } else if (propertyLabel) {
-    dx = propertyLabel.left - LABEL_BASE.propertyAddress.x;
-    dy = propertyLabel.top - LABEL_BASE.propertyAddress.y;
-  } else if (dateLabel) {
-    dx = dateLabel.left - LABEL_BASE.dateSold.x;
-    dy = dateLabel.top - LABEL_BASE.dateSold.y;
+  const dateCandidate = pickBestCandidate(
+    findPhraseCandidates(words, ['Date', 'Sold']),
+    LABEL_BASE.dateSold
+  );
+
+  const anchors = [
+    ownerCandidate ? {
+      dx: ownerCandidate.left - LABEL_BASE.owner.x,
+      dy: ownerCandidate.top - LABEL_BASE.owner.y
+    } : null,
+    propertyCandidate ? {
+      dx: propertyCandidate.left - LABEL_BASE.propertyAddress.x,
+      dy: propertyCandidate.top - LABEL_BASE.propertyAddress.y
+    } : null,
+    dateCandidate ? {
+      dx: dateCandidate.left - LABEL_BASE.dateSold.x,
+      dy: dateCandidate.top - LABEL_BASE.dateSold.y
+    } : null
+  ].filter(Boolean);
+
+  if (!anchors.length) {
+    return {
+      rects: cloneBaseRects(),
+      debug: { usedFallback: true, dx: 0, dy: 0, reason: 'no-label-anchor' }
+    };
+  }
+
+  const dx = Math.round(
+    anchors.reduce((sum, a) => sum + a.dx, 0) / anchors.length
+  );
+  const dy = Math.round(
+    anchors.reduce((sum, a) => sum + a.dy, 0) / anchors.length
+  );
+
+  if (Math.abs(dx) > 140 || Math.abs(dy) > 140) {
+    return {
+      rects: cloneBaseRects(),
+      debug: { usedFallback: true, dx, dy, reason: 'shift-out-of-range' }
+    };
   }
 
   const rects = {};
@@ -377,7 +476,10 @@ function computeDynamicRects(words) {
     };
   }
 
-  return rects;
+  return {
+    rects,
+    debug: { usedFallback: false, dx, dy, reason: 'dynamic-anchor' }
+  };
 }
 
 async function ocrField(rawShotPath, baseName, rect, ocrOpts, variants = []) {
@@ -393,13 +495,21 @@ async function ocrField(rawShotPath, baseName, rect, ocrOpts, variants = []) {
 
   for (let i = 0; i < list.length; i++) {
     const outPath = path.join(DEBUG_DIR, `${baseName}-v${i + 1}.png`);
-    await cropImage(rawShotPath, outPath, rect, list[i]);
+    const ok = await cropImage(rawShotPath, outPath, rect, list[i]).catch(() => false);
+
+    if (!ok) {
+      results.push('');
+      continue;
+    }
 
     const text = await runTesseractText(outPath, ocrOpts).catch(() => '');
     results.push(stripLeadingNoise(text));
   }
 
-  const best = results.sort((a, b) => b.length - a.length)[0] || '';
+  const best = results
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length)[0] || '';
+
   return best;
 }
 
@@ -411,7 +521,7 @@ async function saveFormAreaDebug(rawShotPath, rects, index) {
     threshold: 180,
     enlarge: 2,
     pad: 6
-  });
+  }).catch(() => false);
 }
 
 async function extractRecordWithDynamicOCR(rawShotPath, index) {
@@ -421,7 +531,13 @@ async function extractRecordWithDynamicOCR(rawShotPath, index) {
   const tsvPath = path.join(DEBUG_DIR, `record-${String(index).padStart(4, '0')}-page.tsv`);
   await fs.promises.writeFile(tsvPath, pageTsv, 'utf8');
 
-  const rects = computeDynamicRects(words);
+  const { rects, debug } = computeDynamicRects(words);
+
+  console.log(
+    `Dynamic OCR alignment [${index}]: ` +
+    `fallback=${debug.usedFallback} reason=${debug.reason} dx=${debug.dx} dy=${debug.dy}`
+  );
+
   await saveFormAreaDebug(rawShotPath, rects, index);
 
   const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -628,15 +744,18 @@ async function tryClickNext(page) {
         try {
           await locator.scrollIntoViewIfNeeded();
         } catch (_) {}
-        await locator.click({ timeout: 5000 });
+
+        await locator.click({ timeout: 5000 }).catch(() => null);
+        await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => null);
         return true;
       }
     } catch (_) {}
   }
 
-  // coordinate fallback
+  // Coordinate fallback
   try {
     await page.mouse.click(291, 107);
+    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => null);
     return true;
   } catch (_) {}
 
