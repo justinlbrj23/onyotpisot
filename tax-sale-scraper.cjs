@@ -4,8 +4,6 @@ const sharp = require('sharp');
 const { chromium } = require('playwright');
 const { google } = require('googleapis');
 
-const execFileAsync = promisify(execFile);
-
 /**
  * Rects are in CSS px for a 640x480 screenshot.
  * Each rect targets ONLY the visible input textbox area (not the label),
