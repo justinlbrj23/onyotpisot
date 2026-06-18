@@ -46,6 +46,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
       # ==========================================
       # SHOW NODE / NPM VERSIONS
@@ -56,25 +57,51 @@ jobs:
           npm -v
 
       # ==========================================
-      # INSTALL DEPENDENCIES
+      # INSTALL DEPENDENCIES (FASTER + STABLE)
       # ==========================================
       - name: Install Dependencies
-        run: npm install
+        run: npm ci
 
       # ==========================================
-      # INSTALL PLAYWRIGHT CHROMIUM
+      # INSTALL SYSTEM DEPENDENCIES + TESSERACT
       # ==========================================
-      - name: Install Playwright Chromium
-        run: npx playwright install --with-deps chromium
-
-      # ==========================================
-      # INSTALL TESSERACT OCR
-      # ==========================================
-      - name: Install Tesseract OCR
+      - name: Install System Dependencies + Tesseract
         run: |
           sudo apt-get update
-          sudo apt-get install -y tesseract-ocr
+          sudo apt-get install -y \
+            tesseract-ocr \
+            libnss3 \
+            libatk1.0-0 \
+            libatk-bridge2.0-0 \
+            libcups2 \
+            libdrm2 \
+            libxkbcommon0 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxrandr2 \
+            libgbm1 \
+            libx11-6 \
+            libx11-xcb1 \
+            libxcb1 \
+            libxext6 \
+            libxfixes3 \
+            libxrender1 \
+            libglib2.0-0 \
+            libasound2 \
+            libpangocairo-1.0-0 \
+            libpango-1.0-0 \
+            libcairo2 \
+            libatspi2.0-0 \
+            libgtk-3-0
+
+          echo "Tesseract version:"
           tesseract --version
+
+      # ==========================================
+      # INSTALL PLAYWRIGHT CHROMIUM (FIXED)
+      # ==========================================
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium
 
       # ==========================================
       # WRITE GOOGLE SERVICE ACCOUNT JSON
@@ -96,11 +123,7 @@ jobs:
           const raw = fs.readFileSync('service-account.json', 'utf8');
           const j = JSON.parse(raw);
 
-          const required = [
-            'private_key',
-            'client_email',
-            'project_id'
-          ];
+          const required = ['private_key','client_email','project_id'];
 
           for (const key of required) {
             if (!(key in j)) {
@@ -116,7 +139,7 @@ jobs:
           "
 
       # ==========================================
-      # VERIFY JS SCRIPT EXISTS
+      # VERIFY SCRAPER EXISTS
       # ==========================================
       - name: Verify JS Script
         run: |
