@@ -1,16 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
-const { execFile } = require('child_process');
-const { promisify } = require('util');
-const sharp = require('sharp');
-const { chromium } = require('playwright');
-const { google } = require('googleapis');
-
-const execFileAsync = promisify(execFile);
-
-const TARGET_URL = 'https://www.16thcircuit.org/browse-all-parcels';
-const SHEET_ID = process.env.SHEET_ID || '1fdj-Lk5RIjuo4ekGiAHUPoW7JKqTuiy35b_Q8w2xTyg';
+const crypto = require('cryptoy35b_Q8w2xTyg';const crypto = require('crypto');
 const SHEET_NAME = process.env.SHEET_NAME || 'Tax Sale Tracker';
 const SERVICE_ACCOUNT_FILE = path.join(process.cwd(), 'service-account.json');
 const DEBUG_DIR = path.join(process.cwd(), 'debug_ocr');
@@ -18,41 +8,35 @@ const DEBUG_DIR = path.join(process.cwd(), 'debug_ocr');
 const VIEWPORT = { width: 1280, height: 900 };
 
 /**
- * Updated crop based on the latest uploaded form-base image.
- * Changes vs previous version:
- * - slightly taller crop so Purchaser row is included
- * - slightly better vertical alignment for the actual field rows
+ * Updated from the latest form-base image:
+ * - slightly taller crop
+ * - shifted a bit lower
  */
 const FORM_RECT = {
   x: 182,
   y: 258,
   width: 668,
-  height: 390
+  height: 430
 };
 
 /**
- * OCR boxes relative to FORM_RECT.
- * Tuned from the latest "record-0001-form-base.png" result.
- *
- * Main fixes:
- * - owner moved DOWN
- * - property address moved DOWN
- * - date/money rows moved DOWN
- * - purchaser moved DOWN significantly
+ * OCR boxes RELATIVE to FORM_RECT.
+ * These have all been shifted downward from the previous version
+ * because the OCR was reading the row above each target field.
  */
 const FORM_FIELD_RECTS = {
-  owner:          { x: 96,  y: 67,  width: 405, height: 30 },
+  owner:          { x: 108, y: 78,  width: 408, height: 30 },
 
-  propertyStreet: { x: 96,  y: 160, width: 298, height: 30 },
-  propertyCity:   { x: 398, y: 160, width: 108, height: 30 },
-  propertyState:  { x: 510, y: 160, width: 58,  height: 30 },
+  propertyStreet: { x: 108, y: 170, width: 300, height: 30 },
+  propertyCity:   { x: 412, y: 170, width: 110, height: 30 },
+  propertyState:  { x: 526, y: 170, width: 56,  height: 30 },
 
-  dateSold:       { x: 96,  y: 236, width: 300, height: 30 },
-  purchasePrice:  { x: 96,  y: 267, width: 185, height: 30 },
-  judgment:       { x: 398, y: 267, width: 112, height: 30 },
-  excess:         { x: 554, y: 267, width: 64,  height: 30 },
+  dateSold:       { x: 108, y: 262, width: 302, height: 30 },
+  purchasePrice:  { x: 108, y: 294, width: 188, height: 30 },
+  judgment:       { x: 412, y: 294, width: 114, height: 30 },
+  excess:         { x: 568, y: 294, width: 66,  height: 30 },
 
-  purchaser:      { x: 96,  y: 298, width: 405, height: 30 }
+  purchaser:      { x: 108, y: 326, width: 408, height: 30 }
 };
 
 function clean(value) {
@@ -154,7 +138,7 @@ function looksLikePurchaser(v) {
 }
 
 /**
- * Strict validation gate to prevent bad OCR rows.
+ * Strict validation gate to prevent junk OCR rows from being appended.
  */
 function isRecordUsable(record) {
   return (
@@ -360,9 +344,9 @@ async function ocrField(formPath, fieldName, rect, type, ocrOpts, variants = [])
   const tries = variants.length
     ? variants
     : [
-        { threshold: 165, enlarge: 3, pad: 4 },
-        { threshold: 180, enlarge: 3, pad: 4 },
-        { threshold: 195, enlarge: 4, pad: 4 }
+        { threshold: 160, enlarge: 3, pad: 4 },
+        { threshold: 175, enlarge: 3, pad: 4 },
+        { threshold: 190, enlarge: 4, pad: 4 }
       ];
 
   const outputs = [];
@@ -588,7 +572,6 @@ async function tryClickNext(page) {
     } catch (_) {}
   }
 
-  // Fallback click point for the visible "Next" button at 1280x900
   try {
     await page.mouse.click(470, 305);
     await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => null);
@@ -718,3 +701,12 @@ main().catch((err) => {
   console.error('Fatal error:', err);
   process.exit(1);
 });
+const { execFile } = require('child_process');
+const { promisify } = require('util');
+const sharp = require('sharp');
+const { chromium } = require('playwright');
+const { google } = require('googleapis');
+
+const execFileAsync = promisify(execFile);
+
+const TARGET_URL = 'https://www.16thcircuit.org/browse-all-parcels';
