@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
-const crypto = require('cryptoy35b_Q8w2xTyg';const crypto = require('crypto');
+const crypto = require('cryptoy35b_Q8w2xTyg');
+const crypto = require('crypto');
 const SHEET_NAME = process.env.SHEET_NAME || 'Tax Sale Tracker';
 const SERVICE_ACCOUNT_FILE = path.join(process.cwd(), 'service-account.json');
 const DEBUG_DIR = path.join(process.cwd(), 'debug_ocr');
