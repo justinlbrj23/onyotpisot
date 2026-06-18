@@ -22,7 +22,7 @@
   "dependencies": {
     "@google-cloud/vision": "^4.3.2",
     "axios": "^1.6.0",
-    "axios-cookiejar-support": "^3.0.1",
+    "axios-cookiejar-support": "^7.0.0",
     "chromedriver": "^140.0.4",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
