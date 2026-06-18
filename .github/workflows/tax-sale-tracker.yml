@@ -1,11 +1,6 @@
-name: 16th Circuit Tax Sale Tracker to Google Sheets
-
-on:
-  schedule:
-    # 8:00 AM America/Chicago during CDT (UTC-5)
+name: 16th Circuit Tax Sale Tracker to Google Sheets (OCR)name: 16th Circuit Tax Sale Tracker to Google Sheets8:00 AM CDT (UTC-5)
     - cron: '0 13 * * *'
-
-    # 8:00 AM America/Chicago during CST (UTC-6)
+    # 8:00 AM CST (UTC-6)
     - cron: '0 14 * * *'
 
   workflow_dispatch:
@@ -68,6 +63,15 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       # ==========================================
+      # INSTALL TESSERACT OCR
+      # ==========================================
+      - name: Install Tesseract OCR
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr
+          tesseract --version
+
+      # ==========================================
       # WRITE GOOGLE SERVICE ACCOUNT JSON
       # ==========================================
       - name: Write Service Account JSON
@@ -122,3 +126,18 @@ jobs:
           SHEET_ID: 1fdj-Lk5RIjuo4ekGiAHUPoW7JKqTuiy35b_Q8w2xTyg
           SHEET_NAME: Tax Sale Tracker
         run: node tax-sale-scraper.cjs
+
+      # ==========================================
+      # UPLOAD OCR DEBUG ARTIFACTS
+      # ==========================================
+      - name: Upload OCR Debug Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tax-sale-ocr-debug
+          path: debug_ocr/
+          if-no-files-found: ignore
+
+
+on:
+  schedule:
