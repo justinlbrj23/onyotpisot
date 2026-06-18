@@ -18,13 +18,11 @@ function clean(value) {
 }
 
 function normalizeMoney(value) {
-  const v = clean(value);
-  return v || '';
+  return clean(value);
 }
 
 function normalizeDate(value) {
-  const v = clean(value);
-  return v || '';
+  return clean(value);
 }
 
 function makeSignature(record) {
@@ -66,8 +64,6 @@ async function getExistingSignatures(sheets) {
   const set = new Set();
 
   for (const row of rows) {
-    // B:I mapping
-    // [B, C, D, E, F, G, H, I]
     const record = {
       propertyAddress: row[0] || '',
       owner: row[1] || '',
@@ -90,14 +86,14 @@ async function appendRowsToSheet(sheets, records) {
   }
 
   const values = records.map((r) => [
-    clean(r.propertyAddress), // B
-    clean(r.owner),           // C
-    '',                       // D intentionally blank
-    normalizeDate(r.dateSold),// E
-    normalizeMoney(r.judgment),      // F
+    clean(r.propertyAddress),      // B
+    clean(r.owner),                // C
+    '',                            // D blank
+    normalizeDate(r.dateSold),     // E
+    normalizeMoney(r.judgment),    // F
     normalizeMoney(r.purchasePrice), // G
-    normalizeMoney(r.excess),        // H
-    clean(r.purchaser)        // I
+    normalizeMoney(r.excess),      // H
+    clean(r.purchaser)             // I
   ]);
 
   await sheets.spreadsheets.values.append({
@@ -114,97 +110,37 @@ async function appendRowsToSheet(sheets, records) {
 }
 
 async function extractRecordFromPanel(page) {
-  return await page.locator(PANEL_SELECTOR).evaluate((panel) => {
-    function clean(value) {
-      return String(value || '')
-        .replace(/\u00A0/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-    }
+  const panelTextRaw = await page.locator(PANEL_SELECTOR).innerText().catch(() => '');
+  const text = clean(panelTextRaw);
 
-    function extractValue(node) {
-      if (!node) return '';
+  function getBetween(startLabel, endLabels = []) {
+    const startIdx = text.indexOf(startLabel);
+    if (startIdx === -1) return '';
 
-      // If the node itself is a form field
-      if (['INPUT', 'TEXTAREA', 'SELECT'].includes(node.tagName)) {
-        const val = clean(node.value || node.textContent || '');
-        if (val) return val;
+    const from = startIdx + startLabel.length;
+    let endIdx = text.length;
+
+    for (const endLabel of endLabels) {
+      const idx = text.indexOf(endLabel, from);
+      if (idx !== -1 && idx < endIdx) {
+        endIdx = idx;
       }
-
-      // Look for non-empty form field descendants first
-      const field = node.querySelector('input, textarea, select');
-      if (field) {
-        const val = clean(field.value || field.textContent || '');
-        if (val) return val;
-      }
-
-      // Then try plain text (excluding nested labels where possible)
-      const txt = clean(node.textContent || '');
-      return txt;
     }
 
-    function getCellLikeElements(root) {
-      return Array.from(root.querySelectorAll('td, th, div, span, label'));
-    }
+    return clean(text.slice(from, endIdx));
+  }
 
-    function matchesLabel(el, label) {
-      return clean(el.textContent) === label;
-    }
-
-    function findValueForLabel(label) {
-      const candidates = getCellLikeElements(panel).filter((el) => matchesLabel(el, label));
-
-      for (const labelEl of candidates) {
-        // Strategy 1: same table row, next cells
-        const row = labelEl.closest('tr');
-        if (row) {
-          const cells = Array.from(row.querySelectorAll('td, th'));
-          const idx = cells.findIndex((c) => c === labelEl || c.contains(labelEl));
-          if (idx >= 0) {
-            for (let i = idx + 1; i < cells.length; i++) {
-              const val = extractValue(cells[i]);
-              if (val) return val;
-            }
-          }
-        }
-
-        // Strategy 2: parent cell next sibling
-        const immediateContainer = labelEl.closest('td, th, div, span, label') || labelEl;
-        let next = immediateContainer.nextElementSibling;
-        while (next) {
-          const val = extractValue(next);
-          if (val) return val;
-          next = next.nextElementSibling;
-        }
-
-        // Strategy 3: walk up a few levels and inspect next siblings
-        let current = labelEl;
-        for (let depth = 0; depth < 4 && current; depth++) {
-          let sib = current.nextElementSibling;
-          while (sib) {
-            const val = extractValue(sib);
-            if (val) return val;
-            sib = sib.nextElementSibling;
-          }
-          current = current.parentElement;
-        }
-      }
-
-      return '';
-    }
-
-    return {
-      suitNo: findValueForLabel('Suit No'),
-      parcelNo: findValueForLabel('Parcel No'),
-      propertyAddress: findValueForLabel('Property Address'),
-      owner: findValueForLabel('Owner'),
-      dateSold: findValueForLabel('Date Sold'),
-      judgment: findValueForLabel('Judgment'),
-      purchasePrice: findValueForLabel('Purchase Price'),
-      excess: findValueForLabel('Excess'),
-      purchaser: findValueForLabel('Purchaser')
-    };
-  });
+  return {
+    suitNo: getBetween('Suit No', ['Parcel No', 'Owner']),
+    parcelNo: getBetween('Parcel No', ['Owner', 'Co-Owner', 'Legal Description']),
+    owner: getBetween('Owner', ['Co-Owner', 'Legal Description', 'Property Address']),
+    propertyAddress: getBetween('Property Address', ['Date Sold']),
+    dateSold: getBetween('Date Sold', ['Purchase Price']),
+    purchasePrice: getBetween('Purchase Price', ['Judgment']),
+    judgment: getBetween('Judgment', ['Excess']),
+    excess: getBetween('Excess', ['Purchaser']),
+    purchaser: getBetween('Purchaser', ['Address', 'CONFIRMATION', 'EXCESS PROCEEDS'])
+  };
 }
 
 function isRecordUsable(record) {
@@ -219,10 +155,31 @@ function isRecordUsable(record) {
   );
 }
 
-async function clickNextAndWaitForChange(page, beforeFingerprint) {
-  const nextLocator = page.locator('input[value="Next"], button:has-text("Next"), text=Next').first();
+async function getNextLocator(page) {
+  const candidates = [
+    page.locator('input[type="submit"][value="Next"]').first(),
+    page.locator('input[type="button"][value="Next"]').first(),
+    page.locator('input[value="Next"]').first(),
+    page.locator('button').filter({ hasText: /^Next$/i }).first(),
+    page.getByRole('button', { name: /^Next$/i }).first(),
+    page.getByText(/^Next$/i).first()
+  ];
 
-  if (!(await nextLocator.count())) {
+  for (const locator of candidates) {
+    try {
+      if (await locator.count()) {
+        return locator;
+      }
+    } catch (_) {}
+  }
+
+  return null;
+}
+
+async function clickNextAndWaitForChange(page, beforeFingerprint) {
+  const nextLocator = await getNextLocator(page);
+
+  if (!nextLocator) {
     console.log('No Next button found. Stopping.');
     return false;
   }
@@ -253,10 +210,12 @@ async function clickNextAndWaitForChange(page, beforeFingerprint) {
   }
 
   try {
-    await page.waitForSelector(PANEL_SELECTOR, { state: 'visible', timeout: 15000 });
+    await page.waitForSelector(PANEL_SELECTOR, {
+      state: 'visible',
+      timeout: 15000
+    });
   } catch (_) {}
 
-  // Wait until the panel changes
   try {
     await page.waitForFunction(
       ({ selector, before }) => {
@@ -269,9 +228,9 @@ async function clickNextAndWaitForChange(page, beforeFingerprint) {
       { timeout: 15000 }
     );
   } catch (_) {
-    // If it did not change, likely at the end
     const afterPanelText = await page.locator(PANEL_SELECTOR).innerText().catch(() => '');
     const afterFingerprint = clean(afterPanelText);
+
     if (afterFingerprint === beforeFingerprint) {
       console.log('Panel did not change after Next. Assuming end of records.');
       return false;
@@ -313,10 +272,13 @@ async function scrapeAllParcels() {
       safetyCounter++;
 
       const panelText = clean(await page.locator(PANEL_SELECTOR).innerText().catch(() => ''));
+
       if (!panelText) {
         console.log('Empty panel text encountered. Stopping.');
         break;
       }
+
+      console.log('Panel text snapshot:', panelText.slice(0, 1000));
 
       if (seenPageFingerprints.has(panelText)) {
         console.log('Detected repeated page fingerprint. Stopping.');
@@ -325,9 +287,11 @@ async function scrapeAllParcels() {
       seenPageFingerprints.add(panelText);
 
       const record = await extractRecordFromPanel(page);
+      console.log('Extracted record:', JSON.stringify(record, null, 2));
 
       if (isRecordUsable(record)) {
         const signature = makeSignature(record);
+
         if (!seenRecordSignatures.has(signature)) {
           seenRecordSignatures.add(signature);
           records.push(record);
@@ -390,4 +354,3 @@ main().catch((err) => {
   console.error('Fatal error:', err);
   process.exit(1);
 });
-``
