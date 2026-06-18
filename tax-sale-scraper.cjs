@@ -1,7 +1,10 @@
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
-const { exec480 };const { execFile } = require('child_process');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
+const sharp = require('sharp');
+const { chromium } = require('playwright');
+const { google } = require('googleapis');
+
+const execFileAsync = promisify(execFile);
 
 /**
  * Rects are in CSS px for a 640x480 screenshot.
