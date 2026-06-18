@@ -1,13 +1,30 @@
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const sharp = require('sharp');
 const { chromium } = require('playwright');
 const { google } = require('googleapis');
 
+const execFileAsync = promisify(execFile);
+
+const TARGET_URL = 'https://www.16thcircuit.org/browse-all-parcels';
+const SHEET_ID = process.env.SHEET_ID || '1fdj-Lk5RIjuo4ekGiAHUPoW7JKqTuiy35b_Q8w2xTyg';
+const SHEET_NAME = process.env.SHEET_NAME || 'Tax Sale Tracker';
+const SERVICE_ACCOUNT_FILE = path.join(process.cwd(), 'service-account.json');
+const DEBUG_DIR = path.join(process.cwd(), 'debug_ocr');
+
 /**
- * Rects are in CSS px for a 640x480 screenshot.
- * Each rect targets ONLY the visible input textbox area (not the label),
- * which drastically improves OCR quality versus full-page OCR.
+ * Crop coordinates tuned to the rendered parcel form layout.
+ * If the site layout changes later, only the RECTS section should need tuning.
+ */
+const VIEWPORT = { width: 640, height: 480 };
+const BASE_SHOT = { width: 640, height: 480 };
+
+/**
+ * Rect coordinates in CSS pixels for a 640x480 screenshot.
+ * These target the visible input/value boxes rather than labels.
  */
 const RECTS = {
   suitNo:         { x: 96,  y: 92,  width: 162, height: 25 },
@@ -25,7 +42,7 @@ const RECTS = {
 
   purchaser:      { x: 96,  y: 305, width: 364, height: 25 },
 
-  // Optional: crop around the central form only for debugging
+  // Debug crop for the visible form region
   formArea:       { x: 55,  y: 70,  width: 545, height: 290 }
 };
 
@@ -52,7 +69,7 @@ function cleanupName(value) {
     .replace(/\s+/g, ' ')
     .trim();
 
-  // Common OCR mistakes
+  // Common OCR cleanup
   v = v.replace(/\bLLC\.$/i, 'LLC');
   return v;
 }
@@ -234,7 +251,6 @@ async function ocrField(rawShotPath, fieldName, rect, ocrOpts, preprocessVariant
     results.push(clean(text));
   }
 
-  // Choose the "best" candidate: longest useful value after trimming noise.
   const best = results
     .map((v) => stripLeadingNoise(v))
     .sort((a, b) => b.length - a.length)[0] || '';
@@ -270,7 +286,6 @@ async function capturePage(page, index) {
 }
 
 async function extractRecordWithFieldOCR(rawShotPath, index) {
-  // Per-field OCR configs
   const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
   const MONEY = '0123456789$,.';
   const DATE = '0123456789/.';
@@ -372,12 +387,11 @@ async function extractRecordWithFieldOCR(rawShotPath, index) {
     purchaser: cleanupName(purchaser)
   };
 
-  // Save structured OCR output for debugging
-  const txtPath = path.join(
+  const outJson = path.join(
     DEBUG_DIR,
     `record-${String(index).padStart(4, '0')}-parsed.json`
   );
-  await fs.promises.writeFile(txtPath, JSON.stringify(record, null, 2), 'utf8');
+  await fs.promises.writeFile(outJson, JSON.stringify(record, null, 2), 'utf8');
 
   console.log(`Parsed record [${index}]:`, JSON.stringify(record, null, 2));
 
@@ -456,11 +470,10 @@ async function appendRowsToSheet(sheets, records) {
 }
 
 async function tryClickNext(page) {
-  // Extraction is OCR-based (not DOM-based), but navigation can still use a safe click strategy.
   const candidates = [
-    page.locator('input[value="Next"]').first(),
     page.locator('input[type="submit"][value="Next"]').first(),
     page.locator('input[type="button"][value="Next"]').first(),
+    page.locator('input[value="Next"]').first(),
     page.getByRole('button', { name: /^Next$/i }).first(),
     page.getByText(/^Next$/i).first()
   ];
@@ -468,13 +481,16 @@ async function tryClickNext(page) {
   for (const locator of candidates) {
     try {
       if (await locator.count()) {
+        try {
+          await locator.scrollIntoViewIfNeeded();
+        } catch (_) {}
         await locator.click({ timeout: 5000 });
         return true;
       }
     } catch (_) {}
   }
 
-  // Coordinate fallback based on the visible page layout in your screenshot
+  // Coordinate fallback based on the visible "Next" position in the rendered layout
   try {
     await page.mouse.click(286, 79);
     return true;
@@ -492,7 +508,6 @@ async function scrapeAllParcels() {
   await ensureDir(DEBUG_DIR);
 
   const browser = await chromium.launch({ headless: true });
-
   const page = await browser.newPage({
     viewport: VIEWPORT,
     deviceScaleFactor: 1
@@ -511,7 +526,6 @@ async function scrapeAllParcels() {
       timeout: 60000
     });
 
-    // Give the server-rendered form a moment to settle visually
     await page.waitForTimeout(3500);
 
     const MAX_PAGES = Number(process.env.MAX_PAGES || 5000);
@@ -597,25 +611,3 @@ main().catch((err) => {
   console.error('Fatal error:', err);
   process.exit(1);
 });
-const { promisify } = require('util');
-const sharp = require('sharp');
-const { chromium } = require('playwright');
-const { google } = require('googleapis');
-
-const execFileAsync = promisify(execFile);
-
-const TARGET_URL = 'https://www.16thcircuit.org/browse-all-parcels';
-const SHEET_ID = process.env.SHEET_ID || '1fdj-Lk5RIjuo4ekGiAHUPoW7JKqTuiy35b_Q8w2xTyg';
-const SHEET_NAME = process.env.SHEET_NAME || 'Tax Sale Tracker';
-const SERVICE_ACCOUNT_FILE = path.join(process.cwd(), 'service-account.json');
-const DEBUG_DIR = path.join(process.cwd(), 'debug_ocr');
-
-/**
- * IMPORTANT:
- * These crop coordinates are based on the rendered layout you shared.
- * We lock the viewport to 640x480 so the OCR regions stay stable.
- * If the site layout shifts later, only the RECTS section should need tuning.
- */
-const VIEWPORT = { width: 640, height: 480 };
-
-// Base screenshot dimension used for crop coordinates below.
