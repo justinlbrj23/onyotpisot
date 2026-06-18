@@ -86,7 +86,7 @@ jobs:
             libxfixes3 \
             libxrender1 \
             libglib2.0-0 \
-            libasound2 \
+            libasound2t64 \
             libpangocairo-1.0-0 \
             libpango-1.0-0 \
             libcairo2 \
