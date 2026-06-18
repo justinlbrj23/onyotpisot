@@ -18,43 +18,41 @@ const DEBUG_DIR = path.join(process.cwd(), 'debug_ocr');
 const VIEWPORT = { width: 1280, height: 900 };
 
 /**
- * Baseline label positions from the visible page layout.
- * We use OCR-detected label positions to shift value crop boxes dynamically.
+ * Full-page screenshot -> crop ONLY the parcel form area first.
+ * Tuned from the uploaded raw screenshot.
+ * If the site layout shifts in the future, adjust only FORM_RECT and FORM_FIELD_RECTS.
  */
-const LABEL_BASE = {
-  suitNo: { x: 25, y: 126 },
-  parcelNo: { x: 327, y: 126 },
-  owner: { x: 22, y: 155 },
-  propertyAddress: { x: 25, y: 215 },
-  dateSold: { x: 25, y: 324 },
-  purchasePrice: { x: 25, y: 352 },
-  judgment: { x: 326, y: 352 },
-  excess: { x: 499, y: 352 },
-  purchaser: { x: 25, y: 379 }
+const FORM_RECT = {
+  x: 176,
+  y: 312,
+  width: 642,
+  height: 306
 };
 
 /**
- * Baseline value-box crop rectangles.
- * These are adjusted dynamically based on detected label positions.
+ * Field boxes relative to FORM_RECT.
+ * Only OCR the 7 fields requested for Google Sheets:
+ * - Property Address
+ * - Owner
+ * - Date Sold
+ * - Judgment
+ * - Purchase Price
+ * - Excess
+ * - Purchaser
  */
-const VALUE_BASE = {
-  suitNo:         { x: 103, y: 117, width: 163, height: 29 },
-  parcelNo:       { x: 374, y: 117, width: 215, height: 29 },
-  owner:          { x: 103, y: 145, width: 372, height: 29 },
+const FORM_FIELD_RECTS = {
+  owner:          { x: 103, y: 34,  width: 402, height: 29 },
 
-  propertyStreet: { x: 66,  y: 206, width: 296, height: 29 },
-  propertyCity:   { x: 364, y: 206, width: 105, height: 29 },
-  propertyState:  { x: 461, y: 206, width: 53,  height: 29 },
+  propertyStreet: { x: 103, y: 136, width: 293, height: 29 },
+  propertyCity:   { x: 401, y: 136, width: 103, height: 29 },
+  propertyState:  { x: 507, y: 136, width: 47,  height: 29 },
 
-  dateSold:       { x: 111, y: 315, width: 249, height: 29 },
-  purchasePrice:  { x: 111, y: 342, width: 149, height: 29 },
-  judgment:       { x: 366, y: 342, width: 95,  height: 29 },
-  excess:         { x: 529, y: 342, width: 61,  height: 29 },
+  dateSold:       { x: 103, y: 204, width: 293, height: 29 },
+  purchasePrice:  { x: 103, y: 236, width: 180, height: 29 },
+  judgment:       { x: 401, y: 236, width: 104, height: 29 },
+  excess:         { x: 577, y: 236, width: 58,  height: 29 },
 
-  purchaser:      { x: 96,  y: 368, width: 379, height: 29 },
-
-  // Debug crop for the visible parcel form area
-  formArea:       { x: 0,   y: 70,  width: 650, height: 520 }
+  purchaser:      { x: 103, y: 268, width: 402, height: 29 }
 };
 
 function clean(value) {
@@ -71,10 +69,6 @@ function stripLeadingNoise(value) {
     .replace(/^[\]\[\(\)\{\}~`'".,:;_\-]+/, '')
     .replace(/[\]\[\(\)\{\}~`'".,:;_\-]+$/, '')
     .trim();
-}
-
-function normalizeWord(value) {
-  return clean(value).toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
 function cleanupName(value) {
@@ -112,10 +106,8 @@ function cleanupAddressPart(value) {
     .trim();
 }
 
-function makeSignature(record) {
+function makeRunSignature(record) {
   return [
-    clean(record.suitNo).toUpperCase(),
-    clean(record.parcelNo).toUpperCase(),
     clean(record.propertyAddress).toUpperCase(),
     clean(record.owner).toUpperCase(),
     clean(record.dateSold).toUpperCase(),
@@ -161,9 +153,23 @@ function looksLikePurchaser(v) {
   return s.length >= 4 && /[A-Za-z]/.test(s);
 }
 
-function recordQuality(record) {
-  let score = 0;
+/**
+ * Very strict gate to prevent junk rows from being appended.
+ */
+function isRecordUsable(record) {
+  return (
+    looksLikeOwner(record.owner) &&
+    looksLikeAddress(record.propertyAddress) &&
+    looksLikeDate(record.dateSold) &&
+    looksLikeMoney(record.purchasePrice) &&
+    looksLikeMoney(record.judgment) &&
+    looksLikeMoney(record.excess) &&
+    looksLikePurchaser(record.purchaser)
+  );
+}
 
+function scoreRecord(record) {
+  let score = 0;
   if (looksLikeOwner(record.owner)) score += 2;
   if (looksLikeAddress(record.propertyAddress)) score += 3;
   if (looksLikeDate(record.dateSold)) score += 2;
@@ -171,13 +177,7 @@ function recordQuality(record) {
   if (looksLikeMoney(record.judgment)) score += 1;
   if (looksLikeMoney(record.excess)) score += 1;
   if (looksLikePurchaser(record.purchaser)) score += 1;
-
   return score;
-}
-
-function isRecordUsable(record) {
-  // Stricter threshold to avoid bad OCR rows being appended
-  return recordQuality(record) >= 7;
 }
 
 async function ensureDir(dir) {
@@ -192,17 +192,17 @@ function imageHash(filePath) {
 async function capturePage(page, index) {
   await ensureDir(DEBUG_DIR);
 
-  const rawShotPath = path.join(
+  const rawPath = path.join(
     DEBUG_DIR,
     `record-${String(index).padStart(4, '0')}-raw.png`
   );
 
   await page.screenshot({
-    path: rawShotPath,
+    path: rawPath,
     fullPage: false
   });
 
-  return rawShotPath;
+  return rawPath;
 }
 
 async function cropImage(inputPath, outputPath, rect, preprocess = {}) {
@@ -273,6 +273,28 @@ async function cropImage(inputPath, outputPath, rect, preprocess = {}) {
   return true;
 }
 
+async function cropForm(rawPath, index) {
+  const formPath = path.join(
+    DEBUG_DIR,
+    `record-${String(index).padStart(4, '0')}-form-base.png`
+  );
+
+  const ok = await cropImage(rawPath, formPath, FORM_RECT, {
+    threshold: 180,
+    enlarge: 1,
+    pad: 0,
+    grayscale: false,
+    normalize: false,
+    sharpen: false
+  });
+
+  if (!ok) {
+    throw new Error('Failed to create form crop.');
+  }
+
+  return formPath;
+}
+
 async function runTesseractText(imagePath, opts = {}) {
   const {
     psm = 7,
@@ -298,334 +320,139 @@ async function runTesseractText(imagePath, opts = {}) {
   return clean(String(stdout || '').replace(/\r/g, '\n').replace(/\n+/g, ' '));
 }
 
-async function runTesseractTsv(imagePath, opts = {}) {
-  const psm = opts.psm || 11;
+function chooseBestOCR(results, type) {
+  const vals = results.map(v => clean(v)).filter(Boolean);
+  if (!vals.length) return '';
 
-  const args = [
-    imagePath,
-    'stdout',
-    '--psm',
-    String(psm),
-    '-l',
-    'eng',
-    'tsv'
-  ];
+  if (type === 'money') {
+    const valid = vals.filter(looksLikeMoney);
+    if (valid.length) return valid.sort((a, b) => b.length - a.length)[0];
+    return vals.sort((a, b) => b.length - a.length)[0];
+  }
 
-  const { stdout } = await execFileAsync('tesseract', args);
-  return String(stdout || '');
+  if (type === 'date') {
+    const valid = vals.filter(looksLikeDate);
+    if (valid.length) return valid[0];
+    return vals.sort((a, b) => b.length - a.length)[0];
+  }
+
+  if (type === 'state') {
+    const valid = vals
+      .map(v => v.replace(/[^A-Za-z]/g, '').toUpperCase())
+      .filter(v => /^[A-Z]{2}$/.test(v));
+    if (valid.length) return valid[0];
+    return vals[0];
+  }
+
+  return vals.sort((a, b) => b.length - a.length)[0];
 }
 
-function parseTsv(tsv) {
-  const lines = String(tsv || '').split('\n').filter(Boolean);
-  if (!lines.length) return [];
-
-  const header = lines[0].split('\t');
-  const rows = [];
-
-  for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i].split('\t');
-    if (cols.length < header.length) continue;
-
-    const obj = {};
-    for (let j = 0; j < header.length; j++) {
-      obj[header[j]] = cols[j];
-    }
-
-    const text = clean(obj.text || '');
-    const conf = Number(obj.conf || -1);
-
-    if (!text) continue;
-
-    rows.push({
-      text,
-      norm: normalizeWord(text),
-      conf,
-      left: Number(obj.left || 0),
-      top: Number(obj.top || 0),
-      width: Number(obj.width || 0),
-      height: Number(obj.height || 0)
-    });
-  }
-
-  return rows;
-}
-
-function findPhraseCandidates(words, phraseTokens) {
-  const target = phraseTokens.map(normalizeWord);
-  const matches = [];
-
-  for (let i = 0; i <= words.length - target.length; i++) {
-    let ok = true;
-
-    for (let j = 0; j < target.length; j++) {
-      if (words[i + j].norm !== target[j]) {
-        ok = false;
-        break;
-      }
-    }
-
-    if (!ok) continue;
-
-    const group = words.slice(i, i + target.length);
-    const left = Math.min(...group.map(w => w.left));
-    const top = Math.min(...group.map(w => w.top));
-    const right = Math.max(...group.map(w => w.left + w.width));
-    const bottom = Math.max(...group.map(w => w.top + w.height));
-
-    matches.push({
-      left,
-      top,
-      width: right - left,
-      height: bottom - top
-    });
-  }
-
-  return matches;
-}
-
-function pickBestCandidate(candidates, expected) {
-  if (!candidates.length) return null;
-
-  let best = null;
-  let bestScore = Infinity;
-
-  for (const c of candidates) {
-    const dx = c.left - expected.x;
-    const dy = c.top - expected.y;
-    const distance = Math.sqrt(dx * dx + dy * dy);
-
-    if (distance < bestScore) {
-      bestScore = distance;
-      best = c;
-    }
-  }
-
-  // Too far away = probably wrong OCR phrase match
-  if (bestScore > 180) return null;
-
-  return best;
-}
-
-function cloneBaseRects() {
-  const out = {};
-  for (const [key, rect] of Object.entries(VALUE_BASE)) {
-    out[key] = { ...rect };
-  }
-  return out;
-}
-
-function computeDynamicRects(words) {
-  const ownerCandidate = pickBestCandidate(
-    findPhraseCandidates(words, ['Owner']),
-    LABEL_BASE.owner
-  );
-
-  const propertyCandidate = pickBestCandidate(
-    findPhraseCandidates(words, ['Property', 'Address']),
-    LABEL_BASE.propertyAddress
-  );
-
-  const dateCandidate = pickBestCandidate(
-    findPhraseCandidates(words, ['Date', 'Sold']),
-    LABEL_BASE.dateSold
-  );
-
-  const anchors = [
-    ownerCandidate ? {
-      dx: ownerCandidate.left - LABEL_BASE.owner.x,
-      dy: ownerCandidate.top - LABEL_BASE.owner.y
-    } : null,
-    propertyCandidate ? {
-      dx: propertyCandidate.left - LABEL_BASE.propertyAddress.x,
-      dy: propertyCandidate.top - LABEL_BASE.propertyAddress.y
-    } : null,
-    dateCandidate ? {
-      dx: dateCandidate.left - LABEL_BASE.dateSold.x,
-      dy: dateCandidate.top - LABEL_BASE.dateSold.y
-    } : null
-  ].filter(Boolean);
-
-  if (!anchors.length) {
-    return {
-      rects: cloneBaseRects(),
-      debug: { usedFallback: true, dx: 0, dy: 0, reason: 'no-label-anchor' }
-    };
-  }
-
-  const dx = Math.round(
-    anchors.reduce((sum, a) => sum + a.dx, 0) / anchors.length
-  );
-  const dy = Math.round(
-    anchors.reduce((sum, a) => sum + a.dy, 0) / anchors.length
-  );
-
-  if (Math.abs(dx) > 140 || Math.abs(dy) > 140) {
-    return {
-      rects: cloneBaseRects(),
-      debug: { usedFallback: true, dx, dy, reason: 'shift-out-of-range' }
-    };
-  }
-
-  const rects = {};
-  for (const [key, rect] of Object.entries(VALUE_BASE)) {
-    rects[key] = {
-      x: rect.x + dx,
-      y: rect.y + dy,
-      width: rect.width,
-      height: rect.height
-    };
-  }
-
-  return {
-    rects,
-    debug: { usedFallback: false, dx, dy, reason: 'dynamic-anchor' }
-  };
-}
-
-async function ocrField(rawShotPath, baseName, rect, ocrOpts, variants = []) {
-  const list = variants.length
+async function ocrField(formPath, fieldName, rect, type, ocrOpts, variants = []) {
+  const tries = variants.length
     ? variants
     : [
-        { threshold: 170, enlarge: 3, pad: 4 },
-        { threshold: 185, enlarge: 3, pad: 4 },
-        { threshold: 200, enlarge: 4, pad: 4 }
+        { threshold: 165, enlarge: 3, pad: 4 },
+        { threshold: 180, enlarge: 3, pad: 4 },
+        { threshold: 195, enlarge: 4, pad: 4 }
       ];
 
-  const results = [];
+  const outputs = [];
 
-  for (let i = 0; i < list.length; i++) {
-    const outPath = path.join(DEBUG_DIR, `${baseName}-v${i + 1}.png`);
-    const ok = await cropImage(rawShotPath, outPath, rect, list[i]).catch(() => false);
+  for (let i = 0; i < tries.length; i++) {
+    const outPath = path.join(DEBUG_DIR, `${fieldName}-v${i + 1}.png`);
+    const ok = await cropImage(formPath, outPath, rect, tries[i]).catch(() => false);
 
     if (!ok) {
-      results.push('');
+      outputs.push('');
       continue;
     }
 
     const text = await runTesseractText(outPath, ocrOpts).catch(() => '');
-    results.push(stripLeadingNoise(text));
+    outputs.push(stripLeadingNoise(text));
   }
 
-  const best = results
-    .filter(Boolean)
-    .sort((a, b) => b.length - a.length)[0] || '';
-
-  return best;
+  return chooseBestOCR(outputs, type);
 }
 
-async function saveFormAreaDebug(rawShotPath, rects, index) {
-  const formRect = rects.formArea || VALUE_BASE.formArea;
-  const outPath = path.join(DEBUG_DIR, `record-${String(index).padStart(4, '0')}-form.png`);
-
-  await cropImage(rawShotPath, outPath, formRect, {
-    threshold: 180,
-    enlarge: 2,
-    pad: 6
-  }).catch(() => false);
-}
-
-async function extractRecordWithDynamicOCR(rawShotPath, index) {
-  const pageTsv = await runTesseractTsv(rawShotPath, { psm: 11 });
-  const words = parseTsv(pageTsv);
-
-  const tsvPath = path.join(DEBUG_DIR, `record-${String(index).padStart(4, '0')}-page.tsv`);
-  await fs.promises.writeFile(tsvPath, pageTsv, 'utf8');
-
-  const { rects, debug } = computeDynamicRects(words);
-
-  console.log(
-    `Dynamic OCR alignment [${index}]: ` +
-    `fallback=${debug.usedFallback} reason=${debug.reason} dx=${debug.dx} dy=${debug.dy}`
-  );
-
-  await saveFormAreaDebug(rawShotPath, rects, index);
-
-  const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+async function extractRecordFromForm(formPath, index) {
+  const NAME = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789&.,#/- ';
+  const ADDRESS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789#-.,/ ';
   const MONEY = '0123456789$,.';
   const DATE = '0123456789/.';
-  const ADDRESS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789#-.,/ ';
-  const NAME = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789&.,#/- ';
-
-  const suitNo = await ocrField(
-    rawShotPath,
-    `record-${String(index).padStart(4, '0')}-suitNo`,
-    rects.suitNo,
-    { psm: 7, whitelist: `${ALNUM}-` }
-  );
-
-  const parcelNo = await ocrField(
-    rawShotPath,
-    `record-${String(index).padStart(4, '0')}-parcelNo`,
-    rects.parcelNo,
-    { psm: 7, whitelist: `${ALNUM}-` }
-  );
 
   const owner = await ocrField(
-    rawShotPath,
+    formPath,
     `record-${String(index).padStart(4, '0')}-owner`,
-    rects.owner,
+    FORM_FIELD_RECTS.owner,
+    'text',
     { psm: 7, whitelist: NAME }
   );
 
   const propertyStreet = await ocrField(
-    rawShotPath,
+    formPath,
     `record-${String(index).padStart(4, '0')}-propertyStreet`,
-    rects.propertyStreet,
+    FORM_FIELD_RECTS.propertyStreet,
+    'text',
     { psm: 7, whitelist: ADDRESS }
   );
 
   const propertyCity = await ocrField(
-    rawShotPath,
+    formPath,
     `record-${String(index).padStart(4, '0')}-propertyCity`,
-    rects.propertyCity,
+    FORM_FIELD_RECTS.propertyCity,
+    'text',
     { psm: 7, whitelist: ADDRESS }
   );
 
   const propertyState = await ocrField(
-    rawShotPath,
+    formPath,
     `record-${String(index).padStart(4, '0')}-propertyState`,
-    rects.propertyState,
+    FORM_FIELD_RECTS.propertyState,
+    'state',
     { psm: 7, whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' }
   );
 
   const dateSold = await ocrField(
-    rawShotPath,
+    formPath,
     `record-${String(index).padStart(4, '0')}-dateSold`,
-    rects.dateSold,
+    FORM_FIELD_RECTS.dateSold,
+    'date',
     { psm: 7, whitelist: DATE }
   );
 
   const purchasePrice = await ocrField(
-    rawShotPath,
+    formPath,
     `record-${String(index).padStart(4, '0')}-purchasePrice`,
-    rects.purchasePrice,
+    FORM_FIELD_RECTS.purchasePrice,
+    'money',
     { psm: 7, whitelist: MONEY }
   );
 
   const judgment = await ocrField(
-    rawShotPath,
+    formPath,
     `record-${String(index).padStart(4, '0')}-judgment`,
-    rects.judgment,
+    FORM_FIELD_RECTS.judgment,
+    'money',
     { psm: 7, whitelist: MONEY }
   );
 
   const excess = await ocrField(
-    rawShotPath,
+    formPath,
     `record-${String(index).padStart(4, '0')}-excess`,
-    rects.excess,
+    FORM_FIELD_RECTS.excess,
+    'money',
     { psm: 7, whitelist: MONEY }
   );
 
   const purchaser = await ocrField(
-    rawShotPath,
+    formPath,
     `record-${String(index).padStart(4, '0')}-purchaser`,
-    rects.purchaser,
+    FORM_FIELD_RECTS.purchaser,
+    'text',
     { psm: 7, whitelist: NAME }
   );
 
   const record = {
-    suitNo: cleanupAddressPart(suitNo),
-    parcelNo: cleanupAddressPart(parcelNo),
     owner: cleanupName(owner),
     propertyAddress: clean(
       [
@@ -635,20 +462,20 @@ async function extractRecordWithDynamicOCR(rawShotPath, index) {
       ].filter(Boolean).join(' ')
     ),
     dateSold: cleanupDate(dateSold),
-    purchasePrice: cleanupMoney(purchasePrice),
     judgment: cleanupMoney(judgment),
+    purchasePrice: cleanupMoney(purchasePrice),
     excess: cleanupMoney(excess),
     purchaser: cleanupName(purchaser)
   };
 
-  const quality = recordQuality(record);
+  const quality = scoreRecord(record);
 
-  const outJson = path.join(
+  const parsedPath = path.join(
     DEBUG_DIR,
     `record-${String(index).padStart(4, '0')}-parsed.json`
   );
   await fs.promises.writeFile(
-    outJson,
+    parsedPath,
     JSON.stringify({ quality, record }, null, 2),
     'utf8'
   );
@@ -752,9 +579,9 @@ async function tryClickNext(page) {
     } catch (_) {}
   }
 
-  // Coordinate fallback
+  // Fallback coordinate based on uploaded raw screenshot
   try {
-    await page.mouse.click(291, 107);
+    await page.mouse.click(489, 299);
     await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => null);
     return true;
   } catch (_) {}
@@ -772,7 +599,7 @@ async function scrapeAllParcels() {
   });
 
   const records = [];
-  const seenImageHashes = new Set();
+  const seenPageHashes = new Set();
   const seenRecordSigs = new Set();
 
   try {
@@ -789,19 +616,20 @@ async function scrapeAllParcels() {
     const MAX_PAGES = Number(process.env.MAX_PAGES || 5000);
 
     for (let i = 1; i <= MAX_PAGES; i++) {
-      const rawShotPath = await capturePage(page, i);
-      const shotHash = imageHash(rawShotPath);
+      const rawPath = await capturePage(page, i);
+      const pageHash = imageHash(rawPath);
 
-      if (seenImageHashes.has(shotHash)) {
+      if (seenPageHashes.has(pageHash)) {
         console.log('Detected repeated page screenshot. Stopping.');
         break;
       }
-      seenImageHashes.add(shotHash);
+      seenPageHashes.add(pageHash);
 
-      const { record, quality } = await extractRecordWithDynamicOCR(rawShotPath, i);
+      const formPath = await cropForm(rawPath, i);
+      const { record, quality } = await extractRecordFromForm(formPath, i);
 
       if (isRecordUsable(record)) {
-        const sig = makeSignature(record);
+        const sig = makeRunSignature(record);
 
         if (!seenRecordSigs.has(sig)) {
           seenRecordSigs.add(sig);
@@ -809,8 +637,6 @@ async function scrapeAllParcels() {
 
           console.log(
             `[${records.length}] quality=${quality} | ` +
-            `Suit No="${record.suitNo}" | ` +
-            `Parcel No="${record.parcelNo}" | ` +
             `Property Address="${record.propertyAddress}" | ` +
             `Owner="${record.owner}" | ` +
             `Date Sold="${record.dateSold}" | ` +
@@ -824,7 +650,7 @@ async function scrapeAllParcels() {
         }
       } else {
         console.log(
-          `Rejected OCR record [${i}] due to low quality score (${quality}). Not adding to output.`
+          `Rejected OCR record [${i}] due to failing strict validation (quality=${quality}).`
         );
       }
 
