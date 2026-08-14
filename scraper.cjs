@@ -16,30 +16,40 @@ const { chromium } = require('playwright');
         }
     );
 
-    const selector =
-        '#ctl00_ContentPlaceHolder1_WSExtendedGridNP1_GridView1 > tbody > tr';
+    const tableSelector =
+        '#ctl00_ContentPlaceHolder1_WSExtendedGridNP1_GridView1';
 
-    await page.waitForSelector(selector, {
+    await page.waitForSelector(tableSelector, {
         timeout: 60000
     });
 
-    const rows = await page.$$eval(selector, trs =>
-        trs.map(tr => ({
-            text: tr.innerText.trim()
-        }))
+    const rows = await page.$$eval(
+        '#ctl00_ContentPlaceHolder1_WSExtendedGridNP1_GridView1 > tbody > tr',
+        trs => {
+            return trs.map(tr => {
+                const cells = [...tr.querySelectorAll('th, td')];
+
+                return cells.map(cell =>
+                    cell.innerText
+                        .replace(/\r?\n/g, ' ')
+                        .replace(/\s+/g, ' ')
+                        .trim()
+                );
+            });
+        }
     );
 
-    const csv = [
-        'Text',
-        ...rows.map(row =>
-            `"${row.text.replace(/"/g, '""').replace(/\n/g, ' ')}"`
+    const csv = rows
+        .map(row =>
+            row
+                .map(cell => `"${String(cell).replace(/"/g, '""')}"`)
+                .join(',')
         )
-    ].join('\n');
+        .join('\n');
 
-    fs.writeFileSync('output.csv', csv);
+    fs.writeFileSync('output.csv', csv, 'utf8');
 
-    console.log(`Extracted ${rows.length} rows`);
-    console.log('Saved to output.csv');
+    console.log(`Saved ${rows.length} rows to output.csv`);
 
     await browser.close();
 })();
