@@ -1,0 +1,45 @@
+name: Oregon Public Notice Scraper
+
+on:
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+          npm install playwright
+
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium
+
+      - name: Run Scraper
+        run: node scraper.js
+
+      - name: Upload Output Files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraper-output
+          path: |
+            *.json
+            *.csv
+            *.txt
