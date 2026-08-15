@@ -73,9 +73,9 @@ jobs:
       # ==========================================
       # RUN PYTHON SCRIPT
       # ==========================================
-      - name: Run Python Script
+      - name: Run SCRAPER Script
         run: |
-          python GHL-lead-mgr.py
+          node scraper.cjs
 
       # ==========================================
       # VERIFY OUTPUT FILE
