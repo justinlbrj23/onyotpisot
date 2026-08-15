@@ -3,7 +3,7 @@ const { chromium } = require('playwright');
 
 const START_URL =
   process.env.START_URL ||
-  'https://www.publicnoticeoregon.com/(S(ayzufrbyvqdnk3fqqajn0b4c))/Search.aspx';
+  'https://www.publicnoticeoregon.com/(S(x0nn32rq3miwftgofvfon5zr))/Search.aspx';
 
 const OUTPUT_JSON = 'notices.json';
 const OUTPUT_TEXT = 'notices.txt';
@@ -22,6 +22,71 @@ function cleanText(value = '') {
 
 function normalizeCaseNumber(value = '') {
   return cleanText(value).toUpperCase();
+}
+
+/*
+ * Extract the appointed personal representative from
+ * a probate notice summary.
+ *
+ * Example:
+ *
+ * "Notice is hereby given that Mary Gia Wong has been
+ * appointed Personal Representative..."
+ *
+ * Result:
+ *
+ * "Mary Gia Wong"
+ */
+function extractPersonalRepresentative(text = '') {
+  const normalized = cleanText(text);
+
+  const patterns = [
+    /*
+     * Notice is hereby given that Mary Gia Wong has been
+     * appointed Personal Representative...
+     */
+    /Notice\s+is\s+hereby\s+given\s+that\s+(.+?)\s+has\s+been\s+appointed\s+(?:as\s+)?(?:the\s+)?personal\s+representative\b/i,
+
+    /*
+     * Notice is hereby given that Mary Gia Wong was appointed
+     * as the Personal Representative...
+     */
+    /Notice\s+is\s+hereby\s+given\s+that\s+(.+?)\s+(?:was|is)\s+appointed\s+(?:as\s+)?(?:the\s+)?personal\s+representative\b/i,
+
+    /*
+     * Mary Gia Wong has been appointed Personal
+     * Representative of the estate...
+     */
+    /(.+?)\s+has\s+been\s+appointed\s+(?:as\s+)?(?:the\s+)?personal\s+representative\s+of\s+(?:the|this)\s+estate\b/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+
+    if (!match) {
+      continue;
+    }
+
+    const name = cleanText(match[1])
+      .replace(/^[,;:\-\s]+|[,;:\-\s]+$/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    /*
+     * Use a reasonable maximum length to avoid treating an
+     * entire preceding paragraph as a person's name when an
+     * unexpected notice format is encountered.
+     */
+    if (name && name.length <= 200) {
+      return name;
+    }
+  }
+
+  /*
+   * Return an empty value when the representative is omitted
+   * or the notice uses an unknown format.
+   */
+  return '';
 }
 
 (async () => {
@@ -57,8 +122,8 @@ function normalizeCaseNumber(value = '') {
     await waitForResults(page);
 
     /*
-     * Preserve the initial page HTML and screenshot for debugging.
-     * These files are uploaded by the GitHub Actions workflow.
+     * Preserve the initial page HTML and screenshot for
+     * troubleshooting GitHub Actions runs.
      */
     fs.writeFileSync(
       DEBUG_HTML,
@@ -80,8 +145,8 @@ function normalizeCaseNumber(value = '') {
       loopGuard += 1;
 
       /*
-       * Prevent an infinite pagination loop if the website returns
-       * unexpected page information.
+       * Prevent an infinite pagination loop if the website
+       * returns unexpected pagination information.
        */
       if (loopGuard > 250) {
         throw new Error(
@@ -111,14 +176,15 @@ function normalizeCaseNumber(value = '') {
 
       if (pageNotices.length === 0) {
         throw new Error(
-          `No notice records were extracted from results page ${currentPage}.`
+          `No notice records were extracted from ` +
+          `results page ${currentPage}.`
         );
       }
 
       for (const notice of pageNotices) {
         /*
          * Case number is used as the primary unique key.
-         * Notice text is used only if no case number is available.
+         * Notice text is used only if no case number exists.
          */
         const key =
           notice.caseNumber ||
@@ -135,6 +201,8 @@ function normalizeCaseNumber(value = '') {
           publication: notice.publication,
           publishedDate: notice.publishedDate,
           caseNumber: notice.caseNumber,
+          personalRepresentative:
+            notice.personalRepresentative,
           text: notice.text
         });
       }
@@ -144,7 +212,7 @@ function normalizeCaseNumber(value = '') {
       }
 
       /*
-       * This marker helps verify that the result records changed
+       * This marker helps verify that the results changed
        * after clicking the next-page control.
        */
       const previousMarker =
@@ -174,10 +242,20 @@ function normalizeCaseNumber(value = '') {
 
     console.log('');
     console.log(
-      `Finished. Extracted ${notices.length} unique notice(s).`
+      `Finished. Extracted ${notices.length} ` +
+      `unique notice(s).`
     );
     console.log(`JSON output: ${OUTPUT_JSON}`);
     console.log(`Text output: ${OUTPUT_TEXT}`);
+
+    const representativesFound = notices.filter(
+      notice => notice.personalRepresentative
+    ).length;
+
+    console.log(
+      `Personal representatives extracted: ` +
+      `${representativesFound}`
+    );
 
     await page.screenshot({
       path: 'final-page.png',
@@ -231,14 +309,15 @@ async function getPageInfo(page) {
 
 async function extractNotices(page) {
   const rawNotices = await page.evaluate(() => {
-    const normalize = (value = '') =>
-      String(value)
+    const normalize = (value = '') => {
+      return String(value)
         .replace(/\u00a0/g, ' ')
         .replace(/\r/g, '')
         .replace(/[ \t]+/g, ' ')
         .replace(/ *\n */g, '\n')
         .replace(/\n{3,}/g, '\n\n')
         .trim();
+    };
 
     const noticePattern =
       /NOTICE TO INTERESTED PERSONS/i;
@@ -280,8 +359,8 @@ async function extractNotices(page) {
     );
 
     /*
-     * Keep the smallest individual element containing exactly
-     * one case number and one probate-notice summary.
+     * Keep the smallest individual element containing
+     * exactly one case number and one probate notice.
      */
     const leafNotices = allElements.filter(element => {
       const text =
@@ -322,9 +401,9 @@ async function extractNotices(page) {
         caseMatch?.[1]?.toUpperCase() || '';
 
       /*
-       * The publication and date may be stored in sibling
-       * elements. Walk upward until they are found, but stop
-       * before entering a container holding multiple notices.
+       * Publication and date may be stored in sibling
+       * elements. Walk upward until they are found, but
+       * stop before entering a container with multiple cases.
        */
       let recordElement = leaf;
       let parent = leaf.parentElement;
@@ -396,12 +475,15 @@ async function extractNotices(page) {
   });
 
   /*
-   * Perform secondary cleanup and deduplication outside
-   * the browser context.
+   * Perform secondary cleanup, extract the personal
+   * representative, and deduplicate notices.
    */
   const unique = new Map();
 
   for (const notice of rawNotices) {
+    const cleanedText =
+      cleanText(notice.text);
+
     const cleaned = {
       publication:
         cleanText(notice.publication),
@@ -412,8 +494,11 @@ async function extractNotices(page) {
       caseNumber:
         normalizeCaseNumber(notice.caseNumber),
 
+      personalRepresentative:
+        extractPersonalRepresentative(cleanedText),
+
       text:
-        cleanText(notice.text)
+        cleanedText
     };
 
     /*
@@ -472,8 +557,8 @@ async function goToNextPage(
   }
 
   /*
-   * Find the visible "Page X of Y Pages" label and look
-   * for a nearby numeric page link.
+   * Find the visible "Page X of Y Pages" label and
+   * look for a nearby numeric page link.
    */
   const pageLabel = page
     .getByText(
@@ -513,7 +598,7 @@ async function goToNextPage(
   }
 
   /*
-   * Search for all links whose visible text exactly matches
+   * Search for links whose visible text exactly matches
    * the next page number.
    */
   const exactLinks = page.getByRole(
@@ -600,7 +685,7 @@ async function clickAndWaitForPageChange(
 ) {
   /*
    * Start waiting before clicking. The site may use either
-   * a full ASP.NET navigation or a partial JavaScript update.
+   * a full navigation or a partial JavaScript update.
    */
   const navigationPromise = page
     .waitForNavigation({
@@ -697,6 +782,14 @@ function writeOutput(notices) {
           : null,
 
         `Case number: ${notice.caseNumber}`,
+
+        notice.personalRepresentative
+          ? (
+            'Personal representative: ' +
+            notice.personalRepresentative
+          )
+          : 'Personal representative: Not extracted',
+
         notice.text
       ]
         .filter(Boolean)
