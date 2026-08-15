@@ -1,22 +1,15 @@
 name: Oregon Public Notice Scraper
 
-"on":
+on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
-concurrency:
-  group: oregon-public-notice-scraper
-  cancel-in-progress: false
-
 jobs:
-  scrape:
+  scrape-notices:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     env:
-      START_URL: "https://www.publicnoticeoregon.com/(S(ayzufrbyvqdnk3fqqajn0b4c))/Search.aspx"
+      START_URL: "https://www.publicnoticeoregon.com/Search.aspx"
       SHEET_ID: "1iXOEgk_jYxeykjXafgCSc80KkAn-Jp2jl27ZS7FqGdg"
       WORKSHEET_NAME: "Probate"
 
@@ -28,9 +21,7 @@ jobs:
         uses: actions/checkout@v5
 
       # ==========================================
-      # SETUP NODE.JS 24
-      # Caching is disabled because package-lock.json
-      # might not exist in the repository.
+      # SETUP NODE.JS
       # ==========================================
       - name: Setup Node.js
         uses: actions/setup-node@v5
@@ -39,161 +30,49 @@ jobs:
           package-manager-cache: false
 
       # ==========================================
-      # INSTALL NODE DEPENDENCIES
+      # INSTALL PLAYWRIGHT
       # ==========================================
-      - name: Install Node Dependencies
-        shell: bash
+      - name: Install Playwright
         run: |
-          set -euo pipefail
-
-          echo "Node version:"
-          node --version
-
-          echo "npm version:"
-          npm --version
-
           if [ -f package-lock.json ]; then
-            echo "package-lock.json found; running npm ci"
             npm ci
           elif [ -f package.json ]; then
-            echo "No package-lock.json found; running npm install"
             npm install
           else
-            echo "No package.json found; creating a minimal npm project"
             npm init -y
+            npm install playwright
           fi
 
-          if npm list playwright --depth=0 >/dev/null 2>&1; then
-            echo "Playwright is already installed"
-          else
-            echo "Installing Playwright"
-            npm install --no-save playwright
+          if ! npm list playwright --depth=0 >/dev/null 2>&1; then
+            npm install playwright
           fi
 
-      # ==========================================
-      # INSTALL CHROMIUM AND LINUX DEPENDENCIES
-      # ==========================================
-      - name: Install Playwright Chromium
-        shell: bash
-        run: |
-          set -euo pipefail
           npx playwright install chromium --with-deps
 
       # ==========================================
       # VERIFY SCRAPER EXISTS
       # ==========================================
-      - name: Verify Scraper
-        shell: bash
+      - name: Verify Scraper Script
         run: |
-          set -euo pipefail
-
-          echo "Repository files:"
           ls -la
-
-          if [ ! -f scraper.cjs ]; then
-            echo "ERROR: scraper.cjs was not found"
-            exit 1
-          fi
-
+          test -f scraper.cjs
           node --check scraper.cjs
-
-          echo "scraper.cjs exists and passed syntax validation"
 
       # ==========================================
       # RUN SCRAPER
       # ==========================================
-      - name: Run Scraper
-        env:
-          START_URL: ${{ env.START_URL }}
-        shell: bash
+      - name: Run Scraper Script
         run: |
-          set -euo pipefail
           node scraper.cjs
 
       # ==========================================
-      # VALIDATE SCRAPER OUTPUT
+      # VERIFY SCRAPER OUTPUT
       # ==========================================
-      - name: Validate notices.json
-        shell: bash
+      - name: Verify Scraper Output
         run: |
-          set -euo pipefail
-
-          node <<'NODE'
-          const fs = require('fs');
-
-          const outputFile = 'notices.json';
-
-          if (!fs.existsSync(outputFile)) {
-            throw new Error(
-              'scraper.cjs did not create notices.json'
-            );
-          }
-
-          const fileContent = fs.readFileSync(
-            outputFile,
-            'utf8'
-          );
-
-          let notices;
-
-          try {
-            notices = JSON.parse(fileContent);
-          } catch (error) {
-            throw new Error(
-              `notices.json contains invalid JSON: ${error.message}`
-            );
-          }
-
-          if (!Array.isArray(notices)) {
-            throw new Error(
-              'notices.json must contain a JSON array'
-            );
-          }
-
-          if (notices.length === 0) {
-            throw new Error(
-              'notices.json is empty; no notices were extracted'
-            );
-          }
-
-          const invalidRecords = [];
-
-          notices.forEach((notice, index) => {
-            const caseNumber = String(
-              notice?.caseNumber ?? ''
-            ).trim();
-
-            const text = String(
-              notice?.text ?? ''
-            ).trim();
-
-            if (!caseNumber || !text) {
-              invalidRecords.push(index + 1);
-            }
-          });
-
-          if (invalidRecords.length > 0) {
-            throw new Error(
-              'Missing caseNumber or text in record indexes: ' +
-              invalidRecords.join(', ')
-            );
-          }
-
-          const caseNumbers = notices.map(notice =>
-            String(notice.caseNumber).trim().toUpperCase()
-          );
-
-          const uniqueCaseNumbers = new Set(caseNumbers);
-
-          console.log('====================================');
-          console.log('Scraper output validation successful');
-          console.log('Total records:', notices.length);
-          console.log(
-            'Unique case numbers:',
-            uniqueCaseNumbers.size
-          );
-          console.log('====================================');
-          NODE
+          ls -la
+          test -f notices.json
+          test -f notices.txt
 
       # ==========================================
       # SETUP PYTHON
@@ -207,93 +86,56 @@ jobs:
       # INSTALL GOOGLE SHEETS DEPENDENCIES
       # ==========================================
       - name: Install Google Sheets Dependencies
-        shell: bash
         run: |
-          set -euo pipefail
-
           python -m pip install --upgrade pip
-          pip install "gspread>=6,<7" "google-auth>=2,<3"
+          pip install gspread google-auth
 
       # ==========================================
-      # WRITE AND VALIDATE SERVICE ACCOUNT JSON
+      # WRITE GOOGLE SERVICE ACCOUNT JSON
       # ==========================================
-      - name: Write Google Service Account JSON
+      - name: Write Service Account JSON
         env:
           SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
-        shell: bash
         run: |
-          set -euo pipefail
+          printf '%s' "$SERVICE_ACCOUNT_JSON" > service-account.json
 
-          python <<'PY'
-          import json
-          import os
-          from pathlib import Path
+      # ==========================================
+      # VALIDATE SERVICE ACCOUNT JSON
+      # ==========================================
+      - name: Validate Service Account JSON
+        run: |
+          python -c 'import json; j=json.load(open("service-account.json", encoding="utf-8")); required=["private_key","client_email","project_id"]; missing=[k for k in required if not j.get(k)]; assert not missing, f"Missing required fields: {missing}"; print("===================================="); print("Google Service Account Loaded OK"); print("Client Email:", j["client_email"]); print("Project ID:", j["project_id"]); print("====================================")'
 
-          raw = os.environ.get(
-              "SERVICE_ACCOUNT_JSON",
-              "",
-          ).strip()
+      # ==========================================
+      # APPEND NOTICES TO GOOGLE SHEETS
+      #
+      # caseNumber -> column E
+      # text       -> column F
+      # ==========================================
+      - name: Append Notices to Probate Sheet
+        run: |
+          python -c 'import json,os,gspread; from google.oauth2.service_account import Credentials; notices=json.load(open("notices.json",encoding="utf-8")); scopes=["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]; creds=Credentials.from_service_account_file("service-account.json",scopes=scopes); ws=gspread.authorize(creds).open_by_key(os.environ["SHEET_ID"]).worksheet(os.environ["WORKSHEET_NAME"]); existing={str(v).strip().upper() for v in ws.col_values(5)[1:] if str(v).strip()}; rows=[]; seen=set(); [(rows.append([case,text]),seen.add(case)) for n in notices if (case:=str(n.get("caseNumber","")).strip().upper()) and (text:=str(n.get("text","")).strip()) and case not in existing and case not in seen]; next_row=max(len(ws.col_values(5)),len(ws.col_values(6)),1)+1; end_row=next_row+len(rows)-1; ws.update(values=rows,range_name=f"E{next_row}:F{end_row}",value_input_option="RAW") if rows else None; print(f"Appended {len(rows)} new notice(s) to {ws.title}.")'
 
-          if not raw:
-              raise SystemExit(
-                  "ERROR: GitHub secret "
-                  "SERVICE_ACCOUNT_JSON is empty or missing"
-              )
+      # ==========================================
+      # UPLOAD SCRAPER OUTPUT
+      # ==========================================
+      - name: Upload Scraper Output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraper-output
+          path: |
+            notices.json
+            notices.txt
+            page.html
+            page.png
+            final-page.png
+          if-no-files-found: ignore
 
-          try:
-              credentials = json.loads(raw)
-          except json.JSONDecodeError as error:
-              raise SystemExit(
-                  "ERROR: SERVICE_ACCOUNT_JSON is not "
-                  f"valid JSON: {error}"
-              )
-
-          required_fields = (
-              "type",
-              "project_id",
-              "private_key",
-              "client_email",
-              "token_uri",
-          )
-
-          missing_fields = [
-              field
-              for field in required_fields
-              if not credentials.get(field)
-          ]
-
-          if missing_fields:
-              raise SystemExit(
-                  "ERROR: Service account JSON is missing: "
-                  + ", ".join(missing_fields)
-              )
-
-          if credentials["type"] != "service_account":
-              raise SystemExit(
-                  "ERROR: Credential type must be "
-                  "'service_account'"
-              )
-
-          private_key = credentials["private_key"]
-
-          if "BEGIN PRIVATE KEY" not in private_key:
-              raise SystemExit(
-                  "ERROR: The service account private_key "
-                  "does not appear to be valid"
-              )
-
-          Path("service-account.json").write_text(
-              json.dumps(credentials),
-              encoding="utf-8",
-          )
-
-          print("====================================")
-          print("Google Service Account Loaded OK")
-          print(
-              "Client Email:",
-              credentials["client_email"],
-          )
-          print(
-              "Project ID:",
-              credentials["project_id"]
-              )
+      # ==========================================
+      # CLEANUP
+      # ==========================================
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -f service-account.json
