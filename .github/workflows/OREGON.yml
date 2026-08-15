@@ -25,17 +25,18 @@ jobs:
       # CHECKOUT REPOSITORY
       # ==========================================
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # ==========================================
-      # SETUP NODE.JS
+      # SETUP NODE.JS 24
+      # Caching is disabled because package-lock.json
+      # might not exist in the repository.
       # ==========================================
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: "20"
-          cache: "npm"
-          cache-dependency-path: package-lock.json
+          node-version: "24"
+          package-manager-cache: false
 
       # ==========================================
       # INSTALL NODE DEPENDENCIES
@@ -45,13 +46,27 @@ jobs:
         run: |
           set -euo pipefail
 
+          echo "Node version:"
+          node --version
+
+          echo "npm version:"
+          npm --version
+
           if [ -f package-lock.json ]; then
+            echo "package-lock.json found; running npm ci"
             npm ci
-          else
+          elif [ -f package.json ]; then
+            echo "No package-lock.json found; running npm install"
             npm install
+          else
+            echo "No package.json found; creating a minimal npm project"
+            npm init -y
           fi
 
-          if ! npm list playwright --depth=0 >/dev/null 2>&1; then
+          if npm list playwright --depth=0 >/dev/null 2>&1; then
+            echo "Playwright is already installed"
+          else
+            echo "Installing Playwright"
             npm install --no-save playwright
           fi
 
@@ -59,16 +74,41 @@ jobs:
       # INSTALL CHROMIUM AND LINUX DEPENDENCIES
       # ==========================================
       - name: Install Playwright Chromium
-        run: npx playwright install chromium --with-deps
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx playwright install chromium --with-deps
+
+      # ==========================================
+      # VERIFY SCRAPER EXISTS
+      # ==========================================
+      - name: Verify Scraper
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Repository files:"
+          ls -la
+
+          if [ ! -f scraper.cjs ]; then
+            echo "ERROR: scraper.cjs was not found"
+            exit 1
+          fi
+
+          node --check scraper.cjs
+
+          echo "scraper.cjs exists and passed syntax validation"
 
       # ==========================================
       # RUN SCRAPER
-      # scraper.cjs must generate notices.json
       # ==========================================
       - name: Run Scraper
         env:
           START_URL: ${{ env.START_URL }}
-        run: node scraper.cjs
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scraper.cjs
 
       # ==========================================
       # VALIDATE SCRAPER OUTPUT
@@ -84,18 +124,39 @@ jobs:
           const outputFile = 'notices.json';
 
           if (!fs.existsSync(outputFile)) {
-            throw new Error('scraper.cjs did not create notices.json');
+            throw new Error(
+              'scraper.cjs did not create notices.json'
+            );
           }
 
-          const notices = JSON.parse(
-            fs.readFileSync(outputFile, 'utf8')
+          const fileContent = fs.readFileSync(
+            outputFile,
+            'utf8'
           );
 
-          if (!Array.isArray(notices)) {
-            throw new Error('notices.json must contain a JSON array');
+          let notices;
+
+          try {
+            notices = JSON.parse(fileContent);
+          } catch (error) {
+            throw new Error(
+              `notices.json contains invalid JSON: ${error.message}`
+            );
           }
 
-          const invalid = [];
+          if (!Array.isArray(notices)) {
+            throw new Error(
+              'notices.json must contain a JSON array'
+            );
+          }
+
+          if (notices.length === 0) {
+            throw new Error(
+              'notices.json is empty; no notices were extracted'
+            );
+          }
+
+          const invalidRecords = [];
 
           notices.forEach((notice, index) => {
             const caseNumber = String(
@@ -107,36 +168,54 @@ jobs:
             ).trim();
 
             if (!caseNumber || !text) {
-              invalid.push(index + 1);
+              invalidRecords.push(index + 1);
             }
           });
 
-          if (invalid.length > 0) {
+          if (invalidRecords.length > 0) {
             throw new Error(
-              'Missing caseNumber or text in notice indexes: ' +
-              invalid.join(', ')
+              'Missing caseNumber or text in record indexes: ' +
+              invalidRecords.join(', ')
             );
           }
 
-          console.log(`Validated ${notices.length} notice(s).`);
+          const caseNumbers = notices.map(notice =>
+            String(notice.caseNumber).trim().toUpperCase()
+          );
+
+          const uniqueCaseNumbers = new Set(caseNumbers);
+
+          console.log('====================================');
+          console.log('Scraper output validation successful');
+          console.log('Total records:', notices.length);
+          console.log(
+            'Unique case numbers:',
+            uniqueCaseNumbers.size
+          );
+          console.log('====================================');
           NODE
 
       # ==========================================
-      # SETUP PYTHON FOR GOOGLE SHEETS
+      # SETUP PYTHON
       # ==========================================
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
+      # ==========================================
+      # INSTALL GOOGLE SHEETS DEPENDENCIES
+      # ==========================================
       - name: Install Google Sheets Dependencies
+        shell: bash
         run: |
+          set -euo pipefail
+
           python -m pip install --upgrade pip
           pip install "gspread>=6,<7" "google-auth>=2,<3"
 
       # ==========================================
-      # CREATE AND VALIDATE SERVICE ACCOUNT FILE
+      # WRITE AND VALIDATE SERVICE ACCOUNT JSON
       # ==========================================
       - name: Write Google Service Account JSON
         env:
@@ -150,18 +229,23 @@ jobs:
           import os
           from pathlib import Path
 
-          raw = os.environ.get("SERVICE_ACCOUNT_JSON", "").strip()
+          raw = os.environ.get(
+              "SERVICE_ACCOUNT_JSON",
+              "",
+          ).strip()
 
           if not raw:
               raise SystemExit(
-                  "GitHub secret SERVICE_ACCOUNT_JSON is empty or missing"
+                  "ERROR: GitHub secret "
+                  "SERVICE_ACCOUNT_JSON is empty or missing"
               )
 
           try:
               credentials = json.loads(raw)
           except json.JSONDecodeError as error:
               raise SystemExit(
-                  f"SERVICE_ACCOUNT_JSON is not valid JSON: {error}"
+                  "ERROR: SERVICE_ACCOUNT_JSON is not "
+                  f"valid JSON: {error}"
               )
 
           required_fields = (
@@ -172,15 +256,30 @@ jobs:
               "token_uri",
           )
 
-          missing = [
+          missing_fields = [
               field
               for field in required_fields
               if not credentials.get(field)
           ]
 
-          if missing:
+          if missing_fields:
               raise SystemExit(
-                  "Service account JSON is missing: " + ", ".join(missing)
+                  "ERROR: Service account JSON is missing: "
+                  + ", ".join(missing_fields)
+              )
+
+          if credentials["type"] != "service_account":
+              raise SystemExit(
+                  "ERROR: Credential type must be "
+                  "'service_account'"
+              )
+
+          private_key = credentials["private_key"]
+
+          if "BEGIN PRIVATE KEY" not in private_key:
+              raise SystemExit(
+                  "ERROR: The service account private_key "
+                  "does not appear to be valid"
               )
 
           Path("service-account.json").write_text(
@@ -188,171 +287,12 @@ jobs:
               encoding="utf-8",
           )
 
-          print("Google service account JSON validated successfully.")
-          print("Client email:", credentials["client_email"])
-          print("Project ID:", credentials["project_id"])
-          PY
-
-      # ==========================================
-      # APPEND TO GOOGLE SHEETS
-      # caseNumber -> column E
-      # text       -> column F
-      # Existing case numbers in E2:E are skipped.
-      # ==========================================
-      - name: Append Notices to Probate Sheet
-        env:
-          SHEET_ID: ${{ env.SHEET_ID }}
-          WORKSHEET_NAME: ${{ env.WORKSHEET_NAME }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python <<'PY'
-          import json
-          import os
-
-          import gspread
-          from google.oauth2.service_account import Credentials
-
-          sheet_id = os.environ["SHEET_ID"]
-          worksheet_name = os.environ["WORKSHEET_NAME"]
-
-          with open("notices.json", "r", encoding="utf-8") as file:
-              notices = json.load(file)
-
-          scopes = [
-              "https://www.googleapis.com/auth/spreadsheets",
-              "https://www.googleapis.com/auth/drive",
-          ]
-
-          credentials = Credentials.from_service_account_file(
-              "service-account.json",
-              scopes=scopes,
-          )
-
-          client = gspread.authorize(credentials)
-          spreadsheet = client.open_by_key(sheet_id)
-          worksheet = spreadsheet.worksheet(worksheet_name)
-
-          # Existing values in E2:E are used to prevent duplicate cases.
-          existing_case_numbers = {
-              str(value).strip().upper()
-              for value in worksheet.col_values(5)[1:]
-              if str(value).strip()
-          }
-
-          rows_to_write = []
-          seen_in_current_run = set()
-
-          for notice in notices:
-              case_number = str(
-                  notice.get("caseNumber", "")
-              ).strip().upper()
-
-              text = str(
-                  notice.get("text", "")
-              ).strip()
-
-              if not case_number or not text:
-                  continue
-
-              if case_number in existing_case_numbers:
-                  print(f"Skipping existing case: {case_number}")
-                  continue
-
-              if case_number in seen_in_current_run:
-                  print(f"Skipping duplicate in current run: {case_number}")
-                  continue
-
-              rows_to_write.append([case_number, text])
-              seen_in_current_run.add(case_number)
-
-          if not rows_to_write:
-              print("No new notices to append to Google Sheets.")
-              raise SystemExit(0)
-
-          # Find the next row after the final used cell in either E or F.
-          column_e = worksheet.col_values(5)
-          column_f = worksheet.col_values(6)
-
-          next_row = max(
-              len(column_e),
-              len(column_f),
-              1,
-          ) + 1
-
-          next_row = max(next_row, 2)
-          end_row = next_row + len(rows_to_write) - 1
-          target_range = f"E{next_row}:F{end_row}"
-
-          worksheet.update(
-              range_name=target_range,
-              values=rows_to_write,
-              value_input_option="RAW",
-          )
-
+          print("====================================")
+          print("Google Service Account Loaded OK")
           print(
-              f"Appended {len(rows_to_write)} new notice(s) to "
-              f"'{worksheet_name}'!{target_range}."
+              "Client Email:",
+              credentials["client_email"],
           )
-          PY
-
-      # ==========================================
-      # LIST FILES FOR DIAGNOSTICS
-      # ==========================================
-      - name: List Generated Files
-        if: always()
-        shell: bash
-        run: |
-          echo "=== Generated Files ==="
-          find . -maxdepth 3 -type f | sort
-
-      # ==========================================
-      # UPLOAD SCRAPER OUTPUT
-      # ==========================================
-      - name: Upload Scraper Output
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: scraper-output
-          path: |
-            notices.json
-            notices.txt
-            *.csv
-          if-no-files-found: ignore
-          retention-days: 14
-
-      # ==========================================
-      # UPLOAD DEBUG FILES
-      # ==========================================
-      - name: Upload Debug Files
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-files
-          path: |
-            page.html
-            page.png
-            final-page.png
-            debug-page.html
-            debug-page.png
-            after-search.html
-            element-ids.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      # ==========================================
-      # REMOVE TEMPORARY CREDENTIALS
-      # ==========================================
-      - name: Cleanup
-        if: always()
-        shell: bash
-        run: |
-          rm -f service-account.json
-          rm -f page.html
-          rm -f page.png
-          rm -f final-page.png
-          rm -f debug-page.html
-          rm -f debug-page.png
-          rm -f after-search.html
-          rm -f element-ids.json
+          print(
+              "Project ID:",
+              credentials["project_id"]
