@@ -3,7 +3,7 @@ const { chromium } = require('playwright');
 
 const START_URL =
   process.env.START_URL ||
-  'https://www.publicnoticeoregon.com/Search.aspx';
+  'https://www.publicnoticeoregon.com/(S(ayzufrbyvqdnk3fqqajn0b4c))/Search.aspx';
 
 const OUTPUT_JSON = 'notices.json';
 const OUTPUT_TEXT = 'notices.txt';
