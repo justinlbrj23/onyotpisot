@@ -9,34 +9,30 @@ const { chromium } = require('playwright');
     const page = await browser.newPage();
 
     await page.goto(
-        'https://www.publicnoticeoregon.com/Search.aspx',
+        'https://www.publicnoticeoregon.com/(S(favgjx24ximbftgkkdyisixq))/Search.aspx',
         {
-            waitUntil: 'networkidle',
+            waitUntil: 'domcontentloaded',
             timeout: 120000
         }
     );
 
+    console.log('Final URL:', page.url());
+
     await page.screenshot({
-        path: 'debug.png',
+        path: 'debug-page.png',
         fullPage: true
     });
 
-    const ids = await page.$$eval(
-        '[id]',
-        els => els.map(el => el.id)
-    );
-
     fs.writeFileSync(
-        'element-ids.json',
-        JSON.stringify(ids, null, 2)
-    );
-
-    fs.writeFileSync(
-        'page.html',
+        'debug-page.html',
         await page.content()
     );
 
-    console.log('Found IDs:', ids.length);
+    const tableExists = await page.locator(
+        '#ctl00_ContentPlaceHolder1_WSExtendedGridNP1_GridView1'
+    ).count();
+
+    console.log('Table exists:', tableExists);
 
     await browser.close();
 })();
