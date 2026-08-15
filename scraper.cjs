@@ -3,13 +3,15 @@ const { chromium } = require('playwright');
 
 const START_URL =
   process.env.START_URL ||
-  'https://www.publicnoticeoregon.com/(S(ayzufrbyvqdnk3fqqajn0b4c))/Search.aspx';
+  'https://www.publicnoticeoregon.com/Search.aspx';
 
 const OUTPUT_JSON = 'notices.json';
 const OUTPUT_TEXT = 'notices.txt';
+const DEBUG_HTML = 'page.html';
+const DEBUG_SCREENSHOT = 'page.png';
 
-function cleanText(value) {
-  return value
+function cleanText(value = '') {
+  return String(value)
     .replace(/\u00a0/g, ' ')
     .replace(/\r/g, '')
     .replace(/[ \t]+/g, ' ')
@@ -18,67 +20,114 @@ function cleanText(value) {
     .trim();
 }
 
+function normalizeCaseNumber(value = '') {
+  return cleanText(value).toUpperCase();
+}
+
 (async () => {
-  const browser = await chromium.launch({
-    headless: true
-  });
+  let browser;
 
-  const context = await browser.newContext({
-    viewport: {
-      width: 1440,
-      height: 1000
-    }
-  });
+  try {
+    browser = await chromium.launch({
+      headless: true
+    });
 
-  const page = await context.newPage();
+    const context = await browser.newContext({
+      viewport: {
+        width: 1440,
+        height: 1000
+      },
+      userAgent:
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 ' +
+        '(KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
+    });
 
-  console.log(`Opening: ${START_URL}`);
+    const page = await context.newPage();
 
-  await page.goto(START_URL, {
-    waitUntil: 'domcontentloaded',
-    timeout: 120000
-  });
+    page.setDefaultTimeout(120000);
+    page.setDefaultNavigationTimeout(120000);
 
-  /*
-   * If the search is performed by your script, automate the search/filter
-   * controls here before starting pagination.
-   *
-   * This script assumes the loaded page is already showing the desired
-   * search results.
-   */
+    console.log(`Opening: ${START_URL}`);
 
-  await waitForResults(page);
+    await page.goto(START_URL, {
+      waitUntil: 'domcontentloaded',
+      timeout: 120000
+    });
 
-  const notices = [];
-  const seen = new Set();
-
-  let currentPage = 1;
-  let totalPages = 1;
-
-  while (true) {
     await waitForResults(page);
 
-    const pageInfo = await getPageInfo(page);
+    /*
+     * Preserve the initial page HTML and screenshot for debugging.
+     * These files are uploaded by the GitHub Actions workflow.
+     */
+    fs.writeFileSync(
+      DEBUG_HTML,
+      await page.content(),
+      'utf8'
+    );
 
-    if (pageInfo) {
-      currentPage = pageInfo.current;
-      totalPages = pageInfo.total;
-    }
+    await page.screenshot({
+      path: DEBUG_SCREENSHOT,
+      fullPage: true
+    });
 
-    console.log(`Extracting page ${currentPage} of ${totalPages}...`);
+    const notices = [];
+    const seen = new Set();
 
-    const pageNotices = await extractNotices(page);
+    let loopGuard = 0;
 
-    console.log(`Found ${pageNotices.length} notice(s) on this page.`);
+    while (true) {
+      loopGuard += 1;
 
-    for (const notice of pageNotices) {
       /*
-       * Case number is normally the best unique key.
-       * If it is unavailable, use the complete notice text.
+       * Prevent an infinite pagination loop if the website returns
+       * unexpected page information.
        */
-      const key = notice.caseNumber || notice.text;
+      if (loopGuard > 250) {
+        throw new Error(
+          'Pagination safety limit reached (250 pages).'
+        );
+      }
 
-      if (!seen.has(key)) {
+      await waitForResults(page);
+
+      const pageInfo = await getPageInfo(page);
+
+      const currentPage =
+        pageInfo?.current || loopGuard;
+
+      const totalPages =
+        pageInfo?.total || currentPage;
+
+      console.log(
+        `Extracting page ${currentPage} of ${totalPages}...`
+      );
+
+      const pageNotices = await extractNotices(page);
+
+      console.log(
+        `Found ${pageNotices.length} notice(s) on this page.`
+      );
+
+      if (pageNotices.length === 0) {
+        throw new Error(
+          `No notice records were extracted from results page ${currentPage}.`
+        );
+      }
+
+      for (const notice of pageNotices) {
+        /*
+         * Case number is used as the primary unique key.
+         * Notice text is used only if no case number is available.
+         */
+        const key =
+          notice.caseNumber ||
+          notice.text;
+
+        if (seen.has(key)) {
+          continue;
+        }
+
         seen.add(key);
 
         notices.push({
@@ -89,78 +138,82 @@ function cleanText(value) {
           text: notice.text
         });
       }
-    }
 
-    if (currentPage >= totalPages) {
-      break;
-    }
+      if (currentPage >= totalPages) {
+        break;
+      }
 
-    const previousMarker =
-      pageNotices[0]?.caseNumber ||
-      pageNotices[0]?.text ||
-      `page-${currentPage}`;
+      /*
+       * This marker helps verify that the result records changed
+       * after clicking the next-page control.
+       */
+      const previousMarker =
+        pageNotices[0]?.caseNumber ||
+        pageNotices[0]?.text.slice(0, 120) ||
+        `page-${currentPage}`;
 
-    const nextPageNumber = currentPage + 1;
+      const nextPageNumber =
+        currentPage + 1;
 
-    const clicked = await goToNextPage(
-      page,
-      currentPage,
-      nextPageNumber,
-      previousMarker
-    );
-
-    if (!clicked) {
-      console.warn(
-        `Could not locate the pagination control for page ${nextPageNumber}.`
+      const moved = await goToNextPage(
+        page,
+        currentPage,
+        nextPageNumber,
+        previousMarker
       );
-      break;
+
+      if (!moved) {
+        throw new Error(
+          `Could not move from page ${currentPage} ` +
+          `to page ${nextPageNumber}.`
+        );
+      }
     }
 
-    currentPage = nextPageNumber;
+    writeOutput(notices);
+
+    console.log('');
+    console.log(
+      `Finished. Extracted ${notices.length} unique notice(s).`
+    );
+    console.log(`JSON output: ${OUTPUT_JSON}`);
+    console.log(`Text output: ${OUTPUT_TEXT}`);
+
+    await page.screenshot({
+      path: 'final-page.png',
+      fullPage: true
+    });
+  } finally {
+    if (browser) {
+      await browser.close();
+    }
   }
-
-  writeOutput(notices);
-
-  console.log('');
-  console.log(`Finished. Extracted ${notices.length} unique notice(s).`);
-  console.log(`JSON output: ${OUTPUT_JSON}`);
-  console.log(`Text output: ${OUTPUT_TEXT}`);
-
-  await page.screenshot({
-    path: 'final-page.png',
-    fullPage: true
-  });
-
-  await browser.close();
 })().catch(error => {
-  console.error(error);
-  process.exit(1);
+  console.error('Scraper failed:', error);
+  process.exitCode = 1;
 });
 
 async function waitForResults(page) {
-  await page.waitForFunction(
-    () => {
-      const text = document.body?.innerText || '';
+  await page.waitForFunction(() => {
+    const text =
+      document.body?.innerText || '';
 
-      return (
-        /Page\s+\d+\s+of\s+\d+\s+Pages?/i.test(text) ||
-        /NOTICE TO INTERESTED PERSONS/i.test(text) ||
-        /PROBATE DEPARTMENT/i.test(text)
-      );
-    },
-    {
-      timeout: 120000
-    }
-  );
+    return (
+      /Page\s+\d+\s+of\s+\d+\s+Pages?/i.test(text) ||
+      /NOTICE TO INTERESTED PERSONS/i.test(text) ||
+      /PROBATE DEPARTMENT/i.test(text)
+    );
+  });
 
   /*
-   * Allow client-side DOM updates to settle.
+   * Let asynchronous page updates settle before extraction.
    */
   await page.waitForTimeout(750);
 }
 
 async function getPageInfo(page) {
-  const bodyText = await page.locator('body').innerText();
+  const bodyText =
+    await page.locator('body').innerText();
 
   const match = bodyText.match(
     /Page\s+(\d+)\s+of\s+(\d+)\s+Pages?/i
@@ -178,8 +231,8 @@ async function getPageInfo(page) {
 
 async function extractNotices(page) {
   const rawNotices = await page.evaluate(() => {
-    const normalize = value =>
-      (value || '')
+    const normalize = (value = '') =>
+      String(value)
         .replace(/\u00a0/g, ' ')
         .replace(/\r/g, '')
         .replace(/[ \t]+/g, ' ')
@@ -187,108 +240,200 @@ async function extractNotices(page) {
         .replace(/\n{3,}/g, '\n\n')
         .trim();
 
-    const isNoticeText = text => {
+    const noticePattern =
+      /NOTICE TO INTERESTED PERSONS/i;
+
+    const casePattern =
+      /\bCase\s+No\.?\s*([A-Z0-9-]+)/i;
+
+    const datePattern =
+      /\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b/i;
+
+    const looksLikeNotice = text => {
       return (
-        /NOTICE TO INTERESTED PERSONS/i.test(text) &&
-        (
-          /\bCase\s+No\.?\s*[A-Z0-9-]+/i.test(text) ||
-          /\bCASE\s+No\.?\s*[A-Z0-9-]+/i.test(text)
-        )
+        noticePattern.test(text) &&
+        casePattern.test(text)
       );
     };
 
-    const elements = Array.from(
+    const countDistinctCases = text => {
+      const matches = [
+        ...text.matchAll(
+          /\bCase\s+No\.?\s*([A-Z0-9-]+)/gi
+        )
+      ];
+
+      return new Set(
+        matches.map(match =>
+          match[1].toUpperCase()
+        )
+      ).size;
+    };
+
+    /*
+     * Search likely result-container elements.
+     */
+    const allElements = Array.from(
       document.querySelectorAll(
-        'article, li, tr, td, div, section'
+        'article, li, tr, td, div, section, p'
       )
     );
 
     /*
-     * Find every element that looks like it contains a notice.
+     * Keep the smallest individual element containing exactly
+     * one case number and one probate-notice summary.
      */
-    const candidates = elements.filter(element => {
-      const text = normalize(element.innerText);
+    const leafNotices = allElements.filter(element => {
+      const text =
+        normalize(element.innerText);
 
-      if (!isNoticeText(text)) {
+      if (
+        !looksLikeNotice(text) ||
+        countDistinctCases(text) !== 1
+      ) {
         return false;
       }
 
-      /*
-       * Result summaries generally contain the "click view" message.
-       * Keep NOTICE TO INTERESTED PERSONS as a fallback in case the
-       * site's wording changes.
-       */
-      return (
-        /click\s+['"]?view['"]?\s+to\s+open/i.test(text) ||
-        /NOTICE TO INTERESTED PERSONS/i.test(text)
-      );
-    });
-
-    /*
-     * Keep only the smallest matching element. This prevents extracting
-     * a parent container that contains several notices.
-     */
-    const smallestCandidates = candidates.filter(element => {
-      return !Array.from(
-        element.querySelectorAll('article, li, tr, td, div, section')
+      const hasMatchingChild = Array.from(
+        element.querySelectorAll(
+          'article, li, tr, td, div, section, p'
+        )
       ).some(child => {
         if (child === element) {
           return false;
         }
 
-        return isNoticeText(normalize(child.innerText));
+        return looksLikeNotice(
+          normalize(child.innerText)
+        );
       });
+
+      return !hasMatchingChild;
     });
 
-    return smallestCandidates.map(element => {
-      const text = normalize(element.innerText);
+    return leafNotices.map(leaf => {
+      const leafText =
+        normalize(leaf.innerText);
 
-      const dateMatch = text.match(
-        /\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b/i
-      );
+      const caseMatch =
+        leafText.match(casePattern);
 
-      const caseMatch = text.match(
-        /\bCase\s+No\.?\s*([A-Z0-9-]+)/i
-      );
+      const caseNumber =
+        caseMatch?.[1]?.toUpperCase() || '';
+
+      /*
+       * The publication and date may be stored in sibling
+       * elements. Walk upward until they are found, but stop
+       * before entering a container holding multiple notices.
+       */
+      let recordElement = leaf;
+      let parent = leaf.parentElement;
+
+      while (
+        parent &&
+        parent !== document.body
+      ) {
+        const parentText =
+          normalize(parent.innerText);
+
+        if (
+          countDistinctCases(parentText) !== 1
+        ) {
+          break;
+        }
+
+        recordElement = parent;
+
+        if (datePattern.test(parentText)) {
+          break;
+        }
+
+        parent = parent.parentElement;
+      }
+
+      const recordText =
+        normalize(recordElement.innerText);
+
+      const dateMatch =
+        recordText.match(datePattern);
+
+      const publishedDate =
+        dateMatch?.[0] || '';
 
       let publication = '';
 
       if (dateMatch) {
-        const beforeDate = text
+        const linesBeforeDate = recordText
           .slice(0, dateMatch.index)
           .split('\n')
           .map(line => line.trim())
-          .filter(Boolean);
+          .filter(Boolean)
+          .filter(line =>
+            !/^view$/i.test(line)
+          );
 
-        publication = beforeDate.at(-1) || '';
+        publication =
+          linesBeforeDate.at(-1) || '';
+      }
+
+      /*
+       * Prefer the smallest notice element so surrounding
+       * navigation, pagination, and filter text are excluded.
+       */
+      let text = leafText;
+
+      if (!noticePattern.test(text)) {
+        text = recordText;
       }
 
       return {
         publication,
-        publishedDate: dateMatch?.[0] || '',
-        caseNumber: caseMatch?.[1] || '',
+        publishedDate,
+        caseNumber,
         text
       };
     });
   });
 
   /*
-   * Secondary cleanup and deduplication within the page.
+   * Perform secondary cleanup and deduplication outside
+   * the browser context.
    */
   const unique = new Map();
 
   for (const notice of rawNotices) {
     const cleaned = {
-      publication: cleanText(notice.publication),
-      publishedDate: cleanText(notice.publishedDate),
-      caseNumber: cleanText(notice.caseNumber),
-      text: cleanText(notice.text)
+      publication:
+        cleanText(notice.publication),
+
+      publishedDate:
+        cleanText(notice.publishedDate),
+
+      caseNumber:
+        normalizeCaseNumber(notice.caseNumber),
+
+      text:
+        cleanText(notice.text)
     };
 
-    const key = cleaned.caseNumber || cleaned.text;
+    /*
+     * Skip unusable records.
+     */
+    if (
+      !cleaned.caseNumber ||
+      !cleaned.text
+    ) {
+      continue;
+    }
 
-    if (!unique.has(key)) {
-      unique.set(key, cleaned);
+    /*
+     * Store only one record per case number.
+     */
+    if (!unique.has(cleaned.caseNumber)) {
+      unique.set(
+        cleaned.caseNumber,
+        cleaned
+      );
     }
   }
 
@@ -302,11 +447,12 @@ async function goToNextPage(
   previousMarker
 ) {
   /*
-   * PublicNotice sites commonly use ASP.NET postbacks such as:
+   * ASP.NET sites commonly paginate with a postback:
    *
-   * javascript:__doPostBack('...', 'Page$2')
-   *
-   * First, look for a link whose href or onclick references Page$2.
+   * javascript:__doPostBack(
+   *   'controlName',
+   *   'Page$2'
+   * )
    */
   const aspNetPager = page.locator(
     `a[href*="Page%24${nextPageNumber}"], ` +
@@ -316,91 +462,110 @@ async function goToNextPage(
   );
 
   if (await aspNetPager.count()) {
-    await clickAndWaitForPageChange(
+    return clickAndWaitForPageChange(
       page,
       aspNetPager.first(),
       currentPage,
+      nextPageNumber,
       previousMarker
     );
-
-    return true;
   }
 
   /*
-   * Next, locate the "Page X of Y Pages" text and search its nearby
-   * container for a numeric page link.
+   * Find the visible "Page X of Y Pages" label and look
+   * for a nearby numeric page link.
    */
-  const pageLabel = page.getByText(
-    new RegExp(
-      `Page\\s+${currentPage}\\s+of\\s+\\d+\\s+Pages?`,
-      'i'
+  const pageLabel = page
+    .getByText(
+      new RegExp(
+        `Page\\s+${currentPage}` +
+        `\\s+of\\s+\\d+\\s+Pages?`,
+        'i'
+      )
     )
-  ).first();
+    .first();
 
   if (await pageLabel.count()) {
     const nearbyPager = pageLabel.locator(
-      `xpath=ancestor::*[self::div or self::td or self::tr or self::section][1]`
+      'xpath=ancestor::*[' +
+      'self::div or ' +
+      'self::td or ' +
+      'self::tr or ' +
+      'self::section' +
+      '][1]'
     );
 
-    const numericLink = nearbyPager.getByRole('link', {
-      name: String(nextPageNumber),
-      exact: true
-    });
+    const numericLink =
+      nearbyPager.getByRole('link', {
+        name: String(nextPageNumber),
+        exact: true
+      });
 
     if (await numericLink.count()) {
-      await clickAndWaitForPageChange(
+      return clickAndWaitForPageChange(
         page,
         numericLink.first(),
         currentPage,
+        nextPageNumber,
         previousMarker
       );
-
-      return true;
     }
   }
 
   /*
-   * Fallback: search all exact numeric links. Filter out page-size
-   * controls by preferring links with pager-related href/onclick values.
+   * Search for all links whose visible text exactly matches
+   * the next page number.
    */
-  const exactLinks = page.getByRole('link', {
-    name: String(nextPageNumber),
-    exact: true
-  });
+  const exactLinks = page.getByRole(
+    'link',
+    {
+      name: String(nextPageNumber),
+      exact: true
+    }
+  );
 
-  const linkCount = await exactLinks.count();
+  const exactLinkCount =
+    await exactLinks.count();
 
-  for (let index = 0; index < linkCount; index++) {
-    const link = exactLinks.nth(index);
+  for (
+    let index = 0;
+    index < exactLinkCount;
+    index += 1
+  ) {
+    const link =
+      exactLinks.nth(index);
 
-    const attributes = await link.evaluate(element => ({
-      href: element.getAttribute('href') || '',
-      onclick: element.getAttribute('onclick') || '',
-      title: element.getAttribute('title') || '',
-      parentText: element.parentElement?.innerText || ''
-    }));
+    const attributes =
+      await link.evaluate(element => ({
+        href:
+          element.getAttribute('href') || '',
 
-    const pagerEvidence = [
-      attributes.href,
-      attributes.onclick,
-      attributes.title,
-      attributes.parentText
-    ].join(' ');
+        onclick:
+          element.getAttribute('onclick') || '',
 
-    if (/page|pager|next/i.test(pagerEvidence)) {
-      await clickAndWaitForPageChange(
+        title:
+          element.getAttribute('title') || '',
+
+        parentText:
+          element.parentElement?.innerText || ''
+      }));
+
+    const evidence =
+      Object.values(attributes).join(' ');
+
+    if (/page|pager|next/i.test(evidence)) {
+      return clickAndWaitForPageChange(
         page,
         link,
         currentPage,
+        nextPageNumber,
         previousMarker
       );
-
-      return true;
     }
   }
 
   /*
-   * Final fallback: locate an explicit Next link/button.
+   * Final fallback for a visible Next link or button.
    */
   const nextControl = page
     .getByRole('link', {
@@ -414,14 +579,13 @@ async function goToNextPage(
     .first();
 
   if (await nextControl.count()) {
-    await clickAndWaitForPageChange(
+    return clickAndWaitForPageChange(
       page,
       nextControl,
       currentPage,
+      nextPageNumber,
       previousMarker
     );
-
-    return true;
   }
 
   return false;
@@ -431,12 +595,12 @@ async function clickAndWaitForPageChange(
   page,
   locator,
   currentPage,
+  expectedPage,
   previousMarker
 ) {
   /*
-   * ASP.NET pagination may perform a full navigation or update the page
-   * through JavaScript. Start waiting before clicking so neither event is
-   * missed.
+   * Start waiting before clicking. The site may use either
+   * a full ASP.NET navigation or a partial JavaScript update.
    */
   const navigationPromise = page
     .waitForNavigation({
@@ -450,22 +614,32 @@ async function clickAndWaitForPageChange(
 
   await navigationPromise;
 
+  /*
+   * Wait for either the page number or the first notice
+   * marker to change.
+   */
   await page.waitForFunction(
-    ({ oldPage, marker }) => {
-      const text = document.body?.innerText || '';
+    ({ expected, marker }) => {
+      const text =
+        document.body?.innerText || '';
 
       const pageChanged = new RegExp(
-        `Page\\s+(?!${oldPage}\\b)\\d+\\s+of\\s+\\d+\\s+Pages?`,
+        `Page\\s+${expected}` +
+        `\\s+of\\s+\\d+\\s+Pages?`,
         'i'
       ).test(text);
 
-      const noticeChanged =
-        marker && !text.includes(marker);
+      const firstNoticeChanged =
+        Boolean(marker) &&
+        !text.includes(marker);
 
-      return pageChanged || noticeChanged;
+      return (
+        pageChanged ||
+        firstNoticeChanged
+      );
     },
     {
-      oldPage: currentPage,
+      expected: expectedPage,
       marker: previousMarker
     },
     {
@@ -474,12 +648,37 @@ async function clickAndWaitForPageChange(
   );
 
   await page.waitForTimeout(750);
+
+  /*
+   * Perform an additional page-number consistency check.
+   */
+  const info =
+    await getPageInfo(page);
+
+  if (
+    info &&
+    info.current !== expectedPage
+  ) {
+    console.warn(
+      `Expected page ${expectedPage}, ` +
+      `but the page label reports ${info.current}.`
+    );
+  }
+
+  return (
+    !info ||
+    info.current !== currentPage
+  );
 }
 
 function writeOutput(notices) {
   fs.writeFileSync(
     OUTPUT_JSON,
-    JSON.stringify(notices, null, 2),
+    JSON.stringify(
+      notices,
+      null,
+      2
+    ),
     'utf8'
   );
 
@@ -488,11 +687,26 @@ function writeOutput(notices) {
       return [
         `NOTICE ${index + 1}`,
         `Page: ${notice.page}`,
-        notice.text,
-        ''
-      ].join('\n');
+
+        notice.publication
+          ? `Publication: ${notice.publication}`
+          : null,
+
+        notice.publishedDate
+          ? `Published: ${notice.publishedDate}`
+          : null,
+
+        `Case number: ${notice.caseNumber}`,
+        notice.text
+      ]
+        .filter(Boolean)
+        .join('\n');
     })
-    .join('\n----------------------------------------\n\n');
+    .join(
+      '\n\n' +
+      '----------------------------------------' +
+      '\n\n'
+    );
 
   fs.writeFileSync(
     OUTPUT_TEXT,
