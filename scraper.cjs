@@ -16,21 +16,14 @@ const { chromium } = require('playwright');
         }
     );
 
-    console.log('URL:', page.url());
+    const bodyText = await page.locator('body').innerText();
 
-    const html = await page.content();
+    console.log(bodyText.substring(0, 5000));
 
-    fs.writeFileSync('page.html', html);
-
-    const tableIds = await page.$$eval(
-        'table',
-        tables => tables.map(t => ({
-            id: t.id,
-            class: t.className
-        }))
+    fs.writeFileSync(
+        'page.html',
+        await page.content()
     );
-
-    console.log(JSON.stringify(tableIds, null, 2));
 
     await page.screenshot({
         path: 'page.png',
