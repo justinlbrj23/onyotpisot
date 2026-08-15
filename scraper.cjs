@@ -6,99 +6,33 @@ const { chromium } = require('playwright');
         headless: true
     });
 
-    try {
-        const page = await browser.newPage();
+    const page = await browser.newPage();
 
-        await page.goto(
-            'https://www.publicnoticeoregon.com/(S(favgjx24ximbftgkkdyisixq))/Search.aspx',
-            {
-                waitUntil: 'networkidle',
-                timeout: 120000
-            }
-        );
-
-        const tableSelector =
-            '#ctl00_ContentPlaceHolder1_WSExtendedGridNP1_GridView1';
-
-        await page.waitForSelector(tableSelector, {
-            timeout: 60000
-        });
-
-        const rows = await page.$$eval(
-            '#ctl00_ContentPlaceHolder1_WSExtendedGridNP1_GridView1 > tbody > tr',
-            trs => {
-                return trs.map(tr => {
-                    const cells = [...tr.querySelectorAll('th, td')];
-
-                    return cells.map(cell => {
-                        const link = cell.querySelector('a');
-
-                        return {
-                            text: cell.innerText
-                                .replace(/\r?\n/g, ' ')
-                                .replace(/\s+/g, ' ')
-                                .trim(),
-                            url: link ? link.href : ''
-                        };
-                    });
-                });
-            }
-        );
-
-        if (!rows.length) {
-            throw new Error('No rows found in target table.');
+    await page.goto(
+        'https://www.publicnoticeoregon.com/Search.aspx',
+        {
+            waitUntil: 'domcontentloaded',
+            timeout: 120000
         }
+    );
 
-        const maxCols = Math.max(
-            ...rows.map(row => row.length)
-        );
+    console.log('Final URL:', page.url());
 
-        const csvRows = rows.map(row => {
-            const values = [];
+    await page.screenshot({
+        path: 'debug-page.png',
+        fullPage: true
+    });
 
-            row.forEach(cell => {
-                values.push(cell.text);
+    fs.writeFileSync(
+        'debug-page.html',
+        await page.content()
+    );
 
-                if (cell.url) {
-                    values.push(cell.url);
-                }
-            });
+    const tableExists = await page.locator(
+        '#ctl00_ContentPlaceHolder1_WSExtendedGridNP1_GridView1'
+    ).count();
 
-            return values;
-        });
+    console.log('Table exists:', tableExists);
 
-        const maxCsvCols = Math.max(
-            ...csvRows.map(row => row.length)
-        );
-
-        const csv = csvRows
-            .map(row => {
-                while (row.length < maxCsvCols) {
-                    row.push('');
-                }
-
-                return row
-                    .map(value =>
-                        `"${String(value).replace(/"/g, '""')}"`
-                    )
-                    .join(',');
-            })
-            .join('\n');
-
-        fs.writeFileSync(
-            'output.csv',
-            csv,
-            'utf8'
-        );
-
-        console.log(`Rows extracted: ${rows.length}`);
-        console.log(`Max table columns: ${maxCols}`);
-        console.log('Saved: output.csv');
-
-    } catch (err) {
-        console.error('ERROR:', err);
-        process.exit(1);
-    } finally {
-        await browser.close();
-    }
+    await browser.close();
 })();
