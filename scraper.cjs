@@ -9,7 +9,7 @@ const { chromium } = require('playwright');
     const page = await browser.newPage();
 
     await page.goto(
-        'https://www.publicnoticeoregon.com/(S(favgjx24ximbftgkkdyisixq))/Search.aspx',
+        'https://www.publicnoticeoregon.com/(S(ayzufrbyvqdnk3fqqajn0b4c))/Search.aspx',
         {
             waitUntil: 'networkidle',
             timeout: 120000
