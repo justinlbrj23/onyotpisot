@@ -24,71 +24,6 @@ function normalizeCaseNumber(value = '') {
   return cleanText(value).toUpperCase();
 }
 
-/*
- * Extract the appointed personal representative from
- * a probate notice summary.
- *
- * Example:
- *
- * "Notice is hereby given that Mary Gia Wong has been
- * appointed Personal Representative..."
- *
- * Result:
- *
- * "Mary Gia Wong"
- */
-function extractPersonalRepresentative(text = '') {
-  const normalized = cleanText(text);
-
-  const patterns = [
-    /*
-     * Notice is hereby given that Mary Gia Wong has been
-     * appointed Personal Representative...
-     */
-    /Notice\s+is\s+hereby\s+given\s+that\s+(.+?)\s+has\s+been\s+appointed\s+(?:as\s+)?(?:the\s+)?personal\s+representative\b/i,
-
-    /*
-     * Notice is hereby given that Mary Gia Wong was appointed
-     * as the Personal Representative...
-     */
-    /Notice\s+is\s+hereby\s+given\s+that\s+(.+?)\s+(?:was|is)\s+appointed\s+(?:as\s+)?(?:the\s+)?personal\s+representative\b/i,
-
-    /*
-     * Mary Gia Wong has been appointed Personal
-     * Representative of the estate...
-     */
-    /(.+?)\s+has\s+been\s+appointed\s+(?:as\s+)?(?:the\s+)?personal\s+representative\s+of\s+(?:the|this)\s+estate\b/i
-  ];
-
-  for (const pattern of patterns) {
-    const match = normalized.match(pattern);
-
-    if (!match) {
-      continue;
-    }
-
-    const name = cleanText(match[1])
-      .replace(/^[,;:\-\s]+|[,;:\-\s]+$/g, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    /*
-     * Use a reasonable maximum length to avoid treating an
-     * entire preceding paragraph as a person's name when an
-     * unexpected notice format is encountered.
-     */
-    if (name && name.length <= 200) {
-      return name;
-    }
-  }
-
-  /*
-   * Return an empty value when the representative is omitted
-   * or the notice uses an unknown format.
-   */
-  return '';
-}
-
 (async () => {
   let browser;
 
@@ -461,15 +396,12 @@ async function extractNotices(page) {
   });
 
   /*
-   * Perform secondary cleanup, extract the personal
-   * representative, and deduplicate notices.
+   * Perform secondary cleanup and deduplication outside
+   * the browser context.
    */
   const unique = new Map();
 
   for (const notice of rawNotices) {
-    const cleanedText =
-      cleanText(notice.text);
-
     const cleaned = {
       publication:
         cleanText(notice.publication),
@@ -480,11 +412,8 @@ async function extractNotices(page) {
       caseNumber:
         normalizeCaseNumber(notice.caseNumber),
 
-      personalRepresentative:
-        extractPersonalRepresentative(cleanedText),
-
       text:
-        cleanedText
+        cleanText(notice.text)
     };
 
     /*
@@ -742,37 +671,6 @@ async function clickAndWaitForPageChange(
   );
 }
 
-function extractPersonalRepresentative(text = '') {
-  const normalized = cleanText(text);
-
-  const patterns = [
-    /Notice\s+is\s+hereby\s+given\s+that\s+(.+?)\s+has\s+been\s+appointed\s+(?:as\s+)?(?:the\s+)?personal\s+representative\b/i,
-
-    /Notice\s+is\s+hereby\s+given\s+that\s+(.+?)\s+(?:was|is)\s+appointed\s+(?:as\s+)?(?:the\s+)?personal\s+representative\b/i,
-
-    /(.+?)\s+has\s+been\s+appointed\s+(?:as\s+)?(?:the\s+)?personal\s+representative\s+of\s+(?:the|this)\s+estate\b/i
-  ];
-
-  for (const pattern of patterns) {
-    const match = normalized.match(pattern);
-
-    if (!match) {
-      continue;
-    }
-
-    const name = cleanText(match[1])
-      .replace(/^[,;:\-\s]+|[,;:\-\s]+$/g, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    if (name && name.length <= 200) {
-      return name;
-    }
-  }
-
-  return '';
-}
-
 function writeOutput(notices) {
   fs.writeFileSync(
     OUTPUT_JSON,
@@ -799,14 +697,6 @@ function writeOutput(notices) {
           : null,
 
         `Case number: ${notice.caseNumber}`,
-
-        notice.personalRepresentative
-          ? (
-            'Personal representative: ' +
-            notice.personalRepresentative
-          )
-          : 'Personal representative: Not extracted',
-
         notice.text
       ]
         .filter(Boolean)
