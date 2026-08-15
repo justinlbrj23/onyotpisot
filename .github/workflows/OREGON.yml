@@ -16,7 +16,7 @@ jobs:
     timeout-minutes: 30
 
     env:
-      START_URL: "https://www.publicnoticeoregon.com/Search.aspx"
+      START_URL: "https://www.publicnoticeoregon.com/(S(ayzufrbyvqdnk3fqqajn0b4c))/Search.aspx"
       SHEET_ID: "1iXOEgk_jYxeykjXafgCSc80KkAn-Jp2jl27ZS7FqGdg"
       WORKSHEET_NAME: "Probate"
 
