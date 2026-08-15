@@ -122,8 +122,8 @@ function extractPersonalRepresentative(text = '') {
     await waitForResults(page);
 
     /*
-     * Preserve the initial page HTML and screenshot for
-     * troubleshooting GitHub Actions runs.
+     * Preserve the initial page HTML and screenshot for debugging.
+     * These files are uploaded by the GitHub Actions workflow.
      */
     fs.writeFileSync(
       DEBUG_HTML,
@@ -145,8 +145,8 @@ function extractPersonalRepresentative(text = '') {
       loopGuard += 1;
 
       /*
-       * Prevent an infinite pagination loop if the website
-       * returns unexpected pagination information.
+       * Prevent an infinite pagination loop if the website returns
+       * unexpected page information.
        */
       if (loopGuard > 250) {
         throw new Error(
@@ -176,15 +176,14 @@ function extractPersonalRepresentative(text = '') {
 
       if (pageNotices.length === 0) {
         throw new Error(
-          `No notice records were extracted from ` +
-          `results page ${currentPage}.`
+          `No notice records were extracted from results page ${currentPage}.`
         );
       }
 
       for (const notice of pageNotices) {
         /*
          * Case number is used as the primary unique key.
-         * Notice text is used only if no case number exists.
+         * Notice text is used only if no case number is available.
          */
         const key =
           notice.caseNumber ||
@@ -201,8 +200,6 @@ function extractPersonalRepresentative(text = '') {
           publication: notice.publication,
           publishedDate: notice.publishedDate,
           caseNumber: notice.caseNumber,
-          personalRepresentative:
-            notice.personalRepresentative,
           text: notice.text
         });
       }
@@ -212,7 +209,7 @@ function extractPersonalRepresentative(text = '') {
       }
 
       /*
-       * This marker helps verify that the results changed
+       * This marker helps verify that the result records changed
        * after clicking the next-page control.
        */
       const previousMarker =
@@ -242,20 +239,10 @@ function extractPersonalRepresentative(text = '') {
 
     console.log('');
     console.log(
-      `Finished. Extracted ${notices.length} ` +
-      `unique notice(s).`
+      `Finished. Extracted ${notices.length} unique notice(s).`
     );
     console.log(`JSON output: ${OUTPUT_JSON}`);
     console.log(`Text output: ${OUTPUT_TEXT}`);
-
-    const representativesFound = notices.filter(
-      notice => notice.personalRepresentative
-    ).length;
-
-    console.log(
-      `Personal representatives extracted: ` +
-      `${representativesFound}`
-    );
 
     await page.screenshot({
       path: 'final-page.png',
@@ -309,15 +296,14 @@ async function getPageInfo(page) {
 
 async function extractNotices(page) {
   const rawNotices = await page.evaluate(() => {
-    const normalize = (value = '') => {
-      return String(value)
+    const normalize = (value = '') =>
+      String(value)
         .replace(/\u00a0/g, ' ')
         .replace(/\r/g, '')
         .replace(/[ \t]+/g, ' ')
         .replace(/ *\n */g, '\n')
         .replace(/\n{3,}/g, '\n\n')
         .trim();
-    };
 
     const noticePattern =
       /NOTICE TO INTERESTED PERSONS/i;
@@ -359,8 +345,8 @@ async function extractNotices(page) {
     );
 
     /*
-     * Keep the smallest individual element containing
-     * exactly one case number and one probate notice.
+     * Keep the smallest individual element containing exactly
+     * one case number and one probate-notice summary.
      */
     const leafNotices = allElements.filter(element => {
       const text =
@@ -401,9 +387,9 @@ async function extractNotices(page) {
         caseMatch?.[1]?.toUpperCase() || '';
 
       /*
-       * Publication and date may be stored in sibling
-       * elements. Walk upward until they are found, but
-       * stop before entering a container with multiple cases.
+       * The publication and date may be stored in sibling
+       * elements. Walk upward until they are found, but stop
+       * before entering a container holding multiple notices.
        */
       let recordElement = leaf;
       let parent = leaf.parentElement;
@@ -557,8 +543,8 @@ async function goToNextPage(
   }
 
   /*
-   * Find the visible "Page X of Y Pages" label and
-   * look for a nearby numeric page link.
+   * Find the visible "Page X of Y Pages" label and look
+   * for a nearby numeric page link.
    */
   const pageLabel = page
     .getByText(
@@ -598,7 +584,7 @@ async function goToNextPage(
   }
 
   /*
-   * Search for links whose visible text exactly matches
+   * Search for all links whose visible text exactly matches
    * the next page number.
    */
   const exactLinks = page.getByRole(
@@ -685,7 +671,7 @@ async function clickAndWaitForPageChange(
 ) {
   /*
    * Start waiting before clicking. The site may use either
-   * a full navigation or a partial JavaScript update.
+   * a full ASP.NET navigation or a partial JavaScript update.
    */
   const navigationPromise = page
     .waitForNavigation({
@@ -754,6 +740,37 @@ async function clickAndWaitForPageChange(
     !info ||
     info.current !== currentPage
   );
+}
+
+function extractPersonalRepresentative(text = '') {
+  const normalized = cleanText(text);
+
+  const patterns = [
+    /Notice\s+is\s+hereby\s+given\s+that\s+(.+?)\s+has\s+been\s+appointed\s+(?:as\s+)?(?:the\s+)?personal\s+representative\b/i,
+
+    /Notice\s+is\s+hereby\s+given\s+that\s+(.+?)\s+(?:was|is)\s+appointed\s+(?:as\s+)?(?:the\s+)?personal\s+representative\b/i,
+
+    /(.+?)\s+has\s+been\s+appointed\s+(?:as\s+)?(?:the\s+)?personal\s+representative\s+of\s+(?:the|this)\s+estate\b/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+
+    if (!match) {
+      continue;
+    }
+
+    const name = cleanText(match[1])
+      .replace(/^[,;:\-\s]+|[,;:\-\s]+$/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (name && name.length <= 200) {
+      return name;
+    }
+  }
+
+  return '';
 }
 
 function writeOutput(notices) {
