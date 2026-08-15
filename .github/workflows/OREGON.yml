@@ -34,12 +34,41 @@ jobs:
       - name: Run Scraper
         run: node scraper.cjs
 
-      - name: Upload Output Files
+      - name: Upload Scraper Output
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: scraper-output
           path: |
-            *.json
             *.csv
+            *.json
             *.txt
+
+      - name: Upload Debug Files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-files
+          path: |
+            page.html
+            page.png
+            debug-page.html
+            debug-page.png
+            after-search.html
+            element-ids.json
+
+      - name: List Generated Files
+        if: always()
+        run: |
+          echo "=== Generated Files ==="
+          find . -type f | sort
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -f page.html
+          rm -f page.png
+          rm -f debug-page.html
+          rm -f debug-page.png
+          rm -f after-search.html
+          rm -f element-ids.json
