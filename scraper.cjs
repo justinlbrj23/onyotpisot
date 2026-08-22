@@ -1,795 +1,386 @@
 const fs = require('fs');
-const { chromium } = require('playwright');
+const path = require('path');
+const { google } = require('googleapis');
+const pdfParse = require('pdf-parse');
 
-const START_URL = process.env.START_URL ||
-  'https://www.publicnoticeoregon.com/Search.aspx#searchResults';
-const OUTPUT_JSON = 'notices.json';
-const OUTPUT_TEXT = 'notices.txt';
-const TIMEOUT = 120000;
+const SHEET_ID =
+  process.env.SHEET_ID ||
+  '1iXOEgk_jYxeykjXafgCSc80KkAn-Jp2jl27ZS7FqGdg';
 
-const config = {
-  fastMode: process.env.FAST_MODE === 'true',
-  requestOptions: {
-    fibDelays: {
-      max: Number(process.env.FIB_MAX_DELAY_MS) || 34000,
-      scale: Number(process.env.FIB_DELAY_SCALE) || 1000,
-      minimum: Number(process.env.MIN_DELAY_MS) || 2000
-    },
-    cooldownEvery: Number(process.env.COOLDOWN_EVERY) || 10,
-    cooldownMs: Number(process.env.COOLDOWN_MS) || 30000
-  }
-};
+const WORKSHEET_NAME =
+  process.env.WORKSHEET_NAME ||
+  'Notice of LP';
+
+const SERVICE_ACCOUNT_FILE =
+  process.env.GOOGLE_APPLICATION_CREDENTIALS ||
+  'service-account.json';
+
+const START_ROW = Number(process.env.START_ROW) || 2;
+const PDF_TIMEOUT_MS = Number(process.env.PDF_TIMEOUT_MS) || 120000;
+const REQUEST_DELAY_MS = Number(process.env.REQUEST_DELAY_MS) || 1500;
+const OVERWRITE_EXISTING = process.env.OVERWRITE_EXISTING === 'true';
+const MAX_RETRIES = Number(process.env.MAX_RETRIES) || 3;
+
+const OUTPUT_JSON = 'pdf-extraction-results.json';
+const FAILURE_JSON = 'pdf-extraction-failures.json';
 
 function cleanText(value = '') {
   return String(value)
     .replace(/\u00a0/g, ' ')
-    .replace(/\r/g, '')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/\r/g, '\n')
     .replace(/[ \t]+/g, ' ')
     .replace(/ *\n */g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
 
-function normalizeIdentifier(value = '') {
+function flattenText(value = '') {
   return cleanText(value)
-    .replace(/^[#:\-\s]+|[#:\-\s]+$/g, '')
-    .toUpperCase();
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-function extractNoticeIdentifier(text = '') {
-  const patterns = [
-    /\bCase\s+(?:No\.?|Number)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]*)/i,
-    /\bT\.?S\.?\s*(?:No\.?|Number)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]*)/i,
-    /\bTrustee(?:'s)?\s+Sale\s+(?:No\.?|Number)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]*)/i,
-    /\bSale\s+(?:No\.?|Number)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]*)/i,
-    /\bFile\s+(?:No\.?|Number)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]*)/i,
-    /\bLoan\s+(?:No\.?|Number)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]*)/i
+function normalizeUrl(value = '') {
+  const url = String(value).trim();
+
+  if (!url) {
+    return '';
+  }
+
+  if (!/^https?:\/\//i.test(url)) {
+    throw new Error(`Column D value is not an HTTP(S) URL: ${url}`);
+  }
+
+  return url;
+}
+
+function extractCaseOrInstrumentNumber(text = '') {
+  const normalized = flattenText(text);
+
+  /*
+   * Collect every Instrument No./Number match and use the final match.
+   * Trustee notices often mention the original recording first and the
+   * assignment instrument later. The supplied example targets the later
+   * value: 2026-002285.
+   */
+  const instrumentPatterns = [
+    /\bInstrument\s+No\.?\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]*)/gi,
+    /\bInstrument\s+Number\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]*)/gi
   ];
 
-  const normalized = cleanText(text);
-  for (const pattern of patterns) {
-    const match = normalized.match(pattern);
-    if (match?.[1]) return normalizeIdentifier(match[1]);
+  const matches = [];
+
+  for (const pattern of instrumentPatterns) {
+    for (const match of normalized.matchAll(pattern)) {
+      if (match[1]) {
+        matches.push({
+          value: match[1],
+          index: match.index ?? -1
+        });
+      }
+    }
   }
+
+  if (matches.length > 0) {
+    matches.sort((left, right) => left.index - right.index);
+    return matches.at(-1).value
+      .replace(/[.,;:]+$/g, '')
+      .toUpperCase();
+  }
+
+  /* Fallbacks when a notice uses case or T.S. numbering instead. */
+  const fallbackPatterns = [
+    /\bCase\s+(?:No\.?|Number)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]*)/i,
+    /\bT\.?S\.?\s*(?:No\.?|Number)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]*)/i,
+    /\bTS\s+No\.?\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]*)/i
+  ];
+
+  for (const pattern of fallbackPatterns) {
+    const match = normalized.match(pattern);
+    if (match?.[1]) {
+      return match[1].replace(/[.,;:]+$/g, '').toUpperCase();
+    }
+  }
+
   return '';
 }
 
-function extractTrustor(text = '') {
+function extractDefendant(text = '') {
+  const normalized = flattenText(text);
+
+  /*
+   * Capture any variable-length content located between "made by," and
+   * "as Grantor". New lines and inconsistent spacing are already flattened.
+   */
   const patterns = [
-    /\b(?:original\s+)?trustor(?:s)?\s*[:,]\s*(.+?)(?=\s*,?\s*(?:whose|who|as|beneficiary|trustee|recorded|the))/i,
-    /\bTrustor(?:s)?\s*[:,]\s*([^.;]+)/i,
-    /\bdeed\s+made\s+by\s+(.+?)\s+as\s+grantor\b/i
+    /\bmade\s+by\s*,\s*(.+?)\s+as\s+Grantor\b/i,
+    /\bmade\s+by\s+(.+?)\s+as\s+Grantor\b/i
   ];
 
-  const normalized = cleanText(text);
   for (const pattern of patterns) {
     const match = normalized.match(pattern);
     if (match?.[1]) {
-      return cleanText(match[1])
-        .replace(/^[,;:\-\s]+|[,;:\-\s]+$/g, '');
+      return match[1]
+        .replace(/^[,;:\-\s]+|[,;:\-\s]+$/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
     }
   }
+
   return '';
 }
 
-function fallbackIdentifier(notice) {
-  const source = [notice.publication, notice.publishedDate, notice.text].join('|');
-  let hash = 2166136261;
-  for (let index = 0; index < source.length; index += 1) {
-    hash ^= source.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return `NOTICE-${(hash >>> 0).toString(16).toUpperCase().padStart(8, '0')}`;
-}
+function extractSubjectProperty(text = '') {
+  const normalized = flattenText(text);
 
-/* Courtesy pacing. No exact delay repeats during one browser session. */
-let fibDelayPool = null;
-const usedFibDelays = new Set();
-let requestCounter = 0;
-let fibPoolGeneration = 0;
-let previousDelay = null;
-
-function shuffleArray(values) {
-  for (let index = values.length - 1; index > 0; index -= 1) {
-    const randomIndex = Math.floor(Math.random() * (index + 1));
-    [values[index], values[randomIndex]] = [values[randomIndex], values[index]];
-  }
-  return values;
-}
-
-function generateFibonacci(maximum, scale = 1000, minimum = 0) {
-  const fibonacci = [1, 2];
-  while (true) {
-    const next = fibonacci.at(-1) + fibonacci.at(-2);
-    if (next * scale > maximum) break;
-    fibonacci.push(next);
-  }
-  return [...new Set(
-    fibonacci
-      .map(number => number * scale)
-      .filter(delay => delay >= minimum && delay <= maximum)
-  )];
-}
-
-function initFibDelayPool() {
-  const settings = config.requestOptions.fibDelays;
-  const effectiveMaximum = config.fastMode
-    ? Math.max(settings.minimum, Math.floor(settings.max * 0.1))
-    : settings.max;
-  const expansion = fibPoolGeneration * Math.max(settings.scale * 2, 1000);
-  const generationMaximum = effectiveMaximum + expansion;
-  const generationOffset = fibPoolGeneration * 101;
-
-  fibDelayPool = generateFibonacci(
-    generationMaximum,
-    settings.scale,
-    settings.minimum
-  )
-    .map(delay => delay + generationOffset)
-    .filter(delay => !usedFibDelays.has(delay));
-
-  if (fibDelayPool.length === 0) {
-    const base = Math.max(generationMaximum, settings.minimum);
-    fibDelayPool = Array.from(
-      { length: 20 },
-      (_, index) => base + generationOffset + index + 1
-    ).filter(delay => !usedFibDelays.has(delay));
-  }
-
-  shuffleArray(fibDelayPool);
-  console.log(
-    `Fibonacci pool initialized: generation=${fibPoolGeneration}, ` +
-    `max=${generationMaximum}ms, scale=${settings.scale}, ` +
-    `fastMode=${config.fastMode}, available=${fibDelayPool.length}`
-  );
-  fibPoolGeneration += 1;
-}
-
-function getUniqueFibDelay() {
-  while (!fibDelayPool || fibDelayPool.length === 0) initFibDelayPool();
-
-  while (fibDelayPool.length > 0) {
-    const delay = fibDelayPool.pop();
-    if (!usedFibDelays.has(delay) && delay !== previousDelay) {
-      usedFibDelays.add(delay);
-      previousDelay = delay;
-      return delay;
-    }
-  }
-
-  initFibDelayPool();
-  return getUniqueFibDelay();
-}
-
-function getUniqueCooldownDelay() {
-  let delay = config.requestOptions.cooldownMs + requestCounter;
-  while (usedFibDelays.has(delay) || delay === previousDelay) delay += 1;
-  usedFibDelays.add(delay);
-  previousDelay = delay;
-  return delay;
-}
-
-function getDelay() {
-  requestCounter += 1;
-  if (
-    config.requestOptions.cooldownEvery > 0 &&
-    requestCounter % config.requestOptions.cooldownEvery === 0
-  ) {
-    const delay = getUniqueCooldownDelay();
-    console.log(`Cooldown triggered: ${delay}ms`);
-    return delay;
-  }
-
-  const delay = getUniqueFibDelay();
-  console.log(`Fibonacci delay selected: ${delay}ms`);
-  return delay;
-}
-
-async function courtesyWait(page, reason) {
-  const delay = getDelay();
-  console.log(
-    `[pacing request ${requestCounter}] Waiting ` +
-    `${(delay / 1000).toFixed(3)}s before ${reason}.`
-  );
-  await page.waitForTimeout(delay);
-}
-
-function increaseCourtesyDelay() {
-  fibDelayPool = null;
-  fibPoolGeneration += 1;
-}
-
-function getViewButtons(page) {
-  return page.locator([
-    '[id^="ctl00_ContentPlaceHolder1_WSExtendedGridNP1_GridView1_ctl"][id$="_btnView2"]',
-    '#ctl00_ContentPlaceHolder1_WSExtendedGridNP1_GridView1 [id$="_btnView2"]',
-    '[id$="_btnView2"]'
-  ].join(', '));
-}
-
-async function saveDebug(page, baseName) {
-  fs.writeFileSync(`${baseName}.html`, await page.content(), 'utf8');
-  await page.screenshot({ path: `${baseName}.png`, fullPage: true });
-}
-
-async function detectAccessChallenge(page) {
-  return page.evaluate(() => {
-    const bodyText = document.body?.innerText || '';
-    const title = document.title || '';
-    const combinedText = `${title}\n${bodyText}`;
-    const challengePatterns = [
-      /\bcaptcha\b/i,
-      /verify you are human/i,
-      /human verification/i,
-      /security check/i,
-      /unusual traffic/i,
-      /automated requests/i,
-      /temporarily blocked/i,
-      /too many requests/i,
-      /rate limit exceeded/i,
-      /access denied/i
-    ];
-
-    const matchedTextPattern = challengePatterns.find(pattern =>
-      pattern.test(combinedText)
-    );
-
-    const isVisible = element => {
-      if (!element) return false;
-      const style = window.getComputedStyle(element);
-      const rectangle = element.getBoundingClientRect();
-      return (
-        style.display !== 'none' &&
-        style.visibility !== 'hidden' &&
-        Number(style.opacity) !== 0 &&
-        rectangle.width > 0 &&
-        rectangle.height > 0
-      );
-    };
-
-    const captchaSelectors = [
-      'iframe[src*="captcha" i]',
-      'iframe[title*="captcha" i]',
-      '[class*="captcha" i]',
-      '[id*="captcha" i]',
-      '[data-sitekey]'
-    ];
-
-    const visibleCaptchaElement = captchaSelectors
-      .flatMap(selector => Array.from(document.querySelectorAll(selector)))
-      .find(isVisible);
-
-    const hasNoticeDetail =
-      /Public Notice Detail/i.test(bodyText) ||
-      /(?:TRUSTEE(?:'S)?\s+)?NOTICE OF SALE/i.test(bodyText);
-    const hasSearchResults =
-      document.querySelectorAll('[id$="_btnView2"]').length > 0;
-    const hasVisibleChallenge = Boolean(
-      matchedTextPattern || visibleCaptchaElement
-    );
-
-    return {
-      detected: hasVisibleChallenge && !hasNoticeDetail && !hasSearchResults,
-      indicator:
-        matchedTextPattern?.source ||
-        (visibleCaptchaElement
-          ? visibleCaptchaElement.id ||
-            visibleCaptchaElement.className ||
-            visibleCaptchaElement.tagName
-          : ''),
-      matchedVisibleText: Boolean(matchedTextPattern),
-      visibleCaptchaElement: Boolean(visibleCaptchaElement),
-      hasNoticeDetail,
-      hasSearchResults,
-      title,
-      url: window.location.href
-    };
-  });
-}
-
-async function stopIfAccessChallenge(page, location) {
-  const challenge = await detectAccessChallenge(page);
-
-  if (!challenge.detected) {
-    if (challenge.visibleCaptchaElement || challenge.matchedVisibleText) {
-      console.log(
-        '[challenge-check] Challenge-related markup found, but expected ' +
-        'notice/results content is present. Continuing.'
-      );
-    }
-    return;
-  }
-
-  const safeLocation = String(location || 'unknown')
-    .replace(/[^a-z0-9_-]+/gi, '-')
-    .replace(/^-+|-+$/g, '')
-    .toLowerCase();
-
-  await saveDebug(page, `challenge-${safeLocation}`);
-  fs.writeFileSync(
-    `challenge-${safeLocation}.json`,
-    JSON.stringify(challenge, null, 2),
-    'utf8'
+  /*
+   * Capture text after "Commonly known as:" and stop at a five-digit ZIP.
+   * An optional ZIP+4 suffix is retained when present.
+   */
+  const match = normalized.match(
+    /\bCommonly\s+known\s+as\s*:\s*(.+?\b\d{5}(?:-\d{4})?)(?=\s|$)/i
   );
 
-  throw new Error(
-    `Visible access challenge detected during ${location}. ` +
-    `Indicator: ${challenge.indicator || 'unknown'}. ` +
-    'The scraper stopped without attempting to bypass it.'
-  );
-}
-
-async function getPageInfo(page) {
-  const text = await page.locator('body').innerText();
-  const match = text.match(/Page\s+(\d+)\s+of\s+(\d+)\s+Pages?/i);
-  return match ? { current: Number(match[1]), total: Number(match[2]) } : null;
-}
-
-async function waitForResults(page, expectedPage = null) {
-  try {
-    await page.waitForFunction(
-      expected => {
-        const text = document.body?.innerText || '';
-        const match = text.match(/Page\s+(\d+)\s+of\s+(\d+)\s+Pages?/i);
-        const hasViews = document.querySelectorAll('[id$="_btnView2"]').length > 0;
-        return hasViews && (
-          expected === null ||
-          (match && Number(match[1]) === expected)
-        );
-      },
-      expectedPage,
-      { timeout: TIMEOUT }
-    );
-  } catch (error) {
-    const label = expectedPage === null ? 'unknown' : expectedPage;
-    await saveDebug(page, `wait-timeout-page-${label}`);
-    console.error('waitForResults URL:', page.url());
-    console.error('VIEW controls:', await getViewButtons(page).count());
-    throw error;
+  if (!match?.[1]) {
+    return '';
   }
 
-  await page.waitForTimeout(500);
+  return match[1]
+    .replace(/^[,;:\-\s]+|[,;:\-\s]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-async function extractSummaryAroundViewButton(button) {
-  return button.evaluate(element => {
-    const normalize = value => String(value || '')
-      .replace(/\u00a0/g, ' ')
-      .replace(/\r/g, '')
-      .replace(/[ \t]+/g, ' ')
-      .replace(/ *\n */g, '\n')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
-
-    const datePattern = /\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b/i;
-    const row = element.closest('tr');
-    const parts = [];
-
-    if (row) {
-      parts.push(normalize(row.innerText));
-      let sibling = row.nextElementSibling;
-      for (let index = 0; sibling && index < 2; index += 1) {
-        parts.push(normalize(sibling.innerText));
-        if (/click\s+['"]?view['"]?\s+to\s+open/i.test(parts.at(-1))) break;
-        sibling = sibling.nextElementSibling;
-      }
-    }
-
-    const text = normalize(parts.join('\n'));
-    const dateMatch = text.match(datePattern);
-    let publication = '';
-
-    if (dateMatch) {
-      publication = text.slice(0, dateMatch.index)
-        .split('\n')
-        .map(line => line.trim())
-        .filter(Boolean)
-        .filter(line => !/^view$/i.test(line))
-        .at(-1) || '';
-    }
-
-    return {
-      publication,
-      publishedDate: dateMatch?.[0] || '',
-      text
-    };
-  });
-}
-
-async function waitForDetail(page, oldUrl, oldText) {
-  await page.waitForFunction(
-    ({ previousUrl, previousText }) => {
-      const text = document.body?.innerText || '';
-      const changed = text.trim() !== previousText.trim();
-      return changed && (
-        window.location.href !== previousUrl ||
-        /Public Notice Detail|(?:TRUSTEE(?:'S)?\s+)?NOTICE OF SALE/i.test(text)
-      );
-    },
-    { previousUrl: oldUrl, previousText: oldText },
-    { timeout: TIMEOUT }
-  );
-  await page.waitForTimeout(500);
-}
-
-async function extractFullNotice(page) {
-  const result = await page.evaluate(() => {
-    const normalize = value => String(value || '')
-      .replace(/\u00a0/g, ' ')
-      .replace(/\r/g, '')
-      .replace(/[ \t]+/g, ' ')
-      .replace(/ *\n */g, '\n')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
-
-    const salePattern = /(?:TRUSTEE(?:'S)?\s+)?NOTICE OF SALE/i;
-    const datePattern = /\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b/i;
-    const selectors = [
-      '[id*="NoticeText"]', '[id*="FullText"]', '[id*="NoticeDetail"]',
-      '[class*="notice-text"]', '[class*="notice-detail"]',
-      'article', 'main', 'section', 'td', 'div'
-    ].join(', ');
-
-    const candidates = Array.from(document.querySelectorAll(selectors))
-      .map(element => normalize(element.innerText))
-      .filter(text => salePattern.test(text) && text.length >= 100)
-      .sort((left, right) => right.length - left.length);
-
-    let text = candidates[0] || normalize(document.body?.innerText || '');
-    const start = text.search(salePattern);
-    if (start >= 0) text = text.slice(start);
-    text = text
-      .replace(/\.{3}\s*click\s+['"]?view['"]?\s+to\s+open\s+the\s+full\s+text\.?/gi, '')
-      .trim();
-
-    const body = normalize(document.body?.innerText || '');
-    const dateMatch = body.match(datePattern);
-    let publication = '';
-
-    if (dateMatch) {
-      publication = body.slice(0, dateMatch.index)
-        .split('\n')
-        .map(line => line.trim())
-        .filter(Boolean)
-        .filter(line => !/^(view|back|previous|next|search results)$/i.test(line))
-        .at(-1) || '';
-    }
-
-    return {
-      publication,
-      publishedDate: dateMatch?.[0] || '',
-      text: normalize(text)
-    };
-  });
-
+function extractTargets(text = '') {
   return {
-    publication: cleanText(result.publication),
-    publishedDate: cleanText(result.publishedDate),
-    text: cleanText(result.text)
+    caseOrInstrumentNumber: extractCaseOrInstrumentNumber(text),
+    defendant: extractDefendant(text),
+    subjectProperty: extractSubjectProperty(text)
   };
 }
 
-async function isExpectedResultsPage(page, expectedPage) {
-  const info = await getPageInfo(page);
-  return Boolean(
-    info &&
-    info.current === expectedPage &&
-    await getViewButtons(page).count() > 0
-  );
+function escapeSheetName(name) {
+  return `'${String(name).replace(/'/g, "''")}'`;
 }
 
-async function returnToResultsPage(page, resultsUrl, expectedPage) {
-  await courtesyWait(page, `returning to results page ${expectedPage}`);
-
-  const historyResult = await page.goBack({
-    waitUntil: 'domcontentloaded',
-    timeout: 30000
-  }).catch(() => null);
-
-  if (historyResult) {
-    await stopIfAccessChallenge(page, `return-to-results-page-${expectedPage}`);
-    await page.waitForTimeout(500);
-    if (await isExpectedResultsPage(page, expectedPage)) return true;
-  }
-
-  await courtesyWait(page, `reloading results page ${expectedPage}`);
-  await page.goto(resultsUrl, {
-    waitUntil: 'domcontentloaded',
-    timeout: TIMEOUT
-  });
-  await stopIfAccessChallenge(page, `reload-results-page-${expectedPage}`);
-  await page.waitForTimeout(500);
-  return isExpectedResultsPage(page, expectedPage);
+function sleep(milliseconds) {
+  return new Promise(resolve => setTimeout(resolve, milliseconds));
 }
 
-async function extractAllFullNoticesFromCurrentPage(
-  page,
-  currentPage,
-  allNotices,
-  seen
-) {
-  const pageNotices = [];
-  const resultsUrl = page.url();
-  let buttons = getViewButtons(page);
-  const count = await buttons.count();
-
-  console.log(`Results page ${currentPage}: found ${count} VIEW button(s).`);
-
-  for (let index = 0; index < count; index += 1) {
-    await waitForResults(page, currentPage);
-    buttons = getViewButtons(page);
-
-    if (index >= await buttons.count()) {
-      throw new Error(`VIEW ${index + 1} disappeared on page ${currentPage}.`);
-    }
-
-    console.log(`Opening VIEW ${index + 1} of ${count} on page ${currentPage}...`);
-
-    const button = buttons.nth(index);
-    const summary = await extractSummaryAroundViewButton(button);
-    const oldUrl = page.url();
-    const oldText = cleanText(await page.locator('body').innerText());
-    const navigation = page.waitForNavigation({
-      waitUntil: 'domcontentloaded',
-      timeout: 30000
-    }).catch(() => null);
-
-    await courtesyWait(page, `opening VIEW ${index + 1} on results page ${currentPage}`);
-    await button.scrollIntoViewIfNeeded();
-    await button.click();
-    await navigation;
-    await stopIfAccessChallenge(page, `page-${currentPage}-view-${index + 1}`);
-    await waitForDetail(page, oldUrl, oldText);
-
-    fs.writeFileSync(
-      `detail-page-${currentPage}-${index + 1}.html`,
-      await page.content(),
-      'utf8'
-    );
-
-    const detail = await extractFullNotice(page);
-    const text = detail.text || summary.text;
-    let caseNumber =
-      extractNoticeIdentifier(text) ||
-      extractNoticeIdentifier(summary.text);
-
-    const notice = {
-      page: currentPage,
-      publication: cleanText(detail.publication || summary.publication),
-      publishedDate: cleanText(detail.publishedDate || summary.publishedDate),
-      caseNumber,
-      noticeId: caseNumber,
-      trustor: cleanText(extractTrustor(text)),
-      text: cleanText(text),
-      detailUrl: page.url()
-    };
-
-    if (!notice.caseNumber) notice.caseNumber = fallbackIdentifier(notice);
-    notice.noticeId = notice.caseNumber;
-    pageNotices.push(notice);
-
-    const checkpointKey =
-      notice.caseNumber || notice.noticeId || notice.detailUrl || notice.text;
-
-    if (!seen.has(checkpointKey)) {
-      seen.add(checkpointKey);
-      allNotices.push(notice);
-    }
-
-    writeOutput(allNotices);
-    console.log(
-      `Extracted ${notice.caseNumber} (${notice.text.length} characters). ` +
-      `Notice checkpoint saved: ${allNotices.length} unique notice(s).`
-    );
-
-    if (!await returnToResultsPage(page, resultsUrl, currentPage)) {
-      await saveDebug(page, `return-failed-page-${currentPage}-view-${index + 1}`);
-      throw new Error(`Could not return to results page ${currentPage}.`);
-    }
-  }
-
-  return pageNotices;
-}
-
-async function clickAndWaitForPageChange(page, locator, currentPage, expectedPage) {
-  const previousUrl = page.url();
-  const navigation = page.waitForNavigation({
-    waitUntil: 'domcontentloaded',
-    timeout: 30000
-  }).catch(() => null);
-
-  console.log(`Navigating from page ${currentPage} to ${expectedPage}...`);
-  await courtesyWait(
-    page,
-    `navigating from results page ${currentPage} to ${expectedPage}`
-  );
-
-  await locator.scrollIntoViewIfNeeded();
-  await locator.click();
-  await navigation;
-  await stopIfAccessChallenge(page, `pagination-${currentPage}-to-${expectedPage}`);
+async function fetchPdf(url, attempt = 1) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), PDF_TIMEOUT_MS);
 
   try {
-    await waitForResults(page, expectedPage);
+    const response = await fetch(url, {
+      redirect: 'follow',
+      signal: controller.signal,
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 ' +
+          '(KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+        Accept: 'application/pdf,application/octet-stream;q=0.9,*/*;q=0.8'
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(
+        `PDF request failed with HTTP ${response.status} ${response.statusText}`
+      );
+    }
+
+    const contentType = response.headers.get('content-type') || '';
+    const buffer = Buffer.from(await response.arrayBuffer());
+
+    if (buffer.length < 5 || buffer.subarray(0, 5).toString() !== '%PDF-') {
+      throw new Error(
+        `URL did not return a valid PDF. Content-Type: ${contentType || 'unknown'}`
+      );
+    }
+
+    return buffer;
   } catch (error) {
-    increaseCourtesyDelay();
-    await saveDebug(page, `pagination-timeout-${currentPage}-to-${expectedPage}`);
-    console.error(`Previous URL: ${previousUrl}`);
-    console.error(`Current URL: ${page.url()}`);
-    throw error;
+    if (attempt >= MAX_RETRIES) {
+      throw error;
+    }
+
+    const retryDelay = Math.min(2000 * (2 ** (attempt - 1)), 15000);
+    console.warn(
+      `Attempt ${attempt} failed for ${url}: ${error.message}. ` +
+      `Retrying in ${retryDelay}ms...`
+    );
+
+    await sleep(retryDelay);
+    return fetchPdf(url, attempt + 1);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function parsePdf(buffer) {
+  const result = await pdfParse(buffer, {
+    pagerender: undefined,
+    max: 0,
+    version: 'default'
+  });
+
+  const text = cleanText(result.text || '');
+
+  if (!text) {
+    throw new Error(
+      'No embedded text was found in the PDF. The file may require OCR.'
+    );
   }
 
-  const info = await getPageInfo(page);
-  const viewCount = await getViewButtons(page).count();
-  if (!info || info.current !== expectedPage || viewCount === 0) return false;
+  return {
+    text,
+    pageCount: result.numpages || 0,
+    metadata: result.info || {}
+  };
+}
+
+async function createSheetsClient() {
+  if (!fs.existsSync(SERVICE_ACCOUNT_FILE)) {
+    throw new Error(`Service account file not found: ${SERVICE_ACCOUNT_FILE}`);
+  }
+
+  const auth = new google.auth.GoogleAuth({
+    keyFile: SERVICE_ACCOUNT_FILE,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets']
+  });
+
+  return google.sheets({
+    version: 'v4',
+    auth
+  });
+}
+
+async function readSheetRows(sheets) {
+  const sheet = escapeSheetName(WORKSHEET_NAME);
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: `${sheet}!D${START_ROW}:G`
+  });
+
+  return response.data.values || [];
+}
+
+async function writeExtractedTargets(sheets, rowNumber, targets) {
+  const sheet = escapeSheetName(WORKSHEET_NAME);
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SHEET_ID,
+    range: `${sheet}!E${rowNumber}:G${rowNumber}`,
+    valueInputOption: 'RAW',
+    requestBody: {
+      values: [[
+        targets.caseOrInstrumentNumber,
+        targets.defendant,
+        targets.subjectProperty
+      ]]
+    }
+  });
+}
+
+async function processRows() {
+  const sheets = await createSheetsClient();
+  const rows = await readSheetRows(sheets);
+  const results = [];
+  const failures = [];
 
   console.log(
-    `Pagination confirmed: page ${info.current} of ${info.total}; ` +
-    `${viewCount} VIEW button(s).`
+    `Loaded ${rows.length} row(s) from ` +
+    `${WORKSHEET_NAME}!D${START_ROW}:G.`
   );
-  return true;
-}
 
-async function goToNextPage(page, currentPage, nextPageNumber) {
-  const candidates = page.locator([
-    `a[href*="Page%24${nextPageNumber}"]`,
-    `a[href*="Page$${nextPageNumber}"]`,
-    `a[onclick*="Page$${nextPageNumber}"]`,
-    `input[onclick*="Page$${nextPageNumber}"]`
-  ].join(', '));
+  for (let index = 0; index < rows.length; index += 1) {
+    const rowNumber = START_ROW + index;
+    const row = rows[index] || [];
+    const urlValue = row[0] || '';
+    const existingE = row[1] || '';
+    const existingF = row[2] || '';
+    const existingG = row[3] || '';
 
-  for (let index = 0; index < await candidates.count(); index += 1) {
-    const candidate = candidates.nth(index);
-    if (!await candidate.isVisible()) continue;
-    return clickAndWaitForPageChange(page, candidate, currentPage, nextPageNumber);
-  }
+    if (!String(urlValue).trim()) {
+      console.log(`Row ${rowNumber}: column D is blank; skipping.`);
+      continue;
+    }
 
-  const exactLinks = page.getByRole('link', {
-    name: String(nextPageNumber),
-    exact: true
-  });
+    if (
+      !OVERWRITE_EXISTING &&
+      String(existingE).trim() &&
+      String(existingF).trim() &&
+      String(existingG).trim()
+    ) {
+      console.log(`Row ${rowNumber}: E:G already populated; skipping.`);
+      continue;
+    }
 
-  for (let index = 0; index < await exactLinks.count(); index += 1) {
-    const link = exactLinks.nth(index);
-    if (!await link.isVisible()) continue;
+    try {
+      const url = normalizeUrl(urlValue);
+      console.log(`Row ${rowNumber}: fetching PDF ${url}`);
 
-    const evidence = await link.evaluate(element => [
-      element.getAttribute('href') || '',
-      element.getAttribute('onclick') || '',
-      element.id || '',
-      element.parentElement?.innerText || ''
-    ].join(' '));
+      const buffer = await fetchPdf(url);
+      const parsed = await parsePdf(buffer);
+      const targets = extractTargets(parsed.text);
 
-    if (/Page\$|page|pager|__doPostBack/i.test(evidence)) {
-      return clickAndWaitForPageChange(page, link, currentPage, nextPageNumber);
+      await writeExtractedTargets(sheets, rowNumber, targets);
+
+      const missing = Object.entries(targets)
+        .filter(([, value]) => !value)
+        .map(([key]) => key);
+
+      const record = {
+        row: rowNumber,
+        url,
+        pageCount: parsed.pageCount,
+        ...targets,
+        missingTargets: missing
+      };
+
+      results.push(record);
+
+      console.log(
+        `Row ${rowNumber}: wrote E:G -> ` +
+        `${targets.caseOrInstrumentNumber || '[blank]'} | ` +
+        `${targets.defendant || '[blank]'} | ` +
+        `${targets.subjectProperty || '[blank]'}`
+      );
+
+      fs.writeFileSync(OUTPUT_JSON, JSON.stringify(results, null, 2), 'utf8');
+    } catch (error) {
+      const failure = {
+        row: rowNumber,
+        url: String(urlValue).trim(),
+        error: error.message
+      };
+
+      failures.push(failure);
+      fs.writeFileSync(FAILURE_JSON, JSON.stringify(failures, null, 2), 'utf8');
+      console.error(`Row ${rowNumber} failed: ${error.message}`);
+    }
+
+    if (REQUEST_DELAY_MS > 0 && index < rows.length - 1) {
+      await sleep(REQUEST_DELAY_MS);
     }
   }
 
-  const nextControls = page
-    .getByRole('link', { name: /^(next|>|›|»|next page)$/i })
-    .or(page.getByRole('button', { name: /^(next|>|›|»|next page)$/i }));
+  fs.writeFileSync(OUTPUT_JSON, JSON.stringify(results, null, 2), 'utf8');
+  fs.writeFileSync(FAILURE_JSON, JSON.stringify(failures, null, 2), 'utf8');
 
-  for (let index = 0; index < await nextControls.count(); index += 1) {
-    const control = nextControls.nth(index);
-    if (!await control.isVisible()) continue;
-    return clickAndWaitForPageChange(page, control, currentPage, nextPageNumber);
+  console.log('====================================');
+  console.log(`Successful rows: ${results.length}`);
+  console.log(`Failed rows: ${failures.length}`);
+  console.log('====================================');
+
+  if (failures.length > 0) {
+    process.exitCode = 1;
   }
-
-  return false;
 }
 
-function writeOutput(notices) {
-  fs.writeFileSync(OUTPUT_JSON, JSON.stringify(notices, null, 2), 'utf8');
-
-  const output = notices.map((notice, index) => [
-    `NOTICE ${index + 1}`,
-    `Page: ${notice.page}`,
-    notice.publication ? `Publication: ${notice.publication}` : null,
-    notice.publishedDate ? `Published: ${notice.publishedDate}` : null,
-    `Notice ID: ${notice.noticeId}`,
-    notice.trustor ? `Trustor: ${notice.trustor}` : null,
-    notice.detailUrl ? `Detail URL: ${notice.detailUrl}` : null,
-    notice.text
-  ].filter(Boolean).join('\n')).join('\n\n----------------------------------------\n\n');
-
-  fs.writeFileSync(OUTPUT_TEXT, output, 'utf8');
-}
-
-(async () => {
-  let browser;
-
-  try {
-    browser = await chromium.launch({
-      headless: true,
-      args: [
-        '--incognito',
-        '--disable-dev-shm-usage',
-        '--no-first-run',
-        '--no-default-browser-check'
-      ]
-    });
-
-    const context = await browser.newContext({
-      viewport: { width: 1440, height: 1000 },
-      userAgent:
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 ' +
-        '(KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
-      storageState: { cookies: [], origins: [] }
-    });
-
-    const page = await context.newPage();
-    page.setDefaultTimeout(TIMEOUT);
-    page.setDefaultNavigationTimeout(TIMEOUT);
-
-    console.log('Browser launched with a fresh incognito-style context.');
-    console.log(`Opening: ${START_URL}`);
-
-    await courtesyWait(page, 'opening the initial search page');
-    await page.goto(START_URL, {
-      waitUntil: 'domcontentloaded',
-      timeout: TIMEOUT
-    });
-    await stopIfAccessChallenge(page, 'initial-navigation');
-    await waitForResults(page);
-
-    fs.writeFileSync('page.html', await page.content(), 'utf8');
-    await page.screenshot({ path: 'page.png', fullPage: true });
-
-    const notices = [];
-    const seen = new Set();
-    let loopGuard = 0;
-
-    while (true) {
-      loopGuard += 1;
-      if (loopGuard > 250) throw new Error('Pagination safety limit reached.');
-
-      await waitForResults(page);
-      const info = await getPageInfo(page);
-      if (!info) throw new Error('Results page label was not found.');
-
-      const currentPage = info.current;
-      const totalPages = info.total;
-      console.log(`Processing results page ${currentPage} of ${totalPages}...`);
-
-      const pageNotices = await extractAllFullNoticesFromCurrentPage(
-        page,
-        currentPage,
-        notices,
-        seen
-      );
-
-      console.log(
-        `Extracted ${pageNotices.length} full notice(s) from page ${currentPage}.`
-      );
-
-      if (pageNotices.length === 0) {
-        await saveDebug(page, `failed-page-${currentPage}`);
-        throw new Error(`No notices extracted from page ${currentPage}.`);
-      }
-
-      writeOutput(notices);
-      console.log(
-        `Page checkpoint saved after page ${currentPage}: ` +
-        `${notices.length} unique notice(s).`
-      );
-
-      if (currentPage >= totalPages) break;
-
-      if (!await goToNextPage(page, currentPage, currentPage + 1)) {
-        await saveDebug(page, `pagination-failed-${currentPage}`);
-        throw new Error(
-          `Could not move from page ${currentPage} to ${currentPage + 1}.`
-        );
-      }
-    }
-
-    writeOutput(notices);
-    await page.screenshot({ path: 'final-page.png', fullPage: true });
-    console.log(`Finished. Extracted ${notices.length} unique full notice(s).`);
-  } finally {
-    if (browser) await browser.close();
-  }
-})().catch(error => {
-  console.error('Scraper failed:', error);
+processRows().catch(error => {
+  console.error('PDF sheet processor failed:', error);
   process.exitCode = 1;
 });
