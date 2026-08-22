@@ -260,15 +260,11 @@ function getViewButtons(page) {
    */
   return page.locator([
     '#ctl00_ContentPlaceHolder1_WSExtendedGridNP1_GridView1_ctl03_btnView2',
-
-    '[id^="ctl00_ContentPlaceHolder1_WSExtendedGridNP1_GridView1_ctl"]' +
-    '[id$="_btnView2"]',
-
-    '#ctl00_ContentPlaceHolder1_WSExtendedGridNP1_GridView1 ' +
-    '[id$="_btnView2"]',
-
+    '[id^="ctl00_ContentPlaceHolder1_WSExtendedGridNP1_GridView1_ctl"][id$="_btnView2"]',
+    '#ctl00_ContentPlaceHolder1_WSExtendedGridNP1_GridView1 [id$="_btnView2"]',
     '[id$="_btnView2"]'
-  ].
+  ].join(', '));
+}
 
 async function logViewControlDiagnostics(page) {
   const diagnostics = await page.locator(
