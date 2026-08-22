@@ -250,33 +250,25 @@ async function getPageInfo(page) {
 
 function getViewButtons(page) {
   /*
-   * The site is an older ASP.NET application. Depending on the session
-   * and browser, VIEW can be rendered as an input, image input, button,
-   * link, or a clickable element with a nested VIEW label.
+   * PublicNoticeOregon renders each VIEW control with an ASP.NET GridView ID.
+   * Example:
    *
-   * XPath is used here because it can compare input values, alt text,
-   * title text, aria labels, and visible text case-insensitively.
+   * ctl00_ContentPlaceHolder1_WSExtendedGridNP1_GridView1_ctl03_btnView2
+   *
+   * The ctl03 portion changes for every result row, so match the stable
+   * GridView prefix and the stable _btnView2 suffix instead of one exact ID.
    */
-  const upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-  const lower = 'abcdefghijklmnopqrstuvwxyz';
+  return page.locator([
+    '#ctl00_ContentPlaceHolder1_WSExtendedGridNP1_GridView1_ctl03_btnView2',
 
-  const viewExpression =
-    `translate(normalize-space(.), '${lower}', '${upper}') = 'VIEW' or ` +
-    `translate(normalize-space(@value), '${lower}', '${upper}') = 'VIEW' or ` +
-    `translate(normalize-space(@alt), '${lower}', '${upper}') = 'VIEW' or ` +
-    `translate(normalize-space(@title), '${lower}', '${upper}') = 'VIEW' or ` +
-    `translate(normalize-space(@aria-label), '${lower}', '${upper}') = 'VIEW'`;
+    '[id^="ctl00_ContentPlaceHolder1_WSExtendedGridNP1_GridView1_ctl"]' +
+    '[id$="_btnView2"]',
 
-  return page.locator(
-    'xpath=(' +
-      `//input[${viewExpression}] | ` +
-      `//button[${viewExpression}] | ` +
-      `//a[${viewExpression}] | ` +
-      `//*[@role='button' and (${viewExpression})] | ` +
-      `//*[contains(concat(' ', normalize-space(@class), ' '), ' view ') and (${viewExpression})]` +
-    ')'
-  );
-}
+    '#ctl00_ContentPlaceHolder1_WSExtendedGridNP1_GridView1 ' +
+    '[id$="_btnView2"]',
+
+    '[id$="_btnView2"]'
+  ].
 
 async function logViewControlDiagnostics(page) {
   const diagnostics = await page.locator(
