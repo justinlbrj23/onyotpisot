@@ -584,13 +584,35 @@ function writeOutput(notices) {
   let browser;
 
   try {
-    browser = await chromium.launch({ headless: true });
+    browser = await chromium.launch({
+      headless: true,
+      channel: 'chromium',
+      args: [
+        '--incognito',
+        '--disable-dev-shm-usage',
+        '--no-first-run',
+        '--no-default-browser-check'
+      ]
+    });
+
+    /*
+     * Playwright browser contexts are isolated and non-persistent by
+     * default. Creating a fresh context here provides incognito-style
+     * isolation: no cookies, local storage, cache, or session state is
+     * reused from another run.
+     */
     const context = await browser.newContext({
       viewport: { width: 1440, height: 1000 },
       userAgent:
         'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 ' +
-        '(KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
+        '(KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+      storageState: {
+        cookies: [],
+        origins: []
+      }
     });
+
+    console.log('Browser launched with a fresh incognito-style context.');
 
     const page = await context.newPage();
     page.setDefaultTimeout(TIMEOUT);
@@ -661,7 +683,9 @@ function writeOutput(notices) {
     await page.screenshot({ path: 'final-page.png', fullPage: true });
     console.log(`Finished. Extracted ${notices.length} unique full notice(s).`);
   } finally {
-    if (browser) await browser.close();
+    if (browser) {
+      await browser.close();
+    }
   }
 })().catch(error => {
   console.error('Scraper failed:', error);
