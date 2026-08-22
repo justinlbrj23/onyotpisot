@@ -249,15 +249,63 @@ async function getPageInfo(page) {
 }
 
 function getViewButtons(page) {
+  /*
+   * The site is an older ASP.NET application. Depending on the session
+   * and browser, VIEW can be rendered as an input, image input, button,
+   * link, or a clickable element with a nested VIEW label.
+   *
+   * XPath is used here because it can compare input values, alt text,
+   * title text, aria labels, and visible text case-insensitively.
+   */
+  const upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const lower = 'abcdefghijklmnopqrstuvwxyz';
+
+  const viewExpression =
+    `translate(normalize-space(.), '${lower}', '${upper}') = 'VIEW' or ` +
+    `translate(normalize-space(@value), '${lower}', '${upper}') = 'VIEW' or ` +
+    `translate(normalize-space(@alt), '${lower}', '${upper}') = 'VIEW' or ` +
+    `translate(normalize-space(@title), '${lower}', '${upper}') = 'VIEW' or ` +
+    `translate(normalize-space(@aria-label), '${lower}', '${upper}') = 'VIEW'`;
+
   return page.locator(
-    [
-      'input[type="submit"][value="VIEW" i]',
-      'input[type="button"][value="VIEW" i]',
-      'input[value="VIEW" i]',
-      'button:has-text("VIEW")',
-      'a:has-text("VIEW")'
-    ].join(', ')
-  ).filter({ visible: true });
+    'xpath=(' +
+      `//input[${viewExpression}] | ` +
+      `//button[${viewExpression}] | ` +
+      `//a[${viewExpression}] | ` +
+      `//*[@role='button' and (${viewExpression})] | ` +
+      `//*[contains(concat(' ', normalize-space(@class), ' '), ' view ') and (${viewExpression})]` +
+    ')'
+  );
+}
+
+async function logViewControlDiagnostics(page) {
+  const diagnostics = await page.locator(
+    'input, button, a, [role="button"]'
+  ).evaluateAll(elements => elements.map((element, index) => ({
+    index,
+    tag: element.tagName,
+    type: element.getAttribute('type') || '',
+    id: element.id || '',
+    name: element.getAttribute('name') || '',
+    value: element.getAttribute('value') || '',
+    text: (element.innerText || '').trim().slice(0, 100),
+    alt: element.getAttribute('alt') || '',
+    title: element.getAttribute('title') || '',
+    ariaLabel: element.getAttribute('aria-label') || '',
+    href: element.getAttribute('href') || '',
+    onclick: element.getAttribute('onclick') || ''
+  })));
+
+  fs.writeFileSync(
+    'view-control-diagnostics.json',
+    JSON.stringify(diagnostics, null, 2),
+    'utf8'
+  );
+
+  console.log(
+    `Wrote view-control-diagnostics.json with ${diagnostics.length} ` +
+    'button/link/input candidate(s).'
+  );
 }
 
 async function extractAllFullNoticesFromCurrentPage(page, currentPage) {
@@ -272,7 +320,22 @@ async function extractAllFullNoticesFromCurrentPage(page, currentPage) {
     `Results page ${currentPage}: found ${viewCount} VIEW button(s).`
   );
 
-  if (viewCount === 0) return notices;
+  if (viewCount === 0) {
+    await logViewControlDiagnostics(page);
+
+    fs.writeFileSync(
+      `no-view-buttons-page-${currentPage}.html`,
+      await page.content(),
+      'utf8'
+    );
+
+    await page.screenshot({
+      path: `no-view-buttons-page-${currentPage}.png`,
+      fullPage: true
+    });
+
+    return notices;
+  }
 
   for (let viewIndex = 0; viewIndex < viewCount; viewIndex += 1) {
     console.log(
