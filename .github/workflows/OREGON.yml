@@ -11,7 +11,7 @@ jobs:
     env:
       START_URL: "https://www.publicnoticeoregon.com/(S(x0nn32rq3miwftgofvfon5zr))/Search.aspx"
       SHEET_ID: "1iXOEgk_jYxeykjXafgCSc80KkAn-Jp2jl27ZS7FqGdg"
-      WORKSHEET_NAME: "Probate"
+      WORKSHEET_NAME: "Notice of LP"
 
     steps:
       # ==========================================
