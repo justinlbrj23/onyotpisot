@@ -200,8 +200,8 @@ async function waitForResults(page) {
 
     return (
       /Page\s+\d+\s+of\s+\d+\s+Pages?/i.test(text) ||
-      /NOTICE TO INTERESTED PERSONS/i.test(text) ||
-      /PROBATE DEPARTMENT/i.test(text)
+      /NOTICE OF SALE/i.test(text) ||
+      /TRUSTEE/i.test(text)
     );
   });
 
@@ -241,7 +241,7 @@ async function extractNotices(page) {
         .trim();
 
     const noticePattern =
-      /NOTICE TO INTERESTED PERSONS/i;
+      /NOTICE OF SALE/i;
 
     const casePattern =
       /\bCase\s+No\.?\s*([A-Z0-9-]+)/i;
