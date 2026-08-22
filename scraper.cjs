@@ -79,49 +79,76 @@ function fallbackIdentifier(notice) {
  * and stops so the run can be reviewed manually.
  */
 const FIBONACCI_DELAYS_MS = [2000, 3000, 5000, 8000, 13000, 21000, 34000];
-const MAX_DELAY_INDEX = FIBONACCI_DELAYS_MS.length - 1;
-let fibonacciDelayIndex = 0;
+const MAX_FIBONACCI_DELAY_MS = 34000;
 
-function randomInteger(minimum, maximum) {
-  return Math.floor(Math.random() * (maximum - minimum + 1)) + minimum;
+/*
+ * A global sequence counter is never reset during the run. Every courtesy
+ * wait therefore receives a different exact millisecond duration.
+ *
+ * The first seven base waits follow Fibonacci growth. After the 34-second
+ * safety ceiling is reached, the base remains at 34 seconds and a monotonic
+ * offset guarantees that no exact wait duration is ever reused. This avoids
+ * unbounded Fibonacci growth that would otherwise make later waits last
+ * minutes, hours, or longer.
+ */
+let courtesyWaitSequence = 0;
+
+function getFibonacciBaseDelay(sequenceIndex) {
+  if (sequenceIndex < FIBONACCI_DELAYS_MS.length) {
+    return FIBONACCI_DELAYS_MS[sequenceIndex];
+  }
+
+  return MAX_FIBONACCI_DELAY_MS;
 }
 
-async function courtesyWait(page, reason, options = {}) {
-  const {
-    increase = false,
-    minimumJitterMs = 500,
-    maximumJitterMs = 2000
-  } = options;
+function getUniqueCourtesyDelay() {
+  const sequenceIndex = courtesyWaitSequence;
+  const baseDelay = getFibonacciBaseDelay(sequenceIndex);
 
-  const baseDelay = FIBONACCI_DELAYS_MS[
-    Math.min(fibonacciDelayIndex, MAX_DELAY_INDEX)
-  ];
-  const jitter = randomInteger(minimumJitterMs, maximumJitterMs);
-  const totalDelay = baseDelay + jitter;
+  /*
+   * Add a strictly increasing offset. Since courtesyWaitSequence never
+   * decreases or resets, the resulting duration can never equal an earlier
+   * wait value during the same complete scraper run.
+   */
+  const uniqueOffset = sequenceIndex;
+  const totalDelay = baseDelay + uniqueOffset;
+
+  courtesyWaitSequence += 1;
+
+  return {
+    sequenceNumber: sequenceIndex + 1,
+    baseDelay,
+    uniqueOffset,
+    totalDelay
+  };
+}
+
+async function courtesyWait(page, reason) {
+  const delay = getUniqueCourtesyDelay();
 
   console.log(
-    `[pacing] Waiting ${(totalDelay / 1000).toFixed(1)}s before ${reason}.`
+    `[pacing #${delay.sequenceNumber}] Waiting ` +
+    `${(delay.totalDelay / 1000).toFixed(3)}s before ${reason}. ` +
+    `(Fibonacci base ${delay.baseDelay}ms + ` +
+    `unique offset ${delay.uniqueOffset}ms)`
   );
 
-  await page.waitForTimeout(totalDelay);
-
-  if (increase) {
-    fibonacciDelayIndex = Math.min(
-      fibonacciDelayIndex + 1,
-      MAX_DELAY_INDEX
-    );
-  }
+  await page.waitForTimeout(delay.totalDelay);
 }
 
 function increaseCourtesyDelay() {
-  fibonacciDelayIndex = Math.min(
-    fibonacciDelayIndex + 1,
-    MAX_DELAY_INDEX
-  );
+  /*
+   * Reserve one additional sequence position after a transient failure.
+   * The reserved value is never reused because the counter only increases.
+   */
+  courtesyWaitSequence += 1;
 }
 
 function resetCourtesyDelay() {
-  fibonacciDelayIndex = 0;
+  /*
+   * Intentionally do nothing. Resetting would reuse earlier wait values,
+   * which is prohibited for this run-wide unique-delay configuration.
+   */
 }
 
 async function detectAccessChallenge(page) {
@@ -366,8 +393,7 @@ async function returnToResultsPage(page, resultsUrl, expectedPage) {
 
   await courtesyWait(
     page,
-    `reloading results page ${expectedPage}`,
-    { increase: true }
+    `reloading results page ${expectedPage}`
   );
 
   await page.goto(resultsUrl, {
