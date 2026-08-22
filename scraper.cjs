@@ -1,5 +1,4 @@
 const fs = require('fs');
-const path = require('path');
 const { google } = require('googleapis');
 const pdfParse = require('pdf-parse');
 
@@ -28,7 +27,7 @@ function cleanText(value = '') {
   return String(value)
     .replace(/\u00a0/g, ' ')
     .replace(/[\u2018\u2019]/g, "'")
-    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u201c\u201d]/g, '"')
     .replace(/\r/g, '\n')
     .replace(/[ \t]+/g, ' ')
     .replace(/ *\n */g, '\n')
@@ -60,47 +59,62 @@ function extractCaseOrInstrumentNumber(text = '') {
   const normalized = flattenText(text);
 
   /*
-   * Collect every Instrument No./Number match and use the final match.
-   * Trustee notices often mention the original recording first and the
-   * assignment instrument later. The supplied example targets the later
-   * value: 2026-002285.
+   * Gather all Instrument No., Instrument Number, and Instrument # matches.
+   * The final occurrence is selected because trustee notices commonly list
+   * the original recording first and a later assignment instrument second.
    */
-  const instrumentPatterns = [
-    /\bInstrument\s+No\.?\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]*)/gi,
-    /\bInstrument\s+Number\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]*)/gi
-  ];
+  const instrumentPattern =
+    /\bInstrument\s*(?:No\.?|Number|#)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]*)/gi;
 
-  const matches = [];
+  const instrumentMatches = [];
 
-  for (const pattern of instrumentPatterns) {
-    for (const match of normalized.matchAll(pattern)) {
-      if (match[1]) {
-        matches.push({
-          value: match[1],
-          index: match.index ?? -1
-        });
-      }
+  for (const match of normalized.matchAll(instrumentPattern)) {
+    if (!match[1]) {
+      continue;
     }
-  }
 
-  if (matches.length > 0) {
-    matches.sort((left, right) => left.index - right.index);
-    return matches.at(-1).value
+    const value = match[1]
       .replace(/[.,;:]+$/g, '')
+      .trim()
       .toUpperCase();
+
+    if (!/\d/.test(value)) {
+      continue;
+    }
+
+    instrumentMatches.push({
+      value,
+      index: match.index ?? -1
+    });
   }
 
-  /* Fallbacks when a notice uses case or T.S. numbering instead. */
+  if (instrumentMatches.length > 0) {
+    instrumentMatches.sort((left, right) => left.index - right.index);
+    return instrumentMatches.at(-1).value;
+  }
+
   const fallbackPatterns = [
-    /\bCase\s+(?:No\.?|Number)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]*)/i,
-    /\bT\.?S\.?\s*(?:No\.?|Number)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]*)/i,
-    /\bTS\s+No\.?\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]*)/i
+    /\bCase\s*(?:No\.?|Number|#)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]*)/i,
+    /\bT\.?\s*S\.?\s*(?:No\.?|Number|#)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]*)/i,
+    /\bTS\s*(?:No\.?|Number|#)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]*)/i,
+    /\bTrustee(?:'s)?\s+Sale\s*(?:No\.?|Number|#)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]*)/i,
+    /\bFile\s*(?:No\.?|Number|#)\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/-]*)/i
   ];
 
   for (const pattern of fallbackPatterns) {
     const match = normalized.match(pattern);
-    if (match?.[1]) {
-      return match[1].replace(/[.,;:]+$/g, '').toUpperCase();
+
+    if (!match?.[1]) {
+      continue;
+    }
+
+    const value = match[1]
+      .replace(/[.,;:]+$/g, '')
+      .trim()
+      .toUpperCase();
+
+    if (/\d/.test(value)) {
+      return value;
     }
   }
 
@@ -110,23 +124,49 @@ function extractCaseOrInstrumentNumber(text = '') {
 function extractDefendant(text = '') {
   const normalized = flattenText(text);
 
-  /*
-   * Capture any variable-length content located between "made by," and
-   * "as Grantor". New lines and inconsistent spacing are already flattened.
-   */
-  const patterns = [
-    /\bmade\s+by\s*,\s*(.+?)\s+as\s+Grantor\b/i,
-    /\bmade\s+by\s+(.+?)\s+as\s+Grantor\b/i
+  const primaryPatterns = [
+    /\bmade\s+by\s*,\s*(.+?)\s*,?\s+as\s+(?:the\s+)?Grantor(?:s)?\b/i,
+    /\bmade\s+by\s+(.+?)\s*,?\s+as\s+(?:the\s+)?Grantor(?:s)?\b/i
   ];
 
-  for (const pattern of patterns) {
+  for (const pattern of primaryPatterns) {
     const match = normalized.match(pattern);
-    if (match?.[1]) {
-      return match[1]
-        .replace(/^[,;:\-\s]+|[,;:\-\s]+$/g, '')
-        .replace(/\s+/g, ' ')
-        .trim();
+
+    if (!match?.[1]) {
+      continue;
     }
+
+    let defendant = match[1];
+
+    /*
+     * Some notices place an address clause between the person's name and
+     * the later "as Grantor" wording. Stop before that address clause.
+     */
+    defendant = defendant
+      .split(/\s*,?\s*whose\s+address\s+is\b/i)[0]
+      .split(/\s*,?\s*with\s+an?\s+address\s+(?:at|of)\b/i)[0]
+      .split(/\s*,?\s*having\s+an?\s+address\s+(?:at|of)\b/i)[0];
+
+    defendant = cleanText(defendant)
+      .replace(/^[,;:\-\s]+|[,;:\-\s]+$/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (defendant && defendant.length <= 300) {
+      return defendant;
+    }
+  }
+
+  /* Fallback for: made by Kelley A. Swensen, whose address is ... */
+  const addressFallback = normalized.match(
+    /\bmade\s+by\s*,?\s*(.+?)\s*,?\s*whose\s+address\s+is\b/i
+  );
+
+  if (addressFallback?.[1]) {
+    return cleanText(addressFallback[1])
+      .replace(/^[,;:\-\s]+|[,;:\-\s]+$/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
   }
 
   return '';
@@ -135,22 +175,29 @@ function extractDefendant(text = '') {
 function extractSubjectProperty(text = '') {
   const normalized = flattenText(text);
 
-  /*
-   * Capture text after "Commonly known as:" and stop at a five-digit ZIP.
-   * An optional ZIP+4 suffix is retained when present.
-   */
-  const match = normalized.match(
-    /\bCommonly\s+known\s+as\s*:\s*(.+?\b\d{5}(?:-\d{4})?)(?=\s|$)/i
-  );
+  const patterns = [
+    /\bCommonly\s+known\s+as\s*:\s*(.{3,250}?)(\d{5}(?:-\d{4})?)(?=[^0-9]|$)/i,
+    /\bCommonly\s+known\s+as\s*,?\s*(.{3,250}?)(\d{5}(?:-\d{4})?)(?=[^0-9]|$)/i
+  ];
 
-  if (!match?.[1]) {
-    return '';
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+
+    if (!match?.[1] || !match?.[2]) {
+      continue;
+    }
+
+    const property = cleanText(`${match[1]}${match[2]}`)
+      .replace(/^[,;:\-\s]+|[,;:\-\s.]+$/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (property.length >= 8 && property.length <= 250) {
+      return property;
+    }
   }
 
-  return match[1]
-    .replace(/^[,;:\-\s]+|[,;:\-\s]+$/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return '';
 }
 
 function extractTargets(text = '') {
@@ -207,6 +254,7 @@ async function fetchPdf(url, attempt = 1) {
     }
 
     const retryDelay = Math.min(2000 * (2 ** (attempt - 1)), 15000);
+
     console.warn(
       `Attempt ${attempt} failed for ${url}: ${error.message}. ` +
       `Retrying in ${retryDelay}ms...`
