@@ -1,17 +1,35 @@
-name: Oregon Public Notice Scraper
+name: Oregon Public Notice PDF Processor
 
 on:
   workflow_dispatch:
+    inputs:
+      overwrite_existing:
+        description: "Overwrite existing values in columns E:G"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oregon-public-notice-pdf-processor
+  cancel-in-progress: false
 
 jobs:
-  scrape-notices:
+  process-pdf-notices:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     env:
-      START_URL: "https://www.publicnoticeoregon.com/(S(lps2vkd2pk5xopff0o1dvpzj))/Search.aspx"
       SHEET_ID: "1iXOEgk_jYxeykjXafgCSc80KkAn-Jp2jl27ZS7FqGdg"
       WORKSHEET_NAME: "Notice of LP"
+      START_ROW: "2"
+      PDF_TIMEOUT_MS: "120000"
+      REQUEST_DELAY_MS: "1500"
+      MAX_RETRIES: "3"
+      GOOGLE_APPLICATION_CREDENTIALS: "service-account.json"
+      OVERWRITE_EXISTING: ${{ inputs.overwrite_existing }}
 
     steps:
       # ==========================================
@@ -30,65 +48,33 @@ jobs:
           package-manager-cache: false
 
       # ==========================================
-      # INSTALL PLAYWRIGHT
+      # INSTALL NODE DEPENDENCIES
       # ==========================================
-      - name: Install Playwright
+      - name: Install Dependencies
+        shell: bash
         run: |
-          if [ -f package-lock.json ]; then
-            npm ci
-          elif [ -f package.json ]; then
-            npm install
-          else
-            npm init -y
-            npm install playwright
-          fi
+          set -euo pipefail
 
-          if ! npm list playwright --depth=0 >/dev/null 2>&1; then
-            npm install playwright
-          fi
+          test -f package.json
 
-          npx playwright install chromium --with-deps
+          # npm install works whether or not package-lock.json already exists
+          # and synchronizes the lock file with newly added dependencies.
+          npm install
+
+          npm list googleapis --depth=0
+          npm list pdf-parse --depth=0
 
       # ==========================================
       # VERIFY SCRAPER EXISTS
       # ==========================================
       - name: Verify Scraper Script
+        shell: bash
         run: |
+          set -euo pipefail
+
           ls -la
           test -f scraper.cjs
           node --check scraper.cjs
-
-      # ==========================================
-      # RUN SCRAPER
-      # ==========================================
-      - name: Run Scraper Script
-        run: |
-          node scraper.cjs
-
-      # ==========================================
-      # VERIFY SCRAPER OUTPUT
-      # ==========================================
-      - name: Verify Scraper Output
-        run: |
-          ls -la
-          test -f notices.json
-          test -f notices.txt
-
-      # ==========================================
-      # SETUP PYTHON
-      # ==========================================
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      # ==========================================
-      # INSTALL GOOGLE SHEETS DEPENDENCIES
-      # ==========================================
-      - name: Install Google Sheets Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install gspread google-auth
 
       # ==========================================
       # WRITE GOOGLE SERVICE ACCOUNT JSON
@@ -96,46 +82,109 @@ jobs:
       - name: Write Service Account JSON
         env:
           SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+        shell: bash
         run: |
+          set -euo pipefail
+
+          if [ -z "${SERVICE_ACCOUNT_JSON:-}" ]; then
+            echo "ERROR: GitHub secret SERVICE_ACCOUNT_JSON is empty or missing."
+            exit 1
+          fi
+
           printf '%s' "$SERVICE_ACCOUNT_JSON" > service-account.json
+          chmod 600 service-account.json
 
       # ==========================================
-      # VALIDATE SERVICE ACCOUNT JSON
+      # VALIDATE GOOGLE SERVICE ACCOUNT JSON
       # ==========================================
       - name: Validate Service Account JSON
+        shell: bash
         run: |
-          python -c 'import json; j=json.load(open("service-account.json", encoding="utf-8")); required=["private_key","client_email","project_id"]; missing=[k for k in required if not j.get(k)]; assert not missing, f"Missing required fields: {missing}"; print("===================================="); print("Google Service Account Loaded OK"); print("Client Email:", j["client_email"]); print("Project ID:", j["project_id"]); print("====================================")'
+          set -euo pipefail
+
+          node <<'NODE'
+          const fs = require('fs');
+
+          const file = 'service-account.json';
+          const credentials = JSON.parse(fs.readFileSync(file, 'utf8'));
+          const required = [
+            'type',
+            'project_id',
+            'private_key',
+            'client_email',
+            'token_uri'
+          ];
+
+          const missing = required.filter(key => !credentials[key]);
+
+          if (missing.length > 0) {
+            throw new Error(
+              `Service account JSON is missing: ${missing.join(', ')}`
+            );
+          }
+
+          if (credentials.type !== 'service_account') {
+            throw new Error('Credential type must be service_account.');
+          }
+
+          console.log('====================================');
+          console.log('Google Service Account Loaded OK');
+          console.log('Client Email:', credentials.client_email);
+          console.log('Project ID:', credentials.project_id);
+          console.log('====================================');
+          NODE
 
       # ==========================================
-      # APPEND NOTICES TO GOOGLE SHEETS
+      # RUN PDF PROCESSOR
       #
-      # caseNumber -> column E
-      # text       -> column F
+      # D2:D = source PDF URL
+      # E2:E = Case / Instrument Number
+      # F2:F = Defendant / Grantor
+      # G2:G = Subject Property
       # ==========================================
-      - name: Append Notices to Probate Sheet
+      - name: Process PDF Notices
+        shell: bash
         run: |
-          python -c 'import json,os,gspread; from google.oauth2.service_account import Credentials; notices=json.load(open("notices.json",encoding="utf-8")); scopes=["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]; creds=Credentials.from_service_account_file("service-account.json",scopes=scopes); ws=gspread.authorize(creds).open_by_key(os.environ["SHEET_ID"]).worksheet(os.environ["WORKSHEET_NAME"]); existing={str(v).strip().upper() for v in ws.col_values(5)[1:] if str(v).strip()}; rows=[]; seen=set(); [(rows.append([case,text]),seen.add(case)) for n in notices if (case:=str(n.get("caseNumber","")).strip().upper()) and (text:=str(n.get("text","")).strip()) and case not in existing and case not in seen]; next_row=max(len(ws.col_values(5)),len(ws.col_values(6)),1)+1; end_row=next_row+len(rows)-1; ws.update(values=rows,range_name=f"E{next_row}:F{end_row}",value_input_option="RAW") if rows else None; print(f"Appended {len(rows)} new notice(s) to {ws.title}.")'
+          set -euo pipefail
+          node scraper.cjs
 
       # ==========================================
-      # UPLOAD SCRAPER OUTPUT
+      # VERIFY PROCESSOR OUTPUT
       # ==========================================
-      - name: Upload Scraper Output
+      - name: Verify Processor Output
+        if: always()
+        shell: bash
+        run: |
+          echo "=== Generated Files ==="
+          ls -la
+
+          if [ -f pdf-extraction-results.json ]; then
+            node -e "JSON.parse(require('fs').readFileSync('pdf-extraction-results.json', 'utf8')); console.log('Results JSON is readable.')"
+          fi
+
+          if [ -f pdf-extraction-failures.json ]; then
+            node -e "JSON.parse(require('fs').readFileSync('pdf-extraction-failures.json', 'utf8')); console.log('Failures JSON is readable.')"
+          fi
+
+      # ==========================================
+      # UPLOAD PROCESSING RESULTS
+      # ==========================================
+      - name: Upload Processing Results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scraper-output
+          name: pdf-processing-results
           path: |
-            notices.json
-            notices.txt
-            page.html
-            page.png
-            final-page.png
+            pdf-extraction-results.json
+            pdf-extraction-failures.json
           if-no-files-found: ignore
+          retention-days: 14
 
       # ==========================================
-      # CLEANUP
+      # CLEANUP TEMPORARY CREDENTIALS
       # ==========================================
       - name: Cleanup
         if: always()
+        shell: bash
         run: |
           rm -f service-account.json
