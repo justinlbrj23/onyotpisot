@@ -70,6 +70,116 @@ function fallbackIdentifier(notice) {
   return `NOTICE-${(hash >>> 0).toString(16).toUpperCase().padStart(8, '0')}`;
 }
 
+
+/*
+ * Courtesy pacing for the destination website.
+ *
+ * This reduces request bursts. It does not attempt to bypass CAPTCHA or
+ * access controls. If a challenge is detected, the scraper saves diagnostics
+ * and stops so the run can be reviewed manually.
+ */
+const FIBONACCI_DELAYS_MS = [2000, 3000, 5000, 8000, 13000, 21000, 34000];
+const MAX_DELAY_INDEX = FIBONACCI_DELAYS_MS.length - 1;
+let fibonacciDelayIndex = 0;
+
+function randomInteger(minimum, maximum) {
+  return Math.floor(Math.random() * (maximum - minimum + 1)) + minimum;
+}
+
+async function courtesyWait(page, reason, options = {}) {
+  const {
+    increase = false,
+    minimumJitterMs = 500,
+    maximumJitterMs = 2000
+  } = options;
+
+  const baseDelay = FIBONACCI_DELAYS_MS[
+    Math.min(fibonacciDelayIndex, MAX_DELAY_INDEX)
+  ];
+  const jitter = randomInteger(minimumJitterMs, maximumJitterMs);
+  const totalDelay = baseDelay + jitter;
+
+  console.log(
+    `[pacing] Waiting ${(totalDelay / 1000).toFixed(1)}s before ${reason}.`
+  );
+
+  await page.waitForTimeout(totalDelay);
+
+  if (increase) {
+    fibonacciDelayIndex = Math.min(
+      fibonacciDelayIndex + 1,
+      MAX_DELAY_INDEX
+    );
+  }
+}
+
+function increaseCourtesyDelay() {
+  fibonacciDelayIndex = Math.min(
+    fibonacciDelayIndex + 1,
+    MAX_DELAY_INDEX
+  );
+}
+
+function resetCourtesyDelay() {
+  fibonacciDelayIndex = 0;
+}
+
+async function detectAccessChallenge(page) {
+  return page.evaluate(() => {
+    const text = document.body?.innerText || '';
+    const title = document.title || '';
+    const combined = `${title}\n${text}`;
+
+    const indicators = [
+      /\bcaptcha\b/i,
+      /verify you are human/i,
+      /human verification/i,
+      /security check/i,
+      /unusual traffic/i,
+      /automated requests/i,
+      /temporarily blocked/i,
+      /too many requests/i,
+      /rate limit/i,
+      /access denied/i
+    ];
+
+    const matched = indicators.find(pattern => pattern.test(combined));
+    const captchaElement = document.querySelector([
+      'iframe[src*="captcha" i]',
+      'iframe[title*="captcha" i]',
+      '[class*="captcha" i]',
+      '[id*="captcha" i]',
+      'textarea[name="g-recaptcha-response"]',
+      '[data-sitekey]'
+    ].join(', '));
+
+    return {
+      detected: Boolean(matched || captchaElement),
+      indicator: matched?.source || (captchaElement ? 'captcha DOM element' : ''),
+      title,
+      url: window.location.href
+    };
+  });
+}
+
+async function stopIfAccessChallenge(page, location) {
+  const challenge = await detectAccessChallenge(page);
+  if (!challenge.detected) return;
+
+  const safeLocation = String(location || 'unknown')
+    .replace(/[^a-z0-9_-]+/gi, '-')
+    .replace(/^-+|-+$/g, '')
+    .toLowerCase();
+
+  await saveDebug(page, `challenge-${safeLocation}`);
+
+  throw new Error(
+    `Access challenge detected during ${location}. ` +
+    `Indicator: ${challenge.indicator}. ` +
+    'The scraper stopped without attempting to bypass the challenge.'
+  );
+}
+
 function getViewButtons(page) {
   return page.locator([
     '[id^="ctl00_ContentPlaceHolder1_WSExtendedGridNP1_GridView1_ctl"][id$="_btnView2"]',
@@ -230,19 +340,51 @@ async function isExpectedResultsPage(page, expectedPage) {
 }
 
 async function returnToResultsPage(page, resultsUrl, expectedPage) {
+  await courtesyWait(
+    page,
+    `returning to results page ${expectedPage}`
+  );
+
   const historyResult = await page.goBack({
     waitUntil: 'domcontentloaded',
     timeout: 30000
   }).catch(() => null);
 
   if (historyResult) {
+    await stopIfAccessChallenge(
+      page,
+      `return-to-results-page-${expectedPage}`
+    );
+
     await page.waitForTimeout(500);
-    if (await isExpectedResultsPage(page, expectedPage)) return true;
+
+    if (await isExpectedResultsPage(page, expectedPage)) {
+      resetCourtesyDelay();
+      return true;
+    }
   }
 
-  await page.goto(resultsUrl, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
+  await courtesyWait(
+    page,
+    `reloading results page ${expectedPage}`,
+    { increase: true }
+  );
+
+  await page.goto(resultsUrl, {
+    waitUntil: 'domcontentloaded',
+    timeout: TIMEOUT
+  });
+
+  await stopIfAccessChallenge(
+    page,
+    `reload-results-page-${expectedPage}`
+  );
+
   await page.waitForTimeout(500);
-  return isExpectedResultsPage(page, expectedPage);
+
+  const returned = await isExpectedResultsPage(page, expectedPage);
+  if (returned) resetCourtesyDelay();
+  return returned;
 }
 
 async function extractAllFullNoticesFromCurrentPage(page, currentPage) {
@@ -271,9 +413,20 @@ async function extractAllFullNoticesFromCurrentPage(page, currentPage) {
       waitUntil: 'domcontentloaded', timeout: 30000
     }).catch(() => null);
 
+    await courtesyWait(
+      page,
+      `opening VIEW ${index + 1} on results page ${currentPage}`
+    );
+
     await button.scrollIntoViewIfNeeded();
     await button.click();
     await navigation;
+
+    await stopIfAccessChallenge(
+      page,
+      `page-${currentPage}-view-${index + 1}`
+    );
+
     await waitForDetail(page, oldUrl, oldText);
 
     fs.writeFileSync(
@@ -324,13 +477,25 @@ async function clickAndWaitForPageChange(page, locator, currentPage, expectedPag
   }).catch(() => null);
 
   console.log(`Navigating from page ${currentPage} to ${expectedPage}...`);
+
+  await courtesyWait(
+    page,
+    `navigating from results page ${currentPage} to ${expectedPage}`
+  );
+
   await locator.scrollIntoViewIfNeeded();
   await locator.click();
   await navigation;
 
+  await stopIfAccessChallenge(
+    page,
+    `pagination-${currentPage}-to-${expectedPage}`
+  );
+
   try {
     await waitForResults(page, expectedPage);
   } catch (error) {
+    increaseCourtesyDelay();
     await saveDebug(page, `pagination-timeout-${currentPage}-to-${expectedPage}`);
     console.error(`Previous URL: ${previousUrl}`);
     console.error(`Current URL: ${page.url()}`);
@@ -341,6 +506,8 @@ async function clickAndWaitForPageChange(page, locator, currentPage, expectedPag
   const viewCount = await getViewButtons(page).count();
 
   if (!info || info.current !== expectedPage || viewCount === 0) return false;
+
+  resetCourtesyDelay();
 
   console.log(
     `Pagination confirmed: page ${info.current} of ${info.total}; ` +
@@ -430,8 +597,20 @@ function writeOutput(notices) {
     page.setDefaultNavigationTimeout(TIMEOUT);
 
     console.log(`Opening: ${START_URL}`);
-    await page.goto(START_URL, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
+
+    await courtesyWait(
+      page,
+      'opening the initial search page'
+    );
+
+    await page.goto(START_URL, {
+      waitUntil: 'domcontentloaded',
+      timeout: TIMEOUT
+    });
+
+    await stopIfAccessChallenge(page, 'initial-navigation');
     await waitForResults(page);
+    resetCourtesyDelay();
 
     fs.writeFileSync('page.html', await page.content(), 'utf8');
     await page.screenshot({ path: 'page.png', fullPage: true });
