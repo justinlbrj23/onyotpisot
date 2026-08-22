@@ -8,6 +8,19 @@ const OUTPUT_JSON = 'notices.json';
 const OUTPUT_TEXT = 'notices.txt';
 const TIMEOUT = 120000;
 
+const config = {
+  fastMode: process.env.FAST_MODE === 'true',
+  requestOptions: {
+    fibDelays: {
+      max: Number(process.env.FIB_MAX_DELAY_MS) || 34000,
+      scale: Number(process.env.FIB_DELAY_SCALE) || 1000,
+      minimum: Number(process.env.MIN_DELAY_MS) || 2000
+    },
+    cooldownEvery: Number(process.env.COOLDOWN_EVERY) || 10,
+    cooldownMs: Number(process.env.COOLDOWN_MS) || 30000
+  }
+};
+
 function cleanText(value = '') {
   return String(value)
     .replace(/\u00a0/g, ' ')
@@ -63,100 +76,173 @@ function extractTrustor(text = '') {
 function fallbackIdentifier(notice) {
   const source = [notice.publication, notice.publishedDate, notice.text].join('|');
   let hash = 2166136261;
+
   for (let index = 0; index < source.length; index += 1) {
     hash ^= source.charCodeAt(index);
     hash = Math.imul(hash, 16777619);
   }
+
   return `NOTICE-${(hash >>> 0).toString(16).toUpperCase().padStart(8, '0')}`;
 }
 
-
 /*
- * Courtesy pacing for the destination website.
+ * Fibonacci courtesy-pacing system.
  *
- * This reduces request bursts. It does not attempt to bypass CAPTCHA or
- * access controls. If a challenge is detected, the scraper saves diagnostics
- * and stops so the run can be reviewed manually.
- */
-const FIBONACCI_DELAYS_MS = [2000, 3000, 5000, 8000, 13000, 21000, 34000];
-const MAX_FIBONACCI_DELAY_MS = 34000;
-
-/*
- * A global sequence counter is never reset during the run. Every courtesy
- * wait therefore receives a different exact millisecond duration.
+ * Every returned delay is unique for the complete browser session. The used
+ * delay history is never automatically cleared. When a shuffled pool is
+ * exhausted, the next generation expands the range and applies a generation
+ * offset. Cooldown durations also receive unique offsets.
  *
- * The first seven base waits follow Fibonacci growth. After the 34-second
- * safety ceiling is reached, the base remains at 34 seconds and a monotonic
- * offset guarantees that no exact wait duration is ever reused. This avoids
- * unbounded Fibonacci growth that would otherwise make later waits last
- * minutes, hours, or longer.
+ * This is for courteous rate limiting. It does not bypass CAPTCHA or access
+ * controls. Challenge pages are saved and the run stops for manual review.
  */
-let courtesyWaitSequence = 0;
+let fibDelayPool = null;
+const usedFibDelays = new Set();
+let requestCounter = 0;
+let fibPoolGeneration = 0;
+let previousDelay = null;
 
-function getFibonacciBaseDelay(sequenceIndex) {
-  if (sequenceIndex < FIBONACCI_DELAYS_MS.length) {
-    return FIBONACCI_DELAYS_MS[sequenceIndex];
+function shuffleArray(values) {
+  for (let index = values.length - 1; index > 0; index -= 1) {
+    const randomIndex = Math.floor(Math.random() * (index + 1));
+    [values[index], values[randomIndex]] = [values[randomIndex], values[index]];
+  }
+  return values;
+}
+
+function generateFibonacci(maximum, scale = 1000, minimum = 0) {
+  const fibonacci = [1, 2];
+
+  while (true) {
+    const next = fibonacci.at(-1) + fibonacci.at(-2);
+    if (next * scale > maximum) break;
+    fibonacci.push(next);
   }
 
-  return MAX_FIBONACCI_DELAY_MS;
+  return [...new Set(
+    fibonacci
+      .map(number => number * scale)
+      .filter(delay => delay >= minimum && delay <= maximum)
+  )];
 }
 
-function getUniqueCourtesyDelay() {
-  const sequenceIndex = courtesyWaitSequence;
-  const baseDelay = getFibonacciBaseDelay(sequenceIndex);
+function getFibonacciConfiguration() {
+  const settings = config.requestOptions?.fibDelays || {};
+  const maximum = Number(settings.max) || 34000;
+  const scale = Number(settings.scale) || 1000;
+  const minimum = Number(settings.minimum) || 2000;
+  const effectiveMaximum = config.fastMode
+    ? Math.max(minimum, Math.floor(maximum * 0.1))
+    : maximum;
 
-  /*
-   * Add a strictly increasing offset. Since courtesyWaitSequence never
-   * decreases or resets, the resulting duration can never equal an earlier
-   * wait value during the same complete scraper run.
-   */
-  const uniqueOffset = sequenceIndex;
-  const totalDelay = baseDelay + uniqueOffset;
-
-  courtesyWaitSequence += 1;
-
-  return {
-    sequenceNumber: sequenceIndex + 1,
-    baseDelay,
-    uniqueOffset,
-    totalDelay
-  };
+  return { maximum, effectiveMaximum, scale, minimum };
 }
 
-async function courtesyWait(page, reason) {
-  const delay = getUniqueCourtesyDelay();
+function initFibDelayPool() {
+  const { effectiveMaximum, scale, minimum } = getFibonacciConfiguration();
+  const expansion = fibPoolGeneration * Math.max(scale * 2, 1000);
+  const generationMaximum = effectiveMaximum + expansion;
+  const generationOffset = fibPoolGeneration * 101;
+
+  fibDelayPool = generateFibonacci(generationMaximum, scale, minimum)
+    .map(delay => delay + generationOffset)
+    .filter(delay => !usedFibDelays.has(delay));
+
+  if (fibDelayPool.length === 0) {
+    const fallbackBase = Math.max(generationMaximum, minimum);
+    fibDelayPool = Array.from(
+      { length: 20 },
+      (_, index) => fallbackBase + generationOffset + index + 1
+    ).filter(delay => !usedFibDelays.has(delay));
+  }
+
+  shuffleArray(fibDelayPool);
 
   console.log(
-    `[pacing #${delay.sequenceNumber}] Waiting ` +
-    `${(delay.totalDelay / 1000).toFixed(3)}s before ${reason}. ` +
-    `(Fibonacci base ${delay.baseDelay}ms + ` +
-    `unique offset ${delay.uniqueOffset}ms)`
+    `Fibonacci pool initialized: generation=${fibPoolGeneration}, ` +
+    `max=${generationMaximum}ms, scale=${scale}, ` +
+    `fastMode=${config.fastMode}, available=${fibDelayPool.length}`
   );
 
-  await page.waitForTimeout(delay.totalDelay);
+  fibPoolGeneration += 1;
+}
+
+function getUniqueFibDelay() {
+  while (!fibDelayPool || fibDelayPool.length === 0) {
+    initFibDelayPool();
+  }
+
+  while (fibDelayPool.length > 0) {
+    const delay = fibDelayPool.pop();
+    if (!usedFibDelays.has(delay) && delay !== previousDelay) {
+      usedFibDelays.add(delay);
+      previousDelay = delay;
+      return delay;
+    }
+  }
+
+  initFibDelayPool();
+  return getUniqueFibDelay();
+}
+
+function getUniqueCooldownDelay() {
+  const configured = Number(config.requestOptions?.cooldownMs) || 30000;
+  let candidate = configured + requestCounter;
+
+  while (usedFibDelays.has(candidate) || candidate === previousDelay) {
+    candidate += 1;
+  }
+
+  usedFibDelays.add(candidate);
+  previousDelay = candidate;
+  return candidate;
+}
+
+function getDelay() {
+  const cooldownEvery = Number(config.requestOptions?.cooldownEvery) || 10;
+  requestCounter += 1;
+
+  if (cooldownEvery > 0 && requestCounter % cooldownEvery === 0) {
+    const delay = getUniqueCooldownDelay();
+    console.log(`Cooldown triggered: ${delay}ms`);
+    return delay;
+  }
+
+  const delay = getUniqueFibDelay();
+  console.log(`Fibonacci delay selected: ${delay}ms`);
+  return delay;
+}
+
+async function courtesyWait(page, reason = 'the next navigation') {
+  const delay = getDelay();
+  console.log(
+    `[pacing request ${requestCounter}] Waiting ` +
+    `${(delay / 1000).toFixed(3)}s before ${reason}.`
+  );
+  await page.waitForTimeout(delay);
 }
 
 function increaseCourtesyDelay() {
-  /*
-   * Reserve one additional sequence position after a transient failure.
-   * The reserved value is never reused because the counter only increases.
-   */
-  courtesyWaitSequence += 1;
+  fibDelayPool = null;
+  fibPoolGeneration += 1;
+  console.log('Transient failure detected; next wait uses a later pool.');
 }
 
 function resetCourtesyDelay() {
-  /*
-   * Intentionally do nothing. Resetting would reuse earlier wait values,
-   * which is prohibited for this run-wide unique-delay configuration.
-   */
+  // Intentionally retained for compatibility. Run-wide history is not reset.
+}
+
+function resetFibDelayPool() {
+  fibDelayPool = null;
+  usedFibDelays.clear();
+  requestCounter = 0;
+  fibPoolGeneration = 0;
+  previousDelay = null;
 }
 
 async function detectAccessChallenge(page) {
   return page.evaluate(() => {
-    const text = document.body?.innerText || '';
-    const title = document.title || '';
-    const combined = `${title}\n${text}`;
-
+    const combined = `${document.title || ''}\n${document.body?.innerText || ''}`;
     const indicators = [
       /\bcaptcha\b/i,
       /verify you are human/i,
@@ -182,9 +268,7 @@ async function detectAccessChallenge(page) {
 
     return {
       detected: Boolean(matched || captchaElement),
-      indicator: matched?.source || (captchaElement ? 'captcha DOM element' : ''),
-      title,
-      url: window.location.href
+      indicator: matched?.source || (captchaElement ? 'captcha DOM element' : '')
     };
   });
 }
@@ -199,11 +283,9 @@ async function stopIfAccessChallenge(page, location) {
     .toLowerCase();
 
   await saveDebug(page, `challenge-${safeLocation}`);
-
   throw new Error(
     `Access challenge detected during ${location}. ` +
-    `Indicator: ${challenge.indicator}. ` +
-    'The scraper stopped without attempting to bypass the challenge.'
+    `Indicator: ${challenge.indicator}. The scraper stopped without bypassing it.`
   );
 }
 
@@ -233,7 +315,10 @@ async function waitForResults(page, expectedPage = null) {
         const text = document.body?.innerText || '';
         const match = text.match(/Page\s+(\d+)\s+of\s+(\d+)\s+Pages?/i);
         const hasViews = document.querySelectorAll('[id$="_btnView2"]').length > 0;
-        return hasViews && (expected === null || (match && Number(match[1]) === expected));
+        return hasViews && (
+          expected === null ||
+          (match && Number(match[1]) === expected)
+        );
       },
       expectedPage,
       { timeout: TIMEOUT }
@@ -245,6 +330,7 @@ async function waitForResults(page, expectedPage = null) {
     console.error('VIEW controls:', await getViewButtons(page).count());
     throw error;
   }
+
   await page.waitForTimeout(500);
 }
 
@@ -265,7 +351,7 @@ async function extractSummaryAroundViewButton(button) {
     if (row) {
       parts.push(normalize(row.innerText));
       let sibling = row.nextElementSibling;
-      for (let i = 0; sibling && i < 2; i += 1) {
+      for (let index = 0; sibling && index < 2; index += 1) {
         parts.push(normalize(sibling.innerText));
         if (/click\s+['"]?view['"]?\s+to\s+open/i.test(parts.at(-1))) break;
         sibling = sibling.nextElementSibling;
@@ -306,6 +392,7 @@ async function waitForDetail(page, oldUrl, oldText) {
     { previousUrl: oldUrl, previousText: oldText },
     { timeout: TIMEOUT }
   );
+
   await page.waitForTimeout(500);
 }
 
@@ -330,24 +417,34 @@ async function extractFullNotice(page) {
     const candidates = Array.from(document.querySelectorAll(selectors))
       .map(element => normalize(element.innerText))
       .filter(text => salePattern.test(text) && text.length >= 100)
-      .sort((a, b) => b.length - a.length);
+      .sort((left, right) => right.length - left.length);
 
     let text = candidates[0] || normalize(document.body?.innerText || '');
     const start = text.search(salePattern);
     if (start >= 0) text = text.slice(start);
-    text = text.replace(/\.{3}\s*click\s+['"]?view['"]?\s+to\s+open\s+the\s+full\s+text\.?/gi, '').trim();
+
+    text = text
+      .replace(/\.{3}\s*click\s+['"]?view['"]?\s+to\s+open\s+the\s+full\s+text\.?/gi, '')
+      .trim();
 
     const body = normalize(document.body?.innerText || '');
     const dateMatch = body.match(datePattern);
     let publication = '';
+
     if (dateMatch) {
       publication = body.slice(0, dateMatch.index)
-        .split('\n').map(line => line.trim()).filter(Boolean)
+        .split('\n')
+        .map(line => line.trim())
+        .filter(Boolean)
         .filter(line => !/^(view|back|previous|next|search results)$/i.test(line))
         .at(-1) || '';
     }
 
-    return { publication, publishedDate: dateMatch?.[0] || '', text: normalize(text) };
+    return {
+      publication,
+      publishedDate: dateMatch?.[0] || '',
+      text: normalize(text)
+    };
   });
 
   return {
@@ -367,10 +464,7 @@ async function isExpectedResultsPage(page, expectedPage) {
 }
 
 async function returnToResultsPage(page, resultsUrl, expectedPage) {
-  await courtesyWait(
-    page,
-    `returning to results page ${expectedPage}`
-  );
+  await courtesyWait(page, `returning to results page ${expectedPage}`);
 
   const historyResult = await page.goBack({
     waitUntil: 'domcontentloaded',
@@ -378,39 +472,19 @@ async function returnToResultsPage(page, resultsUrl, expectedPage) {
   }).catch(() => null);
 
   if (historyResult) {
-    await stopIfAccessChallenge(
-      page,
-      `return-to-results-page-${expectedPage}`
-    );
-
+    await stopIfAccessChallenge(page, `return-to-results-page-${expectedPage}`);
     await page.waitForTimeout(500);
-
-    if (await isExpectedResultsPage(page, expectedPage)) {
-      resetCourtesyDelay();
-      return true;
-    }
+    if (await isExpectedResultsPage(page, expectedPage)) return true;
   }
 
-  await courtesyWait(
-    page,
-    `reloading results page ${expectedPage}`
-  );
-
+  await courtesyWait(page, `reloading results page ${expectedPage}`);
   await page.goto(resultsUrl, {
     waitUntil: 'domcontentloaded',
     timeout: TIMEOUT
   });
-
-  await stopIfAccessChallenge(
-    page,
-    `reload-results-page-${expectedPage}`
-  );
-
+  await stopIfAccessChallenge(page, `reload-results-page-${expectedPage}`);
   await page.waitForTimeout(500);
-
-  const returned = await isExpectedResultsPage(page, expectedPage);
-  if (returned) resetCourtesyDelay();
-  return returned;
+  return isExpectedResultsPage(page, expectedPage);
 }
 
 async function extractAllFullNoticesFromCurrentPage(page, currentPage) {
@@ -436,23 +510,15 @@ async function extractAllFullNoticesFromCurrentPage(page, currentPage) {
     const oldUrl = page.url();
     const oldText = cleanText(await page.locator('body').innerText());
     const navigation = page.waitForNavigation({
-      waitUntil: 'domcontentloaded', timeout: 30000
+      waitUntil: 'domcontentloaded',
+      timeout: 30000
     }).catch(() => null);
 
-    await courtesyWait(
-      page,
-      `opening VIEW ${index + 1} on results page ${currentPage}`
-    );
-
+    await courtesyWait(page, `opening VIEW ${index + 1} on results page ${currentPage}`);
     await button.scrollIntoViewIfNeeded();
     await button.click();
     await navigation;
-
-    await stopIfAccessChallenge(
-      page,
-      `page-${currentPage}-view-${index + 1}`
-    );
-
+    await stopIfAccessChallenge(page, `page-${currentPage}-view-${index + 1}`);
     await waitForDetail(page, oldUrl, oldText);
 
     fs.writeFileSync(
@@ -463,26 +529,23 @@ async function extractAllFullNoticesFromCurrentPage(page, currentPage) {
 
     const detail = await extractFullNotice(page);
     const text = detail.text || summary.text;
-    let caseNumber = extractNoticeIdentifier(text) || extractNoticeIdentifier(summary.text);
+    let caseNumber =
+      extractNoticeIdentifier(text) ||
+      extractNoticeIdentifier(summary.text);
 
     const notice = {
       page: currentPage,
-      publication: detail.publication || summary.publication,
-      publishedDate: detail.publishedDate || summary.publishedDate,
+      publication: cleanText(detail.publication || summary.publication),
+      publishedDate: cleanText(detail.publishedDate || summary.publishedDate),
       caseNumber,
       noticeId: caseNumber,
-      trustor: extractTrustor(text),
-      text,
+      trustor: cleanText(extractTrustor(text)),
+      text: cleanText(text),
       detailUrl: page.url()
     };
 
     if (!notice.caseNumber) notice.caseNumber = fallbackIdentifier(notice);
     notice.noticeId = notice.caseNumber;
-
-    notice.publication = cleanText(notice.publication);
-    notice.publishedDate = cleanText(notice.publishedDate);
-    notice.trustor = cleanText(notice.trustor);
-    notice.text = cleanText(notice.text);
 
     notices.push(notice);
     console.log(`Extracted ${notice.caseNumber} (${notice.text.length} characters).`);
@@ -499,11 +562,11 @@ async function extractAllFullNoticesFromCurrentPage(page, currentPage) {
 async function clickAndWaitForPageChange(page, locator, currentPage, expectedPage) {
   const previousUrl = page.url();
   const navigation = page.waitForNavigation({
-    waitUntil: 'domcontentloaded', timeout: 30000
+    waitUntil: 'domcontentloaded',
+    timeout: 30000
   }).catch(() => null);
 
   console.log(`Navigating from page ${currentPage} to ${expectedPage}...`);
-
   await courtesyWait(
     page,
     `navigating from results page ${currentPage} to ${expectedPage}`
@@ -512,11 +575,7 @@ async function clickAndWaitForPageChange(page, locator, currentPage, expectedPag
   await locator.scrollIntoViewIfNeeded();
   await locator.click();
   await navigation;
-
-  await stopIfAccessChallenge(
-    page,
-    `pagination-${currentPage}-to-${expectedPage}`
-  );
+  await stopIfAccessChallenge(page, `pagination-${currentPage}-to-${expectedPage}`);
 
   try {
     await waitForResults(page, expectedPage);
@@ -530,10 +589,7 @@ async function clickAndWaitForPageChange(page, locator, currentPage, expectedPag
 
   const info = await getPageInfo(page);
   const viewCount = await getViewButtons(page).count();
-
   if (!info || info.current !== expectedPage || viewCount === 0) return false;
-
-  resetCourtesyDelay();
 
   console.log(
     `Pagination confirmed: page ${info.current} of ${info.total}; ` +
@@ -557,7 +613,8 @@ async function goToNextPage(page, currentPage, nextPageNumber) {
   }
 
   const exactLinks = page.getByRole('link', {
-    name: String(nextPageNumber), exact: true
+    name: String(nextPageNumber),
+    exact: true
   });
 
   for (let index = 0; index < await exactLinks.count(); index += 1) {
@@ -612,7 +669,6 @@ function writeOutput(notices) {
   try {
     browser = await chromium.launch({
       headless: true,
-      channel: 'chromium',
       args: [
         '--incognito',
         '--disable-dev-shm-usage',
@@ -621,44 +677,28 @@ function writeOutput(notices) {
       ]
     });
 
-    /*
-     * Playwright browser contexts are isolated and non-persistent by
-     * default. Creating a fresh context here provides incognito-style
-     * isolation: no cookies, local storage, cache, or session state is
-     * reused from another run.
-     */
     const context = await browser.newContext({
       viewport: { width: 1440, height: 1000 },
       userAgent:
         'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 ' +
         '(KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
-      storageState: {
-        cookies: [],
-        origins: []
-      }
+      storageState: { cookies: [], origins: [] }
     });
-
-    console.log('Browser launched with a fresh incognito-style context.');
 
     const page = await context.newPage();
     page.setDefaultTimeout(TIMEOUT);
     page.setDefaultNavigationTimeout(TIMEOUT);
 
+    console.log('Browser launched with a fresh incognito-style context.');
     console.log(`Opening: ${START_URL}`);
 
-    await courtesyWait(
-      page,
-      'opening the initial search page'
-    );
-
+    await courtesyWait(page, 'opening the initial search page');
     await page.goto(START_URL, {
       waitUntil: 'domcontentloaded',
       timeout: TIMEOUT
     });
-
     await stopIfAccessChallenge(page, 'initial-navigation');
     await waitForResults(page);
-    resetCourtesyDelay();
 
     fs.writeFileSync('page.html', await page.content(), 'utf8');
     await page.screenshot({ path: 'page.png', fullPage: true });
@@ -679,8 +719,14 @@ function writeOutput(notices) {
       const totalPages = info.total;
       console.log(`Processing results page ${currentPage} of ${totalPages}...`);
 
-      const pageNotices = await extractAllFullNoticesFromCurrentPage(page, currentPage);
-      console.log(`Extracted ${pageNotices.length} full notice(s) from page ${currentPage}.`);
+      const pageNotices = await extractAllFullNoticesFromCurrentPage(
+        page,
+        currentPage
+      );
+
+      console.log(
+        `Extracted ${pageNotices.length} full notice(s) from page ${currentPage}.`
+      );
 
       if (pageNotices.length === 0) {
         await saveDebug(page, `failed-page-${currentPage}`);
@@ -695,13 +741,17 @@ function writeOutput(notices) {
       }
 
       writeOutput(notices);
-      console.log(`Checkpoint saved after page ${currentPage}: ${notices.length} notice(s).`);
+      console.log(
+        `Checkpoint saved after page ${currentPage}: ${notices.length} notice(s).`
+      );
 
       if (currentPage >= totalPages) break;
 
       if (!await goToNextPage(page, currentPage, currentPage + 1)) {
         await saveDebug(page, `pagination-failed-${currentPage}`);
-        throw new Error(`Could not move from page ${currentPage} to ${currentPage + 1}.`);
+        throw new Error(
+          `Could not move from page ${currentPage} to ${currentPage + 1}.`
+        );
       }
     }
 
@@ -709,9 +759,7 @@ function writeOutput(notices) {
     await page.screenshot({ path: 'final-page.png', fullPage: true });
     console.log(`Finished. Extracted ${notices.length} unique full notice(s).`);
   } finally {
-    if (browser) {
-      await browser.close();
-    }
+    if (browser) await browser.close();
   }
 })().catch(error => {
   console.error('Scraper failed:', error);
