@@ -2,8 +2,7 @@ const fs = require('fs');
 const { chromium } = require('playwright');
 
 const START_URL = process.env.START_URL ||
-  'https://www.publicnoticeoregon.com/(S(lps2vkd2pk5xopff0o1dvpzj))/Search.aspx';
-
+  'https://www.publicnoticeoregon.com/Search.aspx#searchResults';
 const OUTPUT_JSON = 'notices.json';
 const OUTPUT_TEXT = 'notices.txt';
 const TIMEOUT = 120000;
@@ -76,26 +75,14 @@ function extractTrustor(text = '') {
 function fallbackIdentifier(notice) {
   const source = [notice.publication, notice.publishedDate, notice.text].join('|');
   let hash = 2166136261;
-
   for (let index = 0; index < source.length; index += 1) {
     hash ^= source.charCodeAt(index);
     hash = Math.imul(hash, 16777619);
   }
-
   return `NOTICE-${(hash >>> 0).toString(16).toUpperCase().padStart(8, '0')}`;
 }
 
-/*
- * Fibonacci courtesy-pacing system.
- *
- * Every returned delay is unique for the complete browser session. The used
- * delay history is never automatically cleared. When a shuffled pool is
- * exhausted, the next generation expands the range and applies a generation
- * offset. Cooldown durations also receive unique offsets.
- *
- * This is for courteous rate limiting. It does not bypass CAPTCHA or access
- * controls. Challenge pages are saved and the run stops for manual review.
- */
+/* Courtesy pacing. No exact delay repeats during one browser session. */
 let fibDelayPool = null;
 const usedFibDelays = new Set();
 let requestCounter = 0;
@@ -112,13 +99,11 @@ function shuffleArray(values) {
 
 function generateFibonacci(maximum, scale = 1000, minimum = 0) {
   const fibonacci = [1, 2];
-
   while (true) {
     const next = fibonacci.at(-1) + fibonacci.at(-2);
     if (next * scale > maximum) break;
     fibonacci.push(next);
   }
-
   return [...new Set(
     fibonacci
       .map(number => number * scale)
@@ -126,51 +111,42 @@ function generateFibonacci(maximum, scale = 1000, minimum = 0) {
   )];
 }
 
-function getFibonacciConfiguration() {
-  const settings = config.requestOptions?.fibDelays || {};
-  const maximum = Number(settings.max) || 34000;
-  const scale = Number(settings.scale) || 1000;
-  const minimum = Number(settings.minimum) || 2000;
-  const effectiveMaximum = config.fastMode
-    ? Math.max(minimum, Math.floor(maximum * 0.1))
-    : maximum;
-
-  return { maximum, effectiveMaximum, scale, minimum };
-}
-
 function initFibDelayPool() {
-  const { effectiveMaximum, scale, minimum } = getFibonacciConfiguration();
-  const expansion = fibPoolGeneration * Math.max(scale * 2, 1000);
+  const settings = config.requestOptions.fibDelays;
+  const effectiveMaximum = config.fastMode
+    ? Math.max(settings.minimum, Math.floor(settings.max * 0.1))
+    : settings.max;
+  const expansion = fibPoolGeneration * Math.max(settings.scale * 2, 1000);
   const generationMaximum = effectiveMaximum + expansion;
   const generationOffset = fibPoolGeneration * 101;
 
-  fibDelayPool = generateFibonacci(generationMaximum, scale, minimum)
+  fibDelayPool = generateFibonacci(
+    generationMaximum,
+    settings.scale,
+    settings.minimum
+  )
     .map(delay => delay + generationOffset)
     .filter(delay => !usedFibDelays.has(delay));
 
   if (fibDelayPool.length === 0) {
-    const fallbackBase = Math.max(generationMaximum, minimum);
+    const base = Math.max(generationMaximum, settings.minimum);
     fibDelayPool = Array.from(
       { length: 20 },
-      (_, index) => fallbackBase + generationOffset + index + 1
+      (_, index) => base + generationOffset + index + 1
     ).filter(delay => !usedFibDelays.has(delay));
   }
 
   shuffleArray(fibDelayPool);
-
   console.log(
     `Fibonacci pool initialized: generation=${fibPoolGeneration}, ` +
-    `max=${generationMaximum}ms, scale=${scale}, ` +
+    `max=${generationMaximum}ms, scale=${settings.scale}, ` +
     `fastMode=${config.fastMode}, available=${fibDelayPool.length}`
   );
-
   fibPoolGeneration += 1;
 }
 
 function getUniqueFibDelay() {
-  while (!fibDelayPool || fibDelayPool.length === 0) {
-    initFibDelayPool();
-  }
+  while (!fibDelayPool || fibDelayPool.length === 0) initFibDelayPool();
 
   while (fibDelayPool.length > 0) {
     const delay = fibDelayPool.pop();
@@ -186,23 +162,19 @@ function getUniqueFibDelay() {
 }
 
 function getUniqueCooldownDelay() {
-  const configured = Number(config.requestOptions?.cooldownMs) || 30000;
-  let candidate = configured + requestCounter;
-
-  while (usedFibDelays.has(candidate) || candidate === previousDelay) {
-    candidate += 1;
-  }
-
-  usedFibDelays.add(candidate);
-  previousDelay = candidate;
-  return candidate;
+  let delay = config.requestOptions.cooldownMs + requestCounter;
+  while (usedFibDelays.has(delay) || delay === previousDelay) delay += 1;
+  usedFibDelays.add(delay);
+  previousDelay = delay;
+  return delay;
 }
 
 function getDelay() {
-  const cooldownEvery = Number(config.requestOptions?.cooldownEvery) || 10;
   requestCounter += 1;
-
-  if (cooldownEvery > 0 && requestCounter % cooldownEvery === 0) {
+  if (
+    config.requestOptions.cooldownEvery > 0 &&
+    requestCounter % config.requestOptions.cooldownEvery === 0
+  ) {
     const delay = getUniqueCooldownDelay();
     console.log(`Cooldown triggered: ${delay}ms`);
     return delay;
@@ -213,7 +185,7 @@ function getDelay() {
   return delay;
 }
 
-async function courtesyWait(page, reason = 'the next navigation') {
+async function courtesyWait(page, reason) {
   const delay = getDelay();
   console.log(
     `[pacing request ${requestCounter}] Waiting ` +
@@ -225,68 +197,6 @@ async function courtesyWait(page, reason = 'the next navigation') {
 function increaseCourtesyDelay() {
   fibDelayPool = null;
   fibPoolGeneration += 1;
-  console.log('Transient failure detected; next wait uses a later pool.');
-}
-
-function resetCourtesyDelay() {
-  // Intentionally retained for compatibility. Run-wide history is not reset.
-}
-
-function resetFibDelayPool() {
-  fibDelayPool = null;
-  usedFibDelays.clear();
-  requestCounter = 0;
-  fibPoolGeneration = 0;
-  previousDelay = null;
-}
-
-async function detectAccessChallenge(page) {
-  return page.evaluate(() => {
-    const combined = `${document.title || ''}\n${document.body?.innerText || ''}`;
-    const indicators = [
-      /\bcaptcha\b/i,
-      /verify you are human/i,
-      /human verification/i,
-      /security check/i,
-      /unusual traffic/i,
-      /automated requests/i,
-      /temporarily blocked/i,
-      /too many requests/i,
-      /rate limit/i,
-      /access denied/i
-    ];
-
-    const matched = indicators.find(pattern => pattern.test(combined));
-    const captchaElement = document.querySelector([
-      'iframe[src*="captcha" i]',
-      'iframe[title*="captcha" i]',
-      '[class*="captcha" i]',
-      '[id*="captcha" i]',
-      'textarea[name="g-recaptcha-response"]',
-      '[data-sitekey]'
-    ].join(', '));
-
-    return {
-      detected: Boolean(matched || captchaElement),
-      indicator: matched?.source || (captchaElement ? 'captcha DOM element' : '')
-    };
-  });
-}
-
-async function stopIfAccessChallenge(page, location) {
-  const challenge = await detectAccessChallenge(page);
-  if (!challenge.detected) return;
-
-  const safeLocation = String(location || 'unknown')
-    .replace(/[^a-z0-9_-]+/gi, '-')
-    .replace(/^-+|-+$/g, '')
-    .toLowerCase();
-
-  await saveDebug(page, `challenge-${safeLocation}`);
-  throw new Error(
-    `Access challenge detected during ${location}. ` +
-    `Indicator: ${challenge.indicator}. The scraper stopped without bypassing it.`
-  );
 }
 
 function getViewButtons(page) {
@@ -297,15 +207,122 @@ function getViewButtons(page) {
   ].join(', '));
 }
 
+async function saveDebug(page, baseName) {
+  fs.writeFileSync(`${baseName}.html`, await page.content(), 'utf8');
+  await page.screenshot({ path: `${baseName}.png`, fullPage: true });
+}
+
+async function detectAccessChallenge(page) {
+  return page.evaluate(() => {
+    const bodyText = document.body?.innerText || '';
+    const title = document.title || '';
+    const combinedText = `${title}\n${bodyText}`;
+    const challengePatterns = [
+      /\bcaptcha\b/i,
+      /verify you are human/i,
+      /human verification/i,
+      /security check/i,
+      /unusual traffic/i,
+      /automated requests/i,
+      /temporarily blocked/i,
+      /too many requests/i,
+      /rate limit exceeded/i,
+      /access denied/i
+    ];
+
+    const matchedTextPattern = challengePatterns.find(pattern =>
+      pattern.test(combinedText)
+    );
+
+    const isVisible = element => {
+      if (!element) return false;
+      const style = window.getComputedStyle(element);
+      const rectangle = element.getBoundingClientRect();
+      return (
+        style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        Number(style.opacity) !== 0 &&
+        rectangle.width > 0 &&
+        rectangle.height > 0
+      );
+    };
+
+    const captchaSelectors = [
+      'iframe[src*="captcha" i]',
+      'iframe[title*="captcha" i]',
+      '[class*="captcha" i]',
+      '[id*="captcha" i]',
+      '[data-sitekey]'
+    ];
+
+    const visibleCaptchaElement = captchaSelectors
+      .flatMap(selector => Array.from(document.querySelectorAll(selector)))
+      .find(isVisible);
+
+    const hasNoticeDetail =
+      /Public Notice Detail/i.test(bodyText) ||
+      /(?:TRUSTEE(?:'S)?\s+)?NOTICE OF SALE/i.test(bodyText);
+    const hasSearchResults =
+      document.querySelectorAll('[id$="_btnView2"]').length > 0;
+    const hasVisibleChallenge = Boolean(
+      matchedTextPattern || visibleCaptchaElement
+    );
+
+    return {
+      detected: hasVisibleChallenge && !hasNoticeDetail && !hasSearchResults,
+      indicator:
+        matchedTextPattern?.source ||
+        (visibleCaptchaElement
+          ? visibleCaptchaElement.id ||
+            visibleCaptchaElement.className ||
+            visibleCaptchaElement.tagName
+          : ''),
+      matchedVisibleText: Boolean(matchedTextPattern),
+      visibleCaptchaElement: Boolean(visibleCaptchaElement),
+      hasNoticeDetail,
+      hasSearchResults,
+      title,
+      url: window.location.href
+    };
+  });
+}
+
+async function stopIfAccessChallenge(page, location) {
+  const challenge = await detectAccessChallenge(page);
+
+  if (!challenge.detected) {
+    if (challenge.visibleCaptchaElement || challenge.matchedVisibleText) {
+      console.log(
+        '[challenge-check] Challenge-related markup found, but expected ' +
+        'notice/results content is present. Continuing.'
+      );
+    }
+    return;
+  }
+
+  const safeLocation = String(location || 'unknown')
+    .replace(/[^a-z0-9_-]+/gi, '-')
+    .replace(/^-+|-+$/g, '')
+    .toLowerCase();
+
+  await saveDebug(page, `challenge-${safeLocation}`);
+  fs.writeFileSync(
+    `challenge-${safeLocation}.json`,
+    JSON.stringify(challenge, null, 2),
+    'utf8'
+  );
+
+  throw new Error(
+    `Visible access challenge detected during ${location}. ` +
+    `Indicator: ${challenge.indicator || 'unknown'}. ` +
+    'The scraper stopped without attempting to bypass it.'
+  );
+}
+
 async function getPageInfo(page) {
   const text = await page.locator('body').innerText();
   const match = text.match(/Page\s+(\d+)\s+of\s+(\d+)\s+Pages?/i);
   return match ? { current: Number(match[1]), total: Number(match[2]) } : null;
-}
-
-async function saveDebug(page, baseName) {
-  fs.writeFileSync(`${baseName}.html`, await page.content(), 'utf8');
-  await page.screenshot({ path: `${baseName}.png`, fullPage: true });
 }
 
 async function waitForResults(page, expectedPage = null) {
@@ -392,7 +409,6 @@ async function waitForDetail(page, oldUrl, oldText) {
     { previousUrl: oldUrl, previousText: oldText },
     { timeout: TIMEOUT }
   );
-
   await page.waitForTimeout(500);
 }
 
@@ -422,7 +438,6 @@ async function extractFullNotice(page) {
     let text = candidates[0] || normalize(document.body?.innerText || '');
     const start = text.search(salePattern);
     if (start >= 0) text = text.slice(start);
-
     text = text
       .replace(/\.{3}\s*click\s+['"]?view['"]?\s+to\s+open\s+the\s+full\s+text\.?/gi, '')
       .trim();
@@ -487,8 +502,13 @@ async function returnToResultsPage(page, resultsUrl, expectedPage) {
   return isExpectedResultsPage(page, expectedPage);
 }
 
-async function extractAllFullNoticesFromCurrentPage(page, currentPage) {
-  const notices = [];
+async function extractAllFullNoticesFromCurrentPage(
+  page,
+  currentPage,
+  allNotices,
+  seen
+) {
+  const pageNotices = [];
   const resultsUrl = page.url();
   let buttons = getViewButtons(page);
   const count = await buttons.count();
@@ -546,9 +566,21 @@ async function extractAllFullNoticesFromCurrentPage(page, currentPage) {
 
     if (!notice.caseNumber) notice.caseNumber = fallbackIdentifier(notice);
     notice.noticeId = notice.caseNumber;
+    pageNotices.push(notice);
 
-    notices.push(notice);
-    console.log(`Extracted ${notice.caseNumber} (${notice.text.length} characters).`);
+    const checkpointKey =
+      notice.caseNumber || notice.noticeId || notice.detailUrl || notice.text;
+
+    if (!seen.has(checkpointKey)) {
+      seen.add(checkpointKey);
+      allNotices.push(notice);
+    }
+
+    writeOutput(allNotices);
+    console.log(
+      `Extracted ${notice.caseNumber} (${notice.text.length} characters). ` +
+      `Notice checkpoint saved: ${allNotices.length} unique notice(s).`
+    );
 
     if (!await returnToResultsPage(page, resultsUrl, currentPage)) {
       await saveDebug(page, `return-failed-page-${currentPage}-view-${index + 1}`);
@@ -556,7 +588,7 @@ async function extractAllFullNoticesFromCurrentPage(page, currentPage) {
     }
   }
 
-  return notices;
+  return pageNotices;
 }
 
 async function clickAndWaitForPageChange(page, locator, currentPage, expectedPage) {
@@ -721,7 +753,9 @@ function writeOutput(notices) {
 
       const pageNotices = await extractAllFullNoticesFromCurrentPage(
         page,
-        currentPage
+        currentPage,
+        notices,
+        seen
       );
 
       console.log(
@@ -733,16 +767,10 @@ function writeOutput(notices) {
         throw new Error(`No notices extracted from page ${currentPage}.`);
       }
 
-      for (const notice of pageNotices) {
-        const key = notice.caseNumber || notice.detailUrl || notice.text;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        notices.push(notice);
-      }
-
       writeOutput(notices);
       console.log(
-        `Checkpoint saved after page ${currentPage}: ${notices.length} notice(s).`
+        `Page checkpoint saved after page ${currentPage}: ` +
+        `${notices.length} unique notice(s).`
       );
 
       if (currentPage >= totalPages) break;
