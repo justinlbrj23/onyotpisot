@@ -3,6 +3,12 @@ name: Oregon Public Notice PDF Processor
 on:
   workflow_dispatch:
     inputs:
+      start_row:
+        description: "Row number to start processing from"
+        required: true
+        default: "2"
+        type: string
+
       overwrite_existing:
         description: "Overwrite existing values in columns E:G"
         required: false
@@ -24,7 +30,7 @@ jobs:
     env:
       SHEET_ID: "1iXOEgk_jYxeykjXafgCSc80KkAn-Jp2jl27ZS7FqGdg"
       WORKSHEET_NAME: "Notice of LP"
-      START_ROW: "2"
+      START_ROW: ${{ inputs.start_row }}
       PDF_TIMEOUT_MS: "120000"
       REQUEST_DELAY_MS: "1500"
       MAX_RETRIES: "3"
@@ -46,6 +52,26 @@ jobs:
         with:
           node-version: "24"
           package-manager-cache: false
+
+      # ==========================================
+      # VALIDATE WORKFLOW INPUTS
+      # ==========================================
+      - name: Validate Start Row
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! [[ "$START_ROW" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: Start row must be a whole number. Received: $START_ROW"
+            exit 1
+          fi
+
+          if [ "$START_ROW" -lt 2 ]; then
+            echo "ERROR: Start row must be 2 or greater. Received: $START_ROW"
+            exit 1
+          fi
+
+          echo "Processing will begin at worksheet row $START_ROW."
 
       # ==========================================
       # INSTALL NODE DEPENDENCIES
@@ -106,7 +132,10 @@ jobs:
           const fs = require('fs');
 
           const file = 'service-account.json';
-          const credentials = JSON.parse(fs.readFileSync(file, 'utf8'));
+          const credentials = JSON.parse(
+            fs.readFileSync(file, 'utf8')
+          );
+
           const required = [
             'type',
             'project_id',
@@ -115,7 +144,9 @@ jobs:
             'token_uri'
           ];
 
-          const missing = required.filter(key => !credentials[key]);
+          const missing = required.filter(
+            key => !credentials[key]
+          );
 
           if (missing.length > 0) {
             throw new Error(
@@ -124,7 +155,9 @@ jobs:
           }
 
           if (credentials.type !== 'service_account') {
-            throw new Error('Credential type must be service_account.');
+            throw new Error(
+              'Credential type must be service_account.'
+            );
           }
 
           console.log('====================================');
@@ -137,15 +170,25 @@ jobs:
       # ==========================================
       # RUN PDF PROCESSOR
       #
-      # D2:D = source PDF URL
-      # E2:E = Case / Instrument Number
-      # F2:F = Defendant / Grantor
-      # G2:G = Subject Property
+      # Column D = source PDF URL
+      # Column E = Case / Instrument Number
+      # Column F = Defendant / Grantor
+      # Column G = Subject Property
+      #
+      # Processing begins at the row supplied through
+      # the workflow_dispatch start_row input.
       # ==========================================
       - name: Process PDF Notices
         shell: bash
         run: |
           set -euo pipefail
+
+          echo "Worksheet: $WORKSHEET_NAME"
+          echo "Starting row: $START_ROW"
+          echo "Source range: D${START_ROW}:D"
+          echo "Output range: E${START_ROW}:G"
+          echo "Overwrite existing: $OVERWRITE_EXISTING"
+
           node scraper.cjs
 
       # ==========================================
@@ -173,7 +216,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pdf-processing-results
+          name: pdf-processing-results-row-${{ inputs.start_row }}
           path: |
             pdf-extraction-results.json
             pdf-extraction-failures.json
