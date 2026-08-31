@@ -138,10 +138,6 @@ function extractDefendant(text = '') {
 
     let defendant = match[1];
 
-    /*
-     * Some notices place an address clause between the person's name and
-     * the later "as Grantor" wording. Stop before that address clause.
-     */
     defendant = defendant
       .split(/\s*,?\s*whose\s+address\s+is\b/i)[0]
       .split(/\s*,?\s*with\s+an?\s+address\s+(?:at|of)\b/i)[0]
@@ -157,7 +153,6 @@ function extractDefendant(text = '') {
     }
   }
 
-  /* Fallback for: made by Kelley A. Swensen, whose address is ... */
   const addressFallback = normalized.match(
     /\bmade\s+by\s*,?\s*(.+?)\s*,?\s*whose\s+address\s+is\b/i
   );
@@ -200,11 +195,87 @@ function extractSubjectProperty(text = '') {
   return '';
 }
 
+function extractDatePublished(text = '') {
+  const normalized = flattenText(text);
+
+  /*
+   * Capture the publication-date list after "Published" through its
+   * four-digit year, then stop before the sentence-ending period.
+   * Internal periods in abbreviated months, such as "Aug.", are preserved.
+   *
+   * Example:
+   * Published Aug. 7, 14, 21 & 28, 2026.
+   * Result: Aug. 7, 14, 21 & 28, 2026
+   */
+  const month =
+    '(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|' +
+    'May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|' +
+    'Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\\.?';
+
+  const patterns = [
+    new RegExp(
+      `\\bPublished\\s*:?\\s*(${month}\\s+.+?\\b\\d{4})(?=\\s*\\.)`,
+      'i'
+    ),
+    /\bPublished\s*:\s*(.+?\b\d{4})(?=\s*\.)/i,
+    /\bPublished\s+(.+?\b\d{4})(?=\s*\.)/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+
+    if (match?.[1]) {
+      return cleanText(match[1])
+        .replace(/^[,;:\-\s]+|[,;:\-\s.]+$/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+  }
+
+  return '';
+}
+
+function extractAuctionDate(text = '') {
+  const normalized = flattenText(text);
+
+  /*
+   * Capture the calendar date between "will on" and "at the hour".
+   * Requiring a named month prevents unrelated uses of "on" from matching.
+   *
+   * Example:
+   * will on November 2, 2026 at the hour
+   * Result: November 2, 2026
+   */
+  const patterns = [
+    /\bwill\s+on\s+((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4})\s+at\s+the\s+hour\b/i,
+    /\bwill\s+on\s+(.+?)\s+at\s+the\s+hour\b/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+
+    if (match?.[1]) {
+      const date = cleanText(match[1])
+        .replace(/^[,;:\-\s]+|[,;:\-\s.]+$/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      if (date.length <= 80) {
+        return date;
+      }
+    }
+  }
+
+  return '';
+}
+
 function extractTargets(text = '') {
   return {
     caseOrInstrumentNumber: extractCaseOrInstrumentNumber(text),
     defendant: extractDefendant(text),
-    subjectProperty: extractSubjectProperty(text)
+    subjectProperty: extractSubjectProperty(text),
+    datePublished: extractDatePublished(text),
+    auctionDate: extractAuctionDate(text)
   };
 }
 
@@ -309,7 +380,7 @@ async function readSheetRows(sheets) {
   const sheet = escapeSheetName(WORKSHEET_NAME);
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
-    range: `${sheet}!D${START_ROW}:G`
+    range: `${sheet}!D${START_ROW}:I`
   });
 
   return response.data.values || [];
@@ -318,15 +389,25 @@ async function readSheetRows(sheets) {
 async function writeExtractedTargets(sheets, rowNumber, targets) {
   const sheet = escapeSheetName(WORKSHEET_NAME);
 
+  /*
+   * Write all five target values in one request:
+   * E = Case / Instrument Number
+   * F = Defendant / Grantor
+   * G = Subject Property
+   * H = Date Published
+   * I = Auction Date
+   */
   await sheets.spreadsheets.values.update({
     spreadsheetId: SHEET_ID,
-    range: `${sheet}!E${rowNumber}:G${rowNumber}`,
+    range: `${sheet}!E${rowNumber}:I${rowNumber}`,
     valueInputOption: 'RAW',
     requestBody: {
       values: [[
         targets.caseOrInstrumentNumber,
         targets.defendant,
-        targets.subjectProperty
+        targets.subjectProperty,
+        targets.datePublished,
+        targets.auctionDate
       ]]
     }
   });
@@ -340,7 +421,7 @@ async function processRows() {
 
   console.log(
     `Loaded ${rows.length} row(s) from ` +
-    `${WORKSHEET_NAME}!D${START_ROW}:G.`
+    `${WORKSHEET_NAME}!D${START_ROW}:I.`
   );
 
   for (let index = 0; index < rows.length; index += 1) {
@@ -350,6 +431,8 @@ async function processRows() {
     const existingE = row[1] || '';
     const existingF = row[2] || '';
     const existingG = row[3] || '';
+    const existingH = row[4] || '';
+    const existingI = row[5] || '';
 
     if (!String(urlValue).trim()) {
       console.log(`Row ${rowNumber}: column D is blank; skipping.`);
@@ -360,9 +443,11 @@ async function processRows() {
       !OVERWRITE_EXISTING &&
       String(existingE).trim() &&
       String(existingF).trim() &&
-      String(existingG).trim()
+      String(existingG).trim() &&
+      String(existingH).trim() &&
+      String(existingI).trim()
     ) {
-      console.log(`Row ${rowNumber}: E:G already populated; skipping.`);
+      console.log(`Row ${rowNumber}: E:I already populated; skipping.`);
       continue;
     }
 
@@ -391,10 +476,12 @@ async function processRows() {
       results.push(record);
 
       console.log(
-        `Row ${rowNumber}: wrote E:G -> ` +
+        `Row ${rowNumber}: wrote E:I -> ` +
         `${targets.caseOrInstrumentNumber || '[blank]'} | ` +
         `${targets.defendant || '[blank]'} | ` +
-        `${targets.subjectProperty || '[blank]'}`
+        `${targets.subjectProperty || '[blank]'} | ` +
+        `${targets.datePublished || '[blank]'} | ` +
+        `${targets.auctionDate || '[blank]'}`
       );
 
       fs.writeFileSync(OUTPUT_JSON, JSON.stringify(results, null, 2), 'utf8');
