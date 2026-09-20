@@ -6,7 +6,7 @@ const { google } = require("googleapis");
 // -------------------------
 // CONFIg
 // -------------------------
-const SPREADSHEET_ID = "1CsLXhlNp9pP9dAVBpGFvEnw1PpuUvLfypFg56RrgjxA";
+const SPREADSHEET_ID = "1DvpL59xxVVihpRVhxKUomCpugHLPeokvjKVWKMPAcnw";
 const SHEET_NAME = "raw_main";
 const SERVICE_ACCOUNT_FILE = "./service-account.json";
 
