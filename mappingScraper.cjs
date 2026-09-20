@@ -2,6 +2,7 @@
 // Maps all parsed-auction rows to raw_main.
 // Rules:
 // - Do not filter rows by auction status, sale price, or surplus.
+// - Exclude rows when opening/minimum bid is blank, null, nonnumeric, or <= 0.
 // - Use only raw.surplus from webInspector when surplus is available.
 // - Do not calculate surplus from assessed value or alternate fields.
 // - Preview, upcoming, sold, and incomplete rows are all eligible for append.
@@ -236,11 +237,16 @@ function resolveGeo(raw, urlMapping) {
   return geo;
 }
 
+function hasValidOpeningBid(raw) {
+  const openingBid = parseCurrency(raw?.openingBid);
+  return openingBid !== null && openingBid > 0;
+}
+
 function mapRow(raw, urlMapping, anomalies) {
   if (!raw) return null;
 
-  // Keep every parsed row. Case number, parcel number, sale price,
-  // status, and surplus are not required for mapping.
+  // Rows reaching this function already passed the opening-bid filter.
+  // Case number, parcel number, sale price, status, and surplus are optional.
   const mapped = Object.fromEntries(HEADERS.map(header => [header, '']));
   const geo = resolveGeo(raw, urlMapping);
   const finalized = isFinalizedRow(raw);
@@ -420,8 +426,34 @@ function loadInputRows(filename) {
     const unique = new Map();
     let invalidInputCount = 0;
 
+    let openingBidFilteredCount = 0;
+
     for (const original of rawData) {
+      if (!original || typeof original !== 'object' || Array.isArray(original)) {
+        invalidInputCount += 1;
+        continue;
+      }
+
       const raw = { ...original, caseNumber: cleanCaseNumber(original.caseNumber) };
+
+      // The only eligibility filter: opening/minimum bid must be numeric and > 0.
+      if (!hasValidOpeningBid(raw)) {
+        openingBidFilteredCount += 1;
+        anomalies.push({
+          type: 'ExcludedInvalidOpeningBid',
+          message: 'Row excluded because opening/minimum bid is blank, null, nonnumeric, or <= 0.',
+          openingBid: raw.openingBid ?? null,
+          parcelId: raw.parcelId || '',
+          caseNumber: raw.caseNumber || '',
+          sourceUrl: extractPlainUrl(raw.sourceUrl || ''),
+        });
+        console.log(
+          `Skipping Case Number ${raw.caseNumber || '(blank)'}: invalid opening/minimum bid ` +
+          `(${raw.openingBid ?? 'null'}).`
+        );
+        continue;
+      }
+
       const mapped = mapRow(raw, urlMapping, anomalies);
 
       if (!mapped) {
@@ -443,6 +475,7 @@ function loadInputRows(filename) {
 
     const mappedRows = [...unique.values()];
     console.log(`Skipped ${invalidInputCount} invalid non-object row(s).`);
+    console.log(`Filtered out ${openingBidFilteredCount} row(s) with blank, null, nonnumeric, or zero opening bid.`);
     console.log(`Produced ${mappedRows.length} mapped row(s).`);
 
     fs.writeFileSync(OUTPUT_FILE, JSON.stringify(mappedRows, null, 2));
