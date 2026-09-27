@@ -1,5 +1,6 @@
 // inspectWebpage.cjs
-// RealForeclose auction inspector, parser, evaluator, and validator
+//
+// RealForeclose auction inspector, parser, evaluator, and validator.
 //
 // Required packages:
 // npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis
@@ -11,7 +12,13 @@
 // web_tda!C2:C
 //
 // Important:
-// Share the Google Sheet with the service account email address.
+// Share the source Google Sheet with the service account email address.
+//
+// Output files:
+// raw-elements.json
+// parsed-auctions.json
+// errors.json
+// summary.json
 
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
@@ -45,14 +52,19 @@ const PAGE_LOAD_TIMEOUT = 120000;
 const ELEMENT_WAIT_TIMEOUT = 60000;
 const PAGE_CHANGE_TIMEOUT = 30000;
 
-// Filters
+// Exclude rows where opening/minimum bid is:
+// - blank
+// - invalid
+// - zero
+// - negative
 const EXCLUDE_ZERO_OR_MISSING_OPENING_BID = true;
 
-// Set this to true only if you want to exclude records under $25,000.
-// By default, records are retained and marked Yes or No.
+// When false, rows below $25,000 remain in parsed-auctions.json.
+// They are only marked Yes or No.
+//
+// When true, only rows with saleSurplus >= MIN_SURPLUS remain.
 const FILTER_BY_MINIMUM_SURPLUS = false;
 
-// Browser settings
 const VIEWPORT = {
   width: 1366,
   height: 768,
@@ -95,7 +107,11 @@ function normalizeAmpersands(value) {
 function isValidHttpUrl(value) {
   try {
     const parsed = new URL(normalizeAmpersands(value));
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+
+    return (
+      parsed.protocol === 'http:' ||
+      parsed.protocol === 'https:'
+    );
   } catch {
     return false;
   }
@@ -112,7 +128,7 @@ async function loadTargetUrls() {
     .map(value => normalizeAmpersands(value))
     .filter(isValidHttpUrl);
 
-  // Remove duplicate URLs from the Google Sheet.
+  // Remove duplicate source URLs.
   return [...new Set(urls)];
 }
 
@@ -142,22 +158,32 @@ function parseCurrency(value) {
     return null;
   }
 
-  const cleaned = text
-    .replace(/\(([^)]+)\)/g, '-$1')
-    .replace(/[^0-9.-]/g, '');
+  // Convert accounting format:
+  // ($1,250.00) -> -1250.00
+  const normalized = text.replace(
+    /\(([^)]+)\)/g,
+    '-$1'
+  );
+
+  const numericText = normalized.replace(
+    /[^0-9.-]/g,
+    ''
+  );
 
   if (
-    !cleaned ||
-    cleaned === '-' ||
-    cleaned === '.' ||
-    cleaned === '-.'
+    !numericText ||
+    numericText === '-' ||
+    numericText === '.' ||
+    numericText === '-.'
   ) {
     return null;
   }
 
-  const parsed = Number.parseFloat(cleaned);
+  const parsed = Number.parseFloat(numericText);
 
-  return Number.isFinite(parsed) ? parsed : null;
+  return Number.isFinite(parsed)
+    ? parsed
+    : null;
 }
 
 function escapeRegex(value) {
@@ -175,10 +201,10 @@ function normalizeLabel(value) {
     .trim();
 }
 
-function isPlaceholderValue(value) {
+function hasMeaningfulValue(value) {
   const normalized = normalizeLabel(value);
 
-  return new Set([
+  return !new Set([
     '',
     'n/a',
     'na',
@@ -192,7 +218,7 @@ function isPlaceholderValue(value) {
 }
 
 // ============================================================
-// FIELD EXTRACTION
+// STRUCTURED FIELD EXTRACTION
 // ============================================================
 
 function getByLabel($, $context, labels) {
@@ -259,6 +285,10 @@ function getByLabel($, $context, labels) {
   return result;
 }
 
+// ============================================================
+// TEXT FALLBACK EXTRACTION
+// ============================================================
+
 function extractTextField(
   blockText,
   labels,
@@ -297,16 +327,21 @@ function extractTextField(
 
 function extractCurrencyField(blockText, labels) {
   for (const label of labels) {
-    const escaped = escapeRegex(label);
+    const escapedLabel = escapeRegex(label);
 
     const pattern = new RegExp(
-      `${escaped}\\s*#?\\s*:?\\s*(\\(?\\s*\\$?\\s*-?[0-9][0-9,]*(?:\\.[0-9]{1,2})?\\s*\\)?)`,
+      `${escapedLabel}\\s*#?\\s*:?\\s*` +
+      `(\\(?\\s*\\$?\\s*-?[0-9][0-9,]*` +
+      `(?:\\.[0-9]{1,2})?\\s*\\)?)`,
       'i'
     );
 
     const match = blockText.match(pattern);
 
-    if (match && parseCurrency(match[1]) !== null) {
+    if (
+      match &&
+      parseCurrency(match[1]) !== null
+    ) {
       return clean(match[1]);
     }
   }
@@ -352,23 +387,36 @@ function isRealCaseNumber(value) {
     return false;
   }
 
-  return !new Set([
+  const invalidValues = new Set([
     'case',
     'case number',
     'case #',
     'cause number',
     'n/a',
     'none',
+    'null',
     'unknown',
     '-',
-  ]).has(normalized);
+    '--',
+  ]);
+
+  return !invalidValues.has(normalized);
 }
+
+// ============================================================
+// AUCTION DATE EXTRACTION
+// ============================================================
 
 function extractAuctionDateFromUrl(url) {
   try {
-    const parsed = new URL(normalizeAmpersands(url));
+    const parsed = new URL(
+      normalizeAmpersands(url)
+    );
 
-    for (const [key, value] of parsed.searchParams.entries()) {
+    for (
+      const [key, value]
+      of parsed.searchParams.entries()
+    ) {
       const normalizedKey = key
         .replace(/[^a-z]/gi, '')
         .toLowerCase();
@@ -404,6 +452,10 @@ function extractAuctionDateFromText(blockText) {
   return '';
 }
 
+// ============================================================
+// ADDRESS PROCESSING
+// ============================================================
+
 function splitAddressAndCityZip(value) {
   let propertyAddress = clean(value);
   let cityStateZip = '';
@@ -433,7 +485,8 @@ function splitAddressAndCityZip(value) {
 // ============================================================
 
 function detectBlockedPage(html, statusCode) {
-  const lower = String(html || '').toLowerCase();
+  const lower = String(html || '')
+    .toLowerCase();
 
   if (statusCode === 403) {
     return 'HTTP 403 Forbidden';
@@ -484,7 +537,7 @@ function detectBlockedPage(html, statusCode) {
 }
 
 // ============================================================
-// PAGE AND PAGER HELPERS
+// PAGE AND PAGER CONTROLS
 // ============================================================
 
 async function getPageScopes(page) {
@@ -495,7 +548,8 @@ async function getPageScopes(page) {
     }
   );
 
-  // Wait for either an auction record or a recognizable empty page.
+  // Wait for either an auction record or a recognizable
+  // no-results message.
   await page.waitForFunction(
     () => {
       const root = document.querySelector(
@@ -506,7 +560,9 @@ async function getPageScopes(page) {
         return false;
       }
 
-      const auction = root.querySelector('div[aid]');
+      const auction = root.querySelector(
+        'div[aid]'
+      );
 
       const text =
         root.innerText ||
@@ -530,13 +586,15 @@ async function getPageScopes(page) {
       return page.$eval(
         '#BID_WINDOW_CONTAINER',
         root => {
-          const first = root.querySelector('div[aid]');
+          const first = root.querySelector(
+            'div[aid]'
+          );
 
           if (!first) {
             return '__NONE__';
           }
 
-          const aid =
+          const auctionId =
             first.getAttribute('aid') || '';
 
           const text =
@@ -544,9 +602,10 @@ async function getPageScopes(page) {
             first.textContent ||
             '';
 
-          return `${aid}|${text
-            .replace(/\s+/g, ' ')
-            .trim()}`;
+          return (
+            `${auctionId}|` +
+            text.replace(/\s+/g, ' ').trim()
+          );
         }
       );
     },
@@ -557,7 +616,9 @@ async function getPageScopes(page) {
     ) {
       const started = Date.now();
 
-      while (Date.now() - started < timeoutMs) {
+      while (
+        Date.now() - started < timeoutMs
+      ) {
         try {
           const current =
             await this.firstRowSignature();
@@ -577,7 +638,8 @@ async function getPageScopes(page) {
 
     async getPagerPieces() {
       const bar = await page.$(
-        '#BID_WINDOW_CONTAINER .Head_C > div:nth-of-type(3)'
+        '#BID_WINDOW_CONTAINER ' +
+        '.Head_C > div:nth-of-type(3)'
       );
 
       if (!bar) {
@@ -595,14 +657,23 @@ async function getPageScopes(page) {
         "input:not([type])"
       );
 
-      const text = await bar.$('span.PageText');
+      const text = await bar.$(
+        'span.PageText'
+      );
 
       const next =
-        (await bar.$('span.PageRight > img')) ||
-        (await bar.$('.PageRight_HVR > img')) ||
-        (await bar.$('.PageRight img')) ||
         (await bar.$(
-          'img[alt*="next" i], img[title*="next" i]'
+          'span.PageRight > img'
+        )) ||
+        (await bar.$(
+          '.PageRight_HVR > img'
+        )) ||
+        (await bar.$(
+          '.PageRight img'
+        )) ||
+        (await bar.$(
+          'img[alt*="next" i], ' +
+          'img[title*="next" i]'
         ));
 
       return {
@@ -623,10 +694,13 @@ async function getPageScopes(page) {
       }
 
       return page.evaluate(bar => {
-        const input = bar.querySelector('input');
-        const text = bar.querySelector(
-          'span.PageText'
-        );
+        const input =
+          bar.querySelector('input');
+
+        const text =
+          bar.querySelector(
+            'span.PageText'
+          );
 
         const inputValue = (
           input?.value || ''
@@ -765,10 +839,140 @@ async function getPageScopes(page) {
 }
 
 // ============================================================
+// AUCTION STATUS DETECTION
+// ============================================================
+
+function determineAuctionStatus({
+  status,
+  blockText,
+  itemClass,
+}) {
+  const statusLower =
+    clean(status).toLowerCase();
+
+  const blockLower =
+    clean(blockText).toLowerCase();
+
+  const classLower =
+    clean(itemClass).toLowerCase();
+
+  if (
+    statusLower.includes('redeemed') ||
+    blockLower.includes('redeemed')
+  ) {
+    return 'Redeemed';
+  }
+
+  if (
+    statusLower.includes('cancel') ||
+    blockLower.includes('cancelled') ||
+    blockLower.includes('canceled')
+  ) {
+    return 'Cancelled';
+  }
+
+  if (
+    statusLower.includes('sold') ||
+    statusLower.includes('paid') ||
+    blockLower.includes('auction sold') ||
+    blockLower.includes('sold to') ||
+    classLower.includes('sold')
+  ) {
+    return 'Sold';
+  }
+
+  if (
+    statusLower.includes('active') ||
+    blockLower.includes('active auction')
+  ) {
+    return 'Active';
+  }
+
+  if (
+    classLower.includes('preview') ||
+    blockLower.includes('preview')
+  ) {
+    return 'Preview';
+  }
+
+  return 'Unknown';
+}
+
+// ============================================================
+// STRICT SALE PRICE EXTRACTION
+// ============================================================
+
+function extractConfirmedSalePrice(
+  $,
+  $item,
+  blockText,
+  auctionStatus
+) {
+  // Never assign a sale price to auctions that are not
+  // positively identified as sold.
+  if (auctionStatus !== 'Sold') {
+    return '';
+  }
+
+  // These labels are intentionally specific.
+  //
+  // Do not add the generic label "Amount" because it can
+  // match Final Judgment Amount or another unrelated amount.
+  const strictSalePriceLabels = [
+    'Sale Price',
+    'Sold Amount',
+    'Winning Bid',
+    'Final Bid',
+    'Sale Amount',
+    'Amount Sold',
+    'High Bid',
+  ];
+
+  let salePrice =
+    clean(
+      $item
+        .find('div.ASTAT_MSGD')
+        .first()
+        .text()
+    ) ||
+    clean(
+      $item
+        .find('.ASTAT_MSGD')
+        .first()
+        .text()
+    );
+
+  if (parseCurrency(salePrice) === null) {
+    salePrice = getByLabel(
+      $,
+      $item,
+      strictSalePriceLabels
+    );
+  }
+
+  if (parseCurrency(salePrice) === null) {
+    salePrice = extractCurrencyField(
+      blockText,
+      strictSalePriceLabels
+    );
+  }
+
+  // Do not preserve nonnumeric status text as sale price.
+  if (parseCurrency(salePrice) === null) {
+    return '';
+  }
+
+  return clean(salePrice);
+}
+
+// ============================================================
 // AUCTION PARSER
 // ============================================================
 
-function parseAuctionsFromHtml(html, pageUrl) {
+function parseAuctionsFromHtml(
+  html,
+  pageUrl
+) {
   const $ = cheerio.load(html);
 
   const rows = [];
@@ -783,17 +987,6 @@ function parseAuctionsFromHtml(html, pageUrl) {
     'Final Judgment Amount',
   ];
 
-  const salePriceLabels = [
-    'Sale Price',
-    'Sold Amount',
-    'Winning Bid',
-    'Final Bid',
-    'Sale Amount',
-    'Amount Sold',
-    'High Bid',
-    'Amount',
-  ];
-
   const assessedValueLabels = [
     'Adjudged Value',
     'Assessed Value',
@@ -806,12 +999,19 @@ function parseAuctionsFromHtml(html, pageUrl) {
     (_, item) => {
       const $item = $(item);
 
-      const blockText = clean($item.text());
-      const auctionId = clean($item.attr('aid'));
-      const itemClass = clean($item.attr('class'));
+      const blockText = clean(
+        $item.text()
+      );
 
-      // Store only actual auction blocks rather than every
-      // parent and child element on the page.
+      const auctionId = clean(
+        $item.attr('aid')
+      );
+
+      const itemClass = clean(
+        $item.attr('class')
+      );
+
+      // Save the actual auction container for debugging.
       relevantElements.push({
         sourceUrl: pageUrl,
         tag: 'div',
@@ -820,7 +1020,7 @@ function parseAuctionsFromHtml(html, pageUrl) {
       });
 
       // ------------------------------------------------------
-      // Case number
+      // CASE NUMBER
       // ------------------------------------------------------
 
       let caseNumber = getByLabel(
@@ -843,6 +1043,8 @@ function parseAuctionsFromHtml(html, pageUrl) {
         [
           'Final Judgment Amount',
           'Est. Min. Bid',
+          'Estimated Minimum Bid',
+          'Minimum Bid',
           'Opening Bid',
           'Parcel ID',
           'Parcel Number',
@@ -855,7 +1057,7 @@ function parseAuctionsFromHtml(html, pageUrl) {
       );
 
       // ------------------------------------------------------
-      // Opening or minimum bid
+      // OPENING OR MINIMUM BID
       // ------------------------------------------------------
 
       let openingBid = getByLabel(
@@ -874,7 +1076,7 @@ function parseAuctionsFromHtml(html, pageUrl) {
       }
 
       // ------------------------------------------------------
-      // Parcel ID
+      // PARCEL ID
       // ------------------------------------------------------
 
       let parcelId = getByLabel(
@@ -906,11 +1108,12 @@ function parseAuctionsFromHtml(html, pageUrl) {
           'Final Judgment Amount',
           'Opening Bid',
           'Est. Min. Bid',
+          'Estimated Minimum Bid',
         ]
       );
 
       // ------------------------------------------------------
-      // Property address
+      // PROPERTY ADDRESS
       // ------------------------------------------------------
 
       let propertyAddress = getByLabel(
@@ -935,11 +1138,12 @@ function parseAuctionsFromHtml(html, pageUrl) {
           'Parcel ID',
           'Final Judgment Amount',
           'Opening Bid',
+          'Est. Min. Bid',
         ]
       );
 
       // ------------------------------------------------------
-      // Assessed or adjudged value
+      // ASSESSED OR ADJUDGED VALUE
       // ------------------------------------------------------
 
       let assessedValue = getByLabel(
@@ -958,7 +1162,7 @@ function parseAuctionsFromHtml(html, pageUrl) {
       }
 
       // ------------------------------------------------------
-      // City, state, and ZIP
+      // CITY, STATE, AND ZIP
       // ------------------------------------------------------
 
       let cityStateZip = getByLabel(
@@ -972,7 +1176,10 @@ function parseAuctionsFromHtml(html, pageUrl) {
         ]
       );
 
-      if (!cityStateZip && propertyAddress) {
+      if (
+        !cityStateZip &&
+        propertyAddress
+      ) {
         const split =
           splitAddressAndCityZip(
             propertyAddress
@@ -986,7 +1193,7 @@ function parseAuctionsFromHtml(html, pageUrl) {
       }
 
       // ------------------------------------------------------
-      // Status and sold amount
+      // RAW STATUS
       // ------------------------------------------------------
 
       const status =
@@ -1003,100 +1210,70 @@ function parseAuctionsFromHtml(html, pageUrl) {
             .text()
         );
 
-      let salePrice =
-        clean(
-          $item
-            .find('div.ASTAT_MSGD')
-            .first()
-            .text()
-        ) ||
-        clean(
-          $item
-            .find('.ASTAT_MSGD')
-            .first()
-            .text()
-        );
+      // ------------------------------------------------------
+      // DETERMINE STATUS BEFORE EXTRACTING SALE PRICE
+      // ------------------------------------------------------
 
-      if (parseCurrency(salePrice) === null) {
-        salePrice = getByLabel(
-          $,
-          $item,
-          salePriceLabels
-        );
-      }
-
-      if (parseCurrency(salePrice) === null) {
-        salePrice = extractCurrencyField(
+      const auctionStatus =
+        determineAuctionStatus({
+          status,
           blockText,
-          salePriceLabels
-        );
-      }
-
-      const statusLower =
-        status.toLowerCase();
-
-      const blockLower =
-        blockText.toLowerCase();
-
-      const classLower =
-        itemClass.toLowerCase();
-
-      let auctionStatus = 'Unknown';
-
-      if (
-        statusLower.includes('redeemed') ||
-        blockLower.includes('redeemed')
-      ) {
-        auctionStatus = 'Redeemed';
-      } else if (
-        statusLower.includes('cancel') ||
-        blockLower.includes('cancelled') ||
-        blockLower.includes('canceled')
-      ) {
-        auctionStatus = 'Cancelled';
-      } else if (
-        statusLower.includes('sold') ||
-        statusLower.includes('paid') ||
-        blockLower.includes('auction sold') ||
-        classLower.includes('sold') ||
-        parseCurrency(salePrice) !== null
-      ) {
-        auctionStatus = 'Sold';
-      } else if (
-        statusLower.includes('active') ||
-        blockLower.includes('active auction')
-      ) {
-        auctionStatus = 'Active';
-      } else if (
-        classLower.includes('preview') ||
-        blockLower.includes('preview')
-      ) {
-        auctionStatus = 'Preview';
-      } else if (status) {
-        auctionStatus = status;
-      }
+          itemClass,
+        });
 
       // ------------------------------------------------------
-      // Auction date
+      // STRICT SALE PRICE EXTRACTION
+      // ------------------------------------------------------
+
+      const salePrice =
+        extractConfirmedSalePrice(
+          $,
+          $item,
+          blockText,
+          auctionStatus
+        );
+
+      // ------------------------------------------------------
+      // AUCTION DATE
       // ------------------------------------------------------
 
       const auctionDate =
-        extractAuctionDateFromUrl(pageUrl) ||
-        extractAuctionDateFromText(blockText);
+        extractAuctionDateFromUrl(
+          pageUrl
+        ) ||
+        extractAuctionDateFromText(
+          blockText
+        );
 
       // ------------------------------------------------------
-      // Validate required values
+      // NUMERIC VALUES
+      // ------------------------------------------------------
+
+      const openingBidNum =
+        parseCurrency(openingBid);
+
+      const salePriceNum =
+        parseCurrency(salePrice);
+
+      const assessedValueNum =
+        parseCurrency(assessedValue);
+
+      // ------------------------------------------------------
+      // REQUIRED CASE NUMBER VALIDATION
       // ------------------------------------------------------
 
       if (!isRealCaseNumber(caseNumber)) {
-        rejectedRows.push({
+        const rejection = {
           sourceUrl: pageUrl,
           auctionId,
-          reason: 'MissingOrInvalidCaseNumber',
+          reason:
+            'MissingOrInvalidCaseNumber',
           caseNumber: clean(caseNumber),
           openingBid: clean(openingBid),
           parcelId: clean(parcelId),
-        });
+        };
+
+        rejectedRows.push(rejection);
 
         relevantElements.push({
           sourceUrl: pageUrl,
@@ -1112,8 +1289,9 @@ function parseAuctionsFromHtml(html, pageUrl) {
         return;
       }
 
-      const openingBidNum =
-        parseCurrency(openingBid);
+      // ------------------------------------------------------
+      // OPENING BID FILTER
+      // ------------------------------------------------------
 
       if (
         EXCLUDE_ZERO_OR_MISSING_OPENING_BID &&
@@ -1122,7 +1300,7 @@ function parseAuctionsFromHtml(html, pageUrl) {
           openingBidNum <= 0
         )
       ) {
-        rejectedRows.push({
+        const rejection = {
           sourceUrl: pageUrl,
           auctionId,
           reason:
@@ -1130,7 +1308,9 @@ function parseAuctionsFromHtml(html, pageUrl) {
           caseNumber: clean(caseNumber),
           openingBid: clean(openingBid),
           parcelId: clean(parcelId),
-        });
+        };
+
+        rejectedRows.push(rejection);
 
         relevantElements.push({
           sourceUrl: pageUrl,
@@ -1146,40 +1326,42 @@ function parseAuctionsFromHtml(html, pageUrl) {
         return;
       }
 
-      const salePriceNum =
-        parseCurrency(salePrice);
-
-      const assessedValueNum =
-        parseCurrency(assessedValue);
-
       // ------------------------------------------------------
-      // Separate calculations
+      // CALCULATIONS
       // ------------------------------------------------------
 
-      // Sale proceeds difference:
-      // Sale price minus opening/minimum bid.
+      // Actual sale surplus:
+      // final sale price minus opening/minimum bid.
+      //
+      // This remains null unless the auction is confirmed sold.
       const saleSurplus =
+        auctionStatus === 'Sold' &&
         salePriceNum !== null &&
         openingBidNum !== null
           ? salePriceNum - openingBidNum
           : null;
 
-      // Estimated value spread for sold auctions:
-      // Assessed value minus sale price.
+      // Assessed value minus final sale price.
+      //
+      // This measures a property value spread and is not the
+      // same as auction excess proceeds.
       const assessedVsSaleSpread =
+        auctionStatus === 'Sold' &&
         assessedValueNum !== null &&
         salePriceNum !== null
           ? assessedValueNum - salePriceNum
           : null;
 
-      // Estimated value spread before or without a sale:
-      // Assessed value minus opening bid.
+      // Assessed value minus opening/minimum bid.
+      //
+      // This may be available before the auction is sold.
       const assessedVsOpeningSpread =
         assessedValueNum !== null &&
         openingBidNum !== null
           ? assessedValueNum - openingBidNum
           : null;
 
+      // Preserve a blank value when surplus cannot be calculated.
       const meetsMinimumSurplus =
         saleSurplus === null
           ? ''
@@ -1187,10 +1369,22 @@ function parseAuctionsFromHtml(html, pageUrl) {
             ? 'Yes'
             : 'No';
 
+      // ------------------------------------------------------
+      // OUTPUT RECORD
+      // ------------------------------------------------------
+
       const row = {
         sourceUrl: pageUrl,
         auctionId,
+
         auctionStatus,
+
+        // Convenience field for downstream spreadsheet mapping.
+        sale:
+          auctionStatus === 'Sold'
+            ? 'Yes'
+            : 'No',
+
         auctionType: 'Foreclosure',
 
         caseNumber: clean(caseNumber),
@@ -1209,8 +1403,11 @@ function parseAuctionsFromHtml(html, pageUrl) {
         openingBid:
           clean(openingBid),
 
+        // This is blank unless the auction is confirmed sold.
         salePrice:
-          clean(salePrice),
+          auctionStatus === 'Sold'
+            ? clean(salePrice)
+            : '',
 
         assessedValue:
           clean(assessedValue),
@@ -1224,16 +1421,20 @@ function parseAuctionsFromHtml(html, pageUrl) {
         rawClass:
           itemClass,
 
-        // Main auction-sale calculation.
+        // Main auction sale calculation.
         surplus: saleSurplus,
         saleSurplus,
 
-        // Additional property value comparisons.
+        // Property value comparisons.
         assessedVsSaleSpread,
         assessedVsOpeningSpread,
 
         meetsMinimumSurplus,
       };
+
+      // ------------------------------------------------------
+      // OPTIONAL MINIMUM SURPLUS FILTER
+      // ------------------------------------------------------
 
       if (
         FILTER_BY_MINIMUM_SURPLUS &&
@@ -1243,11 +1444,15 @@ function parseAuctionsFromHtml(html, pageUrl) {
           sourceUrl: pageUrl,
           auctionId,
           reason:
-            'BelowMinimumSurplusThreshold',
+            row.saleSurplus === null
+              ? 'SaleSurplusUnavailable'
+              : 'BelowMinimumSurplusThreshold',
+
           caseNumber: row.caseNumber,
           openingBid: row.openingBid,
+          salePrice: row.salePrice,
           parcelId: row.parcelId,
-          surplus: row.surplus,
+          surplus: row.saleSurplus,
         });
 
         return;
@@ -1265,16 +1470,20 @@ function parseAuctionsFromHtml(html, pageUrl) {
 }
 
 // ============================================================
-// PROCESS ONE URL
+// PROCESS ONE SOURCE URL
 // ============================================================
 
-async function inspectAndParse(browser, url) {
+async function inspectAndParse(
+  browser,
+  url
+) {
   const page = await browser.newPage();
 
   const relevantElements = [];
   const parsedRows = [];
   const rejectedRows = [];
-  const seen = new Set();
+
+  const seenRows = new Set();
   const seenPageSignatures = new Set();
 
   page.setDefaultNavigationTimeout(
@@ -1289,31 +1498,43 @@ async function inspectAndParse(browser, url) {
     await page.setViewport(VIEWPORT);
 
     try {
-      await page.emulateTimezone(TIMEZONE);
+      await page.emulateTimezone(
+        TIMEZONE
+      );
     } catch (error) {
       console.warn(
-        `Timezone emulation warning: ${error.message}`
+        `Timezone warning: ${error.message}`
       );
     }
 
     await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
-      'AppleWebKit/537.36 (KHTML, like Gecko) ' +
-      'Chrome/121.0.0.0 Safari/537.36'
+      'Mozilla/5.0 ' +
+      '(Windows NT 10.0; Win64; x64) ' +
+      'AppleWebKit/537.36 ' +
+      '(KHTML, like Gecko) ' +
+      'Chrome/121.0.0.0 ' +
+      'Safari/537.36'
     );
 
     await page.setExtraHTTPHeaders({
-      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept-Language':
+        'en-US,en;q=0.9',
+
       Accept:
-        'text/html,application/xhtml+xml,' +
+        'text/html,' +
+        'application/xhtml+xml,' +
         'application/xml;q=0.9,' +
-        'image/avif,image/webp,*/*;q=0.8',
+        'image/avif,' +
+        'image/webp,' +
+        '*/*;q=0.8',
     });
 
     const normalizedUrl =
       normalizeAmpersands(url);
 
-    console.log(`Visiting: ${normalizedUrl}`);
+    console.log(
+      `Visiting: ${normalizedUrl}`
+    );
 
     const response = await page.goto(
       normalizedUrl,
@@ -1324,7 +1545,9 @@ async function inspectAndParse(browser, url) {
     );
 
     const statusCode =
-      response ? response.status() : null;
+      response
+        ? response.status()
+        : null;
 
     const initialHtml =
       await page.content();
@@ -1344,19 +1567,25 @@ async function inspectAndParse(browser, url) {
 
     let pagesProcessed = 0;
 
-    while (pagesProcessed < MAX_PAGES) {
-      const pageNumber =
+    while (
+      pagesProcessed < MAX_PAGES
+    ) {
+      const displayedPageNumber =
         pagesProcessed + 1;
 
       console.log(
-        `Parsing page ${pageNumber} of maximum ${MAX_PAGES}`
+        `Parsing page ${displayedPageNumber} ` +
+        `of maximum ${MAX_PAGES}`
       );
 
       const html =
         await page.content();
 
       const currentBlockedReason =
-        detectBlockedPage(html, null);
+        detectBlockedPage(
+          html,
+          null
+        );
 
       if (currentBlockedReason) {
         throw new Error(
@@ -1364,23 +1593,24 @@ async function inspectAndParse(browser, url) {
         );
       }
 
-      const firstSignature =
+      const currentPageSignature =
         await scope.firstRowSignature();
 
       if (
         seenPageSignatures.has(
-          firstSignature
+          currentPageSignature
         )
       ) {
         console.log(
-          'Repeated page content detected. Ending this URL.'
+          'Repeated page content detected. ' +
+          'Ending this URL.'
         );
 
         break;
       }
 
       seenPageSignatures.add(
-        firstSignature
+        currentPageSignature
       );
 
       const {
@@ -1400,8 +1630,8 @@ async function inspectAndParse(browser, url) {
           row.auctionId,
         ].join('|');
 
-        if (!seen.has(key)) {
-          seen.add(key);
+        if (!seenRows.has(key)) {
+          seenRows.add(key);
           parsedRows.push(row);
         }
       }
@@ -1415,7 +1645,8 @@ async function inspectAndParse(browser, url) {
       );
 
       console.log(
-        `Parsed unique rows so far: ${parsedRows.length}`
+        `Unique parsed rows so far: ` +
+        `${parsedRows.length}`
       );
 
       pagesProcessed += 1;
@@ -1425,28 +1656,32 @@ async function inspectAndParse(browser, url) {
 
       if (!pieces.bar) {
         console.log(
-          'Pager bar not found. Ending this URL.'
+          'Pager bar not found. ' +
+          'Ending this URL.'
         );
 
         break;
       }
 
       const indicator =
-        await scope.readIndicator(pieces);
+        await scope.readIndicator(
+          pieces
+        );
 
-      const current =
+      const currentPage =
         indicator.current ||
         pagesProcessed;
 
-      const total =
+      const totalPages =
         indicator.total;
 
       if (
-        total &&
-        current >= total
+        totalPages &&
+        currentPage >= totalPages
       ) {
         console.log(
-          `Reached last page (${current}/${total}).`
+          `Reached last page ` +
+          `(${currentPage}/${totalPages}).`
         );
 
         break;
@@ -1456,7 +1691,7 @@ async function inspectAndParse(browser, url) {
         await scope.firstRowSignature();
 
       const nextPage =
-        current + 1;
+        currentPage + 1;
 
       let changed = false;
 
@@ -1473,7 +1708,10 @@ async function inspectAndParse(browser, url) {
           );
       }
 
-      if (!changed && pieces.next) {
+      if (
+        !changed &&
+        pieces.next
+      ) {
         const arrowTriggered =
           await scope.clickNextArrow(
             pieces
@@ -1489,13 +1727,14 @@ async function inspectAndParse(browser, url) {
 
       if (!changed) {
         console.log(
-          'No list change after pager actions. Ending this URL.'
+          'No list change after pager actions. ' +
+          'Ending this URL.'
         );
 
         break;
       }
 
-      // Small courtesy delay between result pages.
+      // Courtesy delay before parsing the next result page.
       await sleep(800);
     }
 
@@ -1517,6 +1756,7 @@ async function inspectAndParse(browser, url) {
       relevantElements,
       parsedRows,
       rejectedRows,
+
       error: {
         url,
         message,
@@ -1579,27 +1819,31 @@ function removeFileIfExists(fileName) {
 (async () => {
   let browser;
 
-  const startedAt =
-    new Date();
+  const startedAt = new Date();
 
   try {
-    console.log('Loading URLs from Google Sheets...');
+    console.log(
+      'Loading URLs from Google Sheets...'
+    );
 
     const urls =
       await loadTargetUrls();
 
     console.log(
-      `Got ${urls.length} unique URL(s) to process.`
+      `Got ${urls.length} unique URL(s) ` +
+      'to process.'
     );
 
     if (!urls.length) {
       throw new Error(
-        `No valid URLs found in ${SHEET_NAME}!${URL_RANGE}`
+        `No valid URLs found in ` +
+        `${SHEET_NAME}!${URL_RANGE}`
       );
     }
 
     browser = await puppeteer.launch({
       headless: true,
+
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -1626,7 +1870,8 @@ function removeFileIfExists(fileName) {
 
       console.log('');
       console.log(
-        `Processing URL ${index + 1}/${urls.length}: ${url}`
+        `Processing URL ${index + 1}/` +
+        `${urls.length}: ${url}`
       );
 
       const result =
@@ -1648,10 +1893,12 @@ function removeFileIfExists(fileName) {
       );
 
       if (result.error) {
-        errors.push(result.error);
+        errors.push(
+          result.error
+        );
       }
 
-      // Courtesy delay before opening the next source URL.
+      // Courtesy delay before the next source URL.
       await sleep(1000);
     }
 
@@ -1760,16 +2007,14 @@ function removeFileIfExists(fileName) {
           finalRows.filter(
             row =>
               row.saleSurplus !== null &&
-              row.saleSurplus >=
-                MIN_SURPLUS
+              row.saleSurplus >= MIN_SURPLUS
           ).length,
 
         belowThreshold:
           finalRows.filter(
             row =>
               row.saleSurplus !== null &&
-              row.saleSurplus <
-                MIN_SURPLUS
+              row.saleSurplus < MIN_SURPLUS
           ).length,
 
         unavailable:
@@ -1865,24 +2110,29 @@ function removeFileIfExists(fileName) {
 
     console.log('');
     console.log(
-      `Saved ${allElements.length} elements -> ${OUTPUT_ELEMENTS_FILE}`
+      `Saved ${allElements.length} elements ` +
+      `-> ${OUTPUT_ELEMENTS_FILE}`
     );
 
     console.log(
-      `Saved ${finalRows.length} unique auctions -> ${OUTPUT_ROWS_FILE}`
+      `Saved ${finalRows.length} unique auctions ` +
+      `-> ${OUTPUT_ROWS_FILE}`
     );
 
     console.log(
-      `Rejected ${allRejectedRows.length} invalid or filtered records`
+      `Rejected ${allRejectedRows.length} ` +
+      'invalid or filtered records'
     );
 
     console.log(
-      `Saved summary -> ${OUTPUT_SUMMARY_FILE}`
+      `Saved summary ` +
+      `-> ${OUTPUT_SUMMARY_FILE}`
     );
 
     if (errors.length) {
       console.log(
-        `Saved ${errors.length} errors -> ${OUTPUT_ERRORS_FILE}`
+        `Saved ${errors.length} errors ` +
+        `-> ${OUTPUT_ERRORS_FILE}`
       );
     }
 
@@ -1899,7 +2149,7 @@ function removeFileIfExists(fileName) {
       try {
         await browser.close();
       } catch {
-        // Ignore browser-close errors.
+        // Ignore browser-close failures.
       }
     }
   }
