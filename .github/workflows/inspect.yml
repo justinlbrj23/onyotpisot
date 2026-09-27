@@ -1,4 +1,4 @@
-name: Surplus Riches Automation
+name: Auction Lead Gen Automation
 
 on:
   workflow_dispatch:
@@ -40,9 +40,6 @@ jobs:
             }
             console.log('Service account OK:', j.client_email);
           "
-
-      - name: Run organizer_headers_tssf.cjs
-        run: node organizer_headers_tssf.cjs
 
       - name: Run webInspector.cjs
         run: node webInspector.cjs
