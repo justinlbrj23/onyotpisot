@@ -3,62 +3,70 @@ name: Rockdale GA Scraper
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       # -----------------------------
-      # Checkout repo
+      # Checkout repository
       # -----------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
       # -----------------------------
-      # Setup Node
+      # Setup Node.js
       # -----------------------------
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: "20"
+          cache: "npm"
 
       # -----------------------------
-      # Install dependencies
+      # Install Node dependencies
       # -----------------------------
-      - name: Install dependencies
-        run: npm install
+      - name: Install Node dependencies
+        run: npm ci
 
       # -----------------------------
-      # Install Google Chrome
-      # (required for Selenium)
+      # Install Playwright Chromium
+      # and required Linux packages
       # -----------------------------
-      - name: Install Google Chrome
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      # -----------------------------
+      # Verify required secrets
+      # without displaying their values
+      # -----------------------------
+      - name: Verify required secrets
+        env:
+          SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y wget gnupg
-          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
-          sudo apt-get update
-          sudo apt-get install -y google-chrome-stable
+          if [ -z "$SERVICE_ACCOUNT_JSON" ]; then
+            echo "::error::SERVICE_ACCOUNT_JSON secret is missing or empty."
+            exit 1
+          fi
+
+          if [ -z "$SHEET_ID" ]; then
+            echo "::error::SHEET_ID secret is missing or empty."
+            exit 1
+          fi
+
+          echo "Required repository secrets are configured."
 
       # -----------------------------
-      # Write Google Service Account JSON
-      # -----------------------------
-      - name: Setup Google Credentials
-        run: echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service-account.json
-
-      # -----------------------------
-      # Export environment variables
-      # -----------------------------
-      - name: Set environment variables
-        run: |
-          echo "SERVICE_ACCOUNT_JSON<<EOF" >> $GITHUB_ENV
-          cat service-account.json >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-          echo "SHEET_ID=${{ secrets.SHEET_ID }}" >> $GITHUB_ENV
-
-      # -----------------------------
-      # Run scraper
+      # Run Playwright scraper
       # -----------------------------
       - name: Run Save Page FCL scraper
+        env:
+          CI: "true"
+          SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
         run: node save_page.cjs
