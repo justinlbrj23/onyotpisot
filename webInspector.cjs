@@ -625,63 +625,49 @@ async function extractCalendarAuctionLinks(page) {
       return (
         months[
           String(value || '')
+            .trim()
             .toLowerCase()
         ] || null
       );
     }
 
-    function looksLikePopulatedAuctionCell(text) {
-      const normalized =
-        cleanText(text);
+    function looksLikeAuctionEntry(text) {
+      const normalized = cleanText(text);
 
       return (
         /\btax\s*deed\b/i.test(normalized) ||
         /\bforeclosure\b/i.test(normalized) ||
-        /\b\d+\s*\/\s*\d+\s*TD\b/i.test(
-          normalized
-        ) ||
-        /\b\d+\s*\/\s*\d+\s*FC\b/i.test(
-          normalized
-        ) ||
-        /\b\d+\s+TD\b/i.test(normalized) ||
-        /\b\d+\s+FC\b/i.test(normalized)
+        /\b\d+\s*\/\s*\d+\s*TD\b/i.test(normalized) ||
+        /\b\d+\s*\/\s*\d+\s*FC\b/i.test(normalized)
       );
     }
 
     function findDisplayedMonthAndYear() {
-      const bodyText = cleanText(
-        document.body?.innerText ||
-        document.body?.textContent ||
-        ''
-      );
+      const monthPattern =
+        /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})\b/i;
 
-      const patterns = [
-        /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})\b/i,
-      ];
-
+      /*
+       * Search the likely calendar heading elements before
+       * inspecting the full page text.
+       */
       const preferredSelectors = [
         '[class*="month" i]',
         '[id*="month" i]',
         '[class*="calendar" i]',
         '[id*="calendar" i]',
-        '#Content_Title',
         'h1',
         'h2',
         'h3',
+        'caption',
         'table',
       ];
 
-      for (
-        const selector
-        of preferredSelectors
-      ) {
+      for (const selector of preferredSelectors) {
         let elements = [];
 
         try {
           elements = [
-            ...document.querySelectorAll(
-              selector
-            ),
+            ...document.querySelectorAll(selector),
           ];
         } catch {
           elements = [];
@@ -694,40 +680,37 @@ async function extractCalendarAuctionLinks(page) {
             ''
           );
 
-          for (const pattern of patterns) {
-            const match =
-              text.match(pattern);
+          const match = text.match(monthPattern);
 
-            if (match) {
-              return {
-                monthName: match[1],
-                month:
-                  monthNameToNumber(
-                    match[1]
-                  ),
-                year: Number(match[2]),
-                sourceText: text,
-              };
-            }
+          if (match) {
+            return {
+              monthName: match[1],
+              month: monthNameToNumber(match[1]),
+              year: Number(match[2]),
+              sourceText: match[0],
+            };
           }
         }
       }
 
-      for (const pattern of patterns) {
-        const match =
-          bodyText.match(pattern);
+      const bodyText = cleanText(
+        document.body?.innerText ||
+        document.body?.textContent ||
+        ''
+      );
 
-        if (match) {
-          return {
-            monthName: match[1],
-            month:
-              monthNameToNumber(
-                match[1]
-              ),
-            year: Number(match[2]),
-            sourceText: match[0],
-          };
-        }
+      const fallbackMatch =
+        bodyText.match(monthPattern);
+
+      if (fallbackMatch) {
+        return {
+          monthName: fallbackMatch[1],
+          month: monthNameToNumber(
+            fallbackMatch[1]
+          ),
+          year: Number(fallbackMatch[2]),
+          sourceText: fallbackMatch[0],
+        };
       }
 
       return {
@@ -738,28 +721,98 @@ async function extractCalendarAuctionLinks(page) {
       };
     }
 
-    function extractDayNumber(cell) {
-      // Prefer direct child text such as the number shown in
-      // the corner of a calendar cell.
-      const directTextParts = [
-        ...cell.childNodes,
-      ]
-        .filter(node =>
-          node.nodeType ===
-          Node.TEXT_NODE
-        )
-        .map(node =>
-          cleanText(node.textContent)
-        )
-        .filter(Boolean);
+    function hasAuctionDescendantCell(cell) {
+      const descendantCells = [
+        ...cell.querySelectorAll('td'),
+      ];
 
-      for (const part of directTextParts) {
-        const match = part.match(
-          /^\s*(\d{1,2})\b/
+      return descendantCells.some(
+        descendant => {
+          const text = cleanText(
+            descendant.innerText ||
+            descendant.textContent ||
+            ''
+          );
+
+          return looksLikeAuctionEntry(text);
+        }
+      );
+    }
+
+    function findLeafAuctionCells() {
+      const allCells = [
+        ...document.querySelectorAll('td'),
+      ];
+
+      const matchingCells = allCells.filter(cell => {
+        const text = cleanText(
+          cell.innerText ||
+          cell.textContent ||
+          ''
         );
 
-        if (match) {
-          const day = Number(match[1]);
+        if (!looksLikeAuctionEntry(text)) {
+          return false;
+        }
+
+        /*
+         * Reject large parent cells that contain smaller auction
+         * cells. This prevents the main content cell or calendar
+         * table wrapper from being interpreted as one date.
+         */
+        if (hasAuctionDescendantCell(cell)) {
+          return false;
+        }
+
+        return true;
+      });
+
+      /*
+       * Deduplicate cells by identity.
+       */
+      return [...new Set(matchingCells)];
+    }
+
+    function extractDayFromAttributes(cell) {
+      const attributeNames = [
+        'data-day',
+        'data-date',
+        'day',
+        'date',
+        'id',
+        'name',
+        'title',
+        'aria-label',
+      ];
+
+      for (const attributeName of attributeNames) {
+        const value =
+          cell.getAttribute(attributeName);
+
+        if (!value) {
+          continue;
+        }
+
+        /*
+         * Complete date stored in an attribute.
+         */
+        const dateMatch = String(value).match(
+          /(?:^|\d{1,2}\d{4}(?:[^0-9]|$)/
+        );
+
+        if (dateMatch) {
+          const day = Number(dateMatch[2]);
+
+          if (day >= 1 && day <= 31) {
+            return day;
+          }
+        }
+
+        /*
+         * A plain day value such as data-day="15".
+         */
+        if (/^\d{1,2}$/.test(value.trim())) {
+          const day = Number(value.trim());
 
           if (day >= 1 && day <= 31) {
             return day;
@@ -767,41 +820,86 @@ async function extractCalendarAuctionLinks(page) {
         }
       }
 
-      const possibleDayElements = [
+      return null;
+    }
+
+    function extractDayFromSmallElements(cell) {
+      const possibleElements = [
         ...cell.querySelectorAll(
-          'a, span, div, strong, b'
+          'a, span, div, strong, b, em'
         ),
       ];
 
-      for (
-        const element
-        of possibleDayElements
-      ) {
+      /*
+       * Prefer short elements that contain only the calendar day.
+       */
+      for (const element of possibleElements) {
         const text = cleanText(
           element.innerText ||
           element.textContent ||
           ''
         );
 
-        if (/^\d{1,2}$/.test(text)) {
-          const day = Number(text);
+        if (!/^\d{1,2}$/.test(text)) {
+          continue;
+        }
 
-          if (day >= 1 && day <= 31) {
-            return day;
-          }
+        const day = Number(text);
+
+        if (day >= 1 && day <= 31) {
+          return day;
         }
       }
 
+      return null;
+    }
+
+    function extractDayFromDirectText(cell) {
+      const directTextValues = [
+        ...cell.childNodes,
+      ]
+        .filter(node =>
+          node.nodeType === Node.TEXT_NODE
+        )
+        .map(node =>
+          cleanText(node.textContent)
+        )
+        .filter(Boolean);
+
+      for (const value of directTextValues) {
+        const match = value.match(
+          /(?:^|\s)(\d{1,2})(?:\s|$)/
+        );
+
+        if (!match) {
+          continue;
+        }
+
+        const day = Number(match[1]);
+
+        if (day >= 1 && day <= 31) {
+          return day;
+        }
+      }
+
+      return null;
+    }
+
+    function extractDayFromCellText(cell) {
       const cellText = cleanText(
         cell.innerText ||
         cell.textContent ||
         ''
       );
 
-      const firstNumberMatch =
-        cellText.match(
-          /^\s*(\d{1,2})\b/
-        );
+      /*
+       * On the displayed calendar, the date number appears first:
+       *
+       * 15 Tax Deed 0 / 96 TD 10:00 AM ET
+       */
+      const firstNumberMatch = cellText.match(
+        /^\s*(\d{1,2})(?=\s|$)/
+      );
 
       if (firstNumberMatch) {
         const day = Number(
@@ -816,8 +914,17 @@ async function extractCalendarAuctionLinks(page) {
       return null;
     }
 
+    function extractDayNumber(cell) {
+      return (
+        extractDayFromAttributes(cell) ||
+        extractDayFromSmallElements(cell) ||
+        extractDayFromDirectText(cell) ||
+        extractDayFromCellText(cell)
+      );
+    }
+
     function extractExistingPreviewUrls(cell) {
-      const values = [];
+      const sourceValues = [];
 
       const elements = [
         cell,
@@ -826,14 +933,11 @@ async function extractCalendarAuctionLinks(page) {
 
       for (const element of elements) {
         if (
-          element.tagName
-            ?.toLowerCase() === 'a'
+          element.tagName?.toLowerCase() === 'a'
         ) {
-          values.push(
+          sourceValues.push(
             element.href || '',
-            element.getAttribute(
-              'href'
-            ) || ''
+            element.getAttribute('href') || ''
           );
         }
 
@@ -841,28 +945,37 @@ async function extractCalendarAuctionLinks(page) {
           const attribute
           of element.attributes || []
         ) {
-          values.push(
+          sourceValues.push(
             attribute.value || ''
           );
         }
 
-        values.push(
+        sourceValues.push(
           element.outerHTML || ''
         );
       }
 
       const discovered = [];
 
-      for (let value of values) {
+      /*
+       * Accept capitalization variations such as:
+       *
+       * zaction=AUCTION
+       * Zmethod=PREVIEW
+       * AUCTIONDATE=09/15/2026
+       */
+      const previewPattern =
+        /(?:https?:\/\/[^\s"'<>\\)]+)?\/?index\.cfm\?[^"'<>\\)\s]*zaction=AUCTION[^"'<>\\)\s]*zmethod=PREVIEW[^"'<>\\)\s]*auctiondate=\d{1,2}\/\d{1,2}\/\d{4}/gi;
+
+      for (let value of sourceValues) {
         value = String(value || '')
           .replace(/&amp;/gi, '&')
           .replace(/\\u0026/gi, '&')
           .replace(/\\x26/gi, '&')
           .replace(/\\\//g, '/');
 
-        const matches = value.match(
-          /(?:https?:\/\/[^\s"'<>\\)]+)?\/?index\.cfm\?zaction=AUCTION&zmethod=PREVIEW&AuctionDate=\d{1,2}\/\d{1,2}\/\d{4}/gi
-        ) || [];
+        const matches =
+          value.match(previewPattern) || [];
 
         discovered.push(...matches);
       }
@@ -873,33 +986,23 @@ async function extractCalendarAuctionLinks(page) {
     const displayedDate =
       findDisplayedMonthAndYear();
 
+    const auctionCells =
+      findLeafAuctionCells();
+
     const findings = [];
 
-    // The displayed RealForeclose calendar is table based.
-    const cells = [
-      ...document.querySelectorAll('td'),
-    ];
-
-    for (const cell of cells) {
+    for (const cell of auctionCells) {
       const cellText = cleanText(
         cell.innerText ||
         cell.textContent ||
         ''
       );
 
-      if (
-        !looksLikePopulatedAuctionCell(
-          cellText
-        )
-      ) {
-        continue;
-      }
+      const day =
+        extractDayNumber(cell);
 
       const existingUrls =
         extractExistingPreviewUrls(cell);
-
-      const day =
-        extractDayNumber(cell);
 
       findings.push({
         sourceType:
@@ -920,6 +1023,17 @@ async function extractCalendarAuctionLinks(page) {
 
         monthSource:
           displayedDate.sourceText,
+
+        cellClass:
+          cell.getAttribute('class') || '',
+
+        cellId:
+          cell.getAttribute('id') || '',
+
+        backgroundColor:
+          window
+            .getComputedStyle(cell)
+            .backgroundColor,
 
         cellHtml: (
           cell.outerHTML || ''
