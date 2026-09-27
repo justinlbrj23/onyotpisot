@@ -60,5 +60,5 @@ jobs:
       # -----------------------------
       # Run scraper
       # -----------------------------
-      - name: Run Rockdale scraper
-        run: node rockdaleGA.js
+      - name: Run Save Page FCL scraper
+        run: node save_page.cjs
