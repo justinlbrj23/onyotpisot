@@ -1,25 +1,24 @@
-// inspectWebpage.cjs
+// webInspector.cjs
 //
 // STAGE 1
 // Reads calendar URLs from web_tda!G2:G.
-// Opens each calendar page.
-// Finds links associated with populated auction dates.
-// Replaces web_tda!C2:C with the discovered auction URLs.
+// Finds populated Tax Deed or Foreclosure calendar dates.
+// Extracts or constructs auction preview URLs.
+// Writes unique preview URLs to web_tda!C2:C.
 //
 // STAGE 2
-// Reads the refreshed URLs from web_tda!C2:C.
-// Opens each auction result page.
-// Navigates through the site's pagination controls.
-// Parses, validates, calculates, deduplicates, and exports auction data.
+// Reads auction preview URLs from web_tda!C2:C.
+// Waits for dynamically loaded RealForeclose auction records.
+// Parses, validates, deduplicates, and exports auction data.
 //
 // Required packages:
 // npm install puppeteer-extra puppeteer-extra-plugin-stealth cheerio googleapis
 //
-// Required local file:
+// Required credentials:
 // ./service-account.json
 //
 // Important:
-// Share the Google Sheet with the service-account email as an Editor.
+// Share the Google Sheet with the service-account email as Editor.
 
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
@@ -40,12 +39,10 @@ const SPREADSHEET_ID =
 
 const SHEET_NAME = 'web_tda';
 
-// Stage 1 input:
-// Calendar-page URLs.
+// Stage 1 source.
 const CALENDAR_URL_RANGE = 'G2:G';
 
-// Stage 1 output and Stage 2 input:
-// Individual auction-date URLs.
+// Stage 1 destination and Stage 2 source.
 const AUCTION_URL_RANGE = 'C2:C';
 
 const OUTPUT_ELEMENTS_FILE = 'raw-elements.json';
@@ -56,31 +53,32 @@ const OUTPUT_CALENDAR_LINKS_FILE = 'calendar-links.json';
 const OUTPUT_REJECTIONS_FILE = 'rejected-auctions.json';
 
 const MIN_SURPLUS = 25000;
-const MAX_PAGES = 50;
+const MAX_PAGES_PER_AREA = 50;
 
 const PAGE_LOAD_TIMEOUT = 120000;
 const ELEMENT_WAIT_TIMEOUT = 60000;
+const AJAX_WAIT_TIMEOUT = 45000;
 const PAGE_CHANGE_TIMEOUT = 30000;
 
-// Exclude auction records when opening/minimum bid is:
-// - missing
-// - invalid
-// - zero
-// - negative
+// Exclude records with a blank, invalid, zero, or negative
+// opening/minimum bid.
 const EXCLUDE_ZERO_OR_MISSING_OPENING_BID = true;
 
 // false:
-// Retain auctions below the $25,000 threshold and mark Yes/No.
+// Keep all valid records and mark the threshold.
 //
 // true:
-// Retain only records with confirmed sale surplus >= $25,000.
+// Keep only records with a confirmed sale surplus of at least
+// MIN_SURPLUS.
 const FILTER_BY_MINIMUM_SURPLUS = false;
 
-// If true, Stage 1 clears C2:C and writes the newly discovered URLs.
+// Write discovered calendar URLs back to C2:C.
 const WRITE_DISCOVERED_URLS_TO_SHEET = true;
 
-// Safety feature:
-// If all calendars fail, preserve existing values in C2:C.
+// Never erase C2:C when Stage 1 finds zero URLs.
+const PRESERVE_COLUMN_C_IF_NO_URLS_DISCOVERED = true;
+
+// Preserve C2:C when all source calendars fail.
 const PRESERVE_COLUMN_C_IF_ALL_CALENDARS_FAIL = true;
 
 const VIEWPORT = {
@@ -91,7 +89,7 @@ const VIEWPORT = {
 
 const TIMEZONE = 'America/New_York';
 
-const BROWSER_USER_AGENT =
+const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
   'AppleWebKit/537.36 (KHTML, like Gecko) ' +
   'Chrome/121.0.0.0 Safari/537.36';
@@ -105,8 +103,8 @@ const sleep = milliseconds =>
 // GOOGLE SHEETS AUTHENTICATION
 // ============================================================
 
-// Full spreadsheets scope is required because Stage 1 writes
-// the discovered URLs to column C.
+// Full spreadsheets scope is required because the script writes
+// discovered URLs to column C.
 const auth = new google.auth.GoogleAuth({
   keyFile: SERVICE_ACCOUNT_FILE,
   scopes: [
@@ -135,6 +133,8 @@ function normalizeAmpersands(value) {
     .replace(/&amp;amp;/gi, '&amp;')
     .replace(/&amp;/gi, '&')
     .replace(/%26amp%3B/gi, '&')
+    .replace(/\\u0026/gi, '&')
+    .replace(/\\x26/gi, '&')
     .trim();
 }
 
@@ -173,7 +173,7 @@ function parseCurrency(value) {
     return null;
   }
 
-  // Converts accounting notation:
+  // Convert accounting notation:
   // ($1,250.00) -> -1250.00
   const normalized = text.replace(
     /\(([^)]+)\)/g,
@@ -194,12 +194,21 @@ function parseCurrency(value) {
     return null;
   }
 
-  const parsed =
-    Number.parseFloat(numericText);
+  const parsed = Number.parseFloat(
+    numericText
+  );
 
   return Number.isFinite(parsed)
     ? parsed
     : null;
+}
+
+function roundCurrency(value) {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+
+  return Number(value.toFixed(2));
 }
 
 function escapeRegex(value) {
@@ -217,6 +226,20 @@ function normalizeLabel(value) {
     .trim();
 }
 
+function writeJson(fileName, data) {
+  fs.writeFileSync(
+    fileName,
+    JSON.stringify(data, null, 2),
+    'utf8'
+  );
+}
+
+function removeFileIfExists(fileName) {
+  if (fs.existsSync(fileName)) {
+    fs.unlinkSync(fileName);
+  }
+}
+
 function createCanonicalUrlKey(value) {
   try {
     const parsedUrl = new URL(
@@ -225,15 +248,19 @@ function createCanonicalUrlKey(value) {
 
     parsedUrl.hash = '';
 
-    const sortedParameters = [
+    const entries = [
       ...parsedUrl.searchParams.entries(),
     ].sort(
       ([keyA, valueA], [keyB, valueB]) => {
-        const keyComparison =
-          keyA.localeCompare(keyB);
+        const keyResult =
+          keyA
+            .toLowerCase()
+            .localeCompare(
+              keyB.toLowerCase()
+            );
 
-        if (keyComparison !== 0) {
-          return keyComparison;
+        if (keyResult !== 0) {
+          return keyResult;
         }
 
         return valueA.localeCompare(valueB);
@@ -242,12 +269,9 @@ function createCanonicalUrlKey(value) {
 
     parsedUrl.search = '';
 
-    for (
-      const [key, parameterValue]
-      of sortedParameters
-    ) {
+    for (const [key, parameterValue] of entries) {
       parsedUrl.searchParams.append(
-        key,
+        key.toLowerCase(),
         parameterValue
       );
     }
@@ -273,6 +297,7 @@ function deduplicateUrls(urls) {
       createCanonicalUrlKey(normalized);
 
     if (!unique.has(key)) {
+      // Preserve the original readable form for Sheets.
       unique.set(key, normalized);
     }
   }
@@ -280,22 +305,8 @@ function deduplicateUrls(urls) {
   return [...unique.values()];
 }
 
-function writeJson(fileName, data) {
-  fs.writeFileSync(
-    fileName,
-    JSON.stringify(data, null, 2),
-    'utf8'
-  );
-}
-
-function removeFileIfExists(fileName) {
-  if (fs.existsSync(fileName)) {
-    fs.unlinkSync(fileName);
-  }
-}
-
 // ============================================================
-// BROWSER PAGE SETUP
+// BROWSER PAGE CONFIGURATION
 // ============================================================
 
 async function configurePage(page) {
@@ -317,9 +328,7 @@ async function configurePage(page) {
     );
   }
 
-  await page.setUserAgent(
-    BROWSER_USER_AGENT
-  );
+  await page.setUserAgent(USER_AGENT);
 
   await page.setExtraHTTPHeaders({
     'Accept-Language':
@@ -336,7 +345,7 @@ async function configurePage(page) {
 }
 
 // ============================================================
-// BLOCKED-PAGE DETECTION
+// BLOCKED PAGE DETECTION
 // ============================================================
 
 function detectBlockedPage(
@@ -357,38 +366,31 @@ function detectBlockedPage(
   const blockedPatterns = [
     {
       pattern: '403 forbidden',
-      message:
-        '403 Forbidden page detected',
+      message: '403 Forbidden page detected',
     },
     {
       pattern: 'access denied',
-      message:
-        'Access Denied page detected',
+      message: 'Access Denied page detected',
     },
     {
       pattern: 'request blocked',
-      message:
-        'Request Blocked page detected',
+      message: 'Request Blocked page detected',
     },
     {
       pattern: 'verify you are human',
-      message:
-        'Human verification page detected',
+      message: 'Human verification page detected',
     },
     {
       pattern: 'captcha',
-      message:
-        'CAPTCHA page detected',
+      message: 'CAPTCHA page detected',
     },
     {
       pattern: 'cf-chl-',
-      message:
-        'Cloudflare challenge detected',
+      message: 'Cloudflare challenge detected',
     },
     {
       pattern: 'attention required',
-      message:
-        'Security challenge page detected',
+      message: 'Security challenge page detected',
     },
   ];
 
@@ -402,7 +404,7 @@ function detectBlockedPage(
 }
 
 // ============================================================
-// GOOGLE SHEETS RANGE HELPERS
+// GOOGLE SHEETS HELPERS
 // ============================================================
 
 async function loadUrlsFromRange(range) {
@@ -412,13 +414,15 @@ async function loadUrlsFromRange(range) {
       range: `${SHEET_NAME}!${range}`,
     });
 
-  return deduplicateUrls(
-    (response.data.values || [])
-      .flat()
-      .map(value =>
-        normalizeAmpersands(value)
-      )
-  );
+  const values = (
+    response.data.values || []
+  )
+    .flat()
+    .map(value =>
+      normalizeAmpersands(value)
+    );
+
+  return deduplicateUrls(values);
 }
 
 async function loadCalendarUrls() {
@@ -433,11 +437,25 @@ async function loadTargetUrls() {
   );
 }
 
-async function writeAuctionUrlsToSheet(
-  urls
-) {
+async function writeAuctionUrlsToSheet(urls) {
   const uniqueUrls =
     deduplicateUrls(urls);
+
+  if (
+    !uniqueUrls.length &&
+    PRESERVE_COLUMN_C_IF_NO_URLS_DISCOVERED
+  ) {
+    console.warn(
+      `No auction URLs were discovered. ` +
+      `${SHEET_NAME}!${AUCTION_URL_RANGE} ` +
+      'was not cleared or modified.'
+    );
+
+    return {
+      written: 0,
+      preservedExistingValues: true,
+    };
+  }
 
   await sheets.spreadsheets.values.clear({
     spreadsheetId: SPREADSHEET_ID,
@@ -449,10 +467,13 @@ async function writeAuctionUrlsToSheet(
     console.log(
       `Cleared ${SHEET_NAME}!` +
       `${AUCTION_URL_RANGE}; ` +
-      'no auction URLs were discovered.'
+      'no URLs were written.'
     );
 
-    return;
+    return {
+      written: 0,
+      preservedExistingValues: false,
+    };
   }
 
   await sheets.spreadsheets.values.update({
@@ -472,10 +493,15 @@ async function writeAuctionUrlsToSheet(
     `auction URL(s) to ` +
     `${SHEET_NAME}!${AUCTION_URL_RANGE}`
   );
+
+  return {
+    written: uniqueUrls.length,
+    preservedExistingValues: false,
+  };
 }
 
 // ============================================================
-// STAGE 1: CALENDAR LINK VALIDATION
+// STAGE 1: AUCTION PREVIEW URL VALIDATION
 // ============================================================
 
 function isLikelyAuctionDateUrl(value) {
@@ -484,56 +510,33 @@ function isLikelyAuctionDateUrl(value) {
       normalizeAmpersands(value)
     );
 
-    const action = clean(
-      parsedUrl.searchParams.get(
-        'zaction'
-      )
-    ).toUpperCase();
+    const parameters = {};
 
-    const method = clean(
-      parsedUrl.searchParams.get(
-        'zmethod'
-      )
-    ).toUpperCase();
-
-    const parameterNames = [
-      ...parsedUrl.searchParams.keys(),
-    ].map(key =>
-      key
-        .replace(/[^a-z0-9]/gi, '')
-        .toLowerCase()
-    );
-
-    const hasAuctionDateParameter =
-      parameterNames.includes(
-        'auctiondate'
-      );
-
-    const dateListingMethods =
-      new Set([
-        'DAYLIST',
-        'PREVIEW',
-        'AUCTION',
-        'BID',
-        'SALELIST',
-      ]);
-
-    // Reject the calendar URL itself.
-    if (
-      method === 'CALENDAR' &&
-      !hasAuctionDateParameter
+    for (
+      const [key, parameterValue]
+      of parsedUrl.searchParams.entries()
     ) {
-      return false;
+      parameters[key.toLowerCase()] =
+        clean(parameterValue);
     }
 
+    const action = String(
+      parameters.zaction || ''
+    ).toUpperCase();
+
+    const method = String(
+      parameters.zmethod || ''
+    ).toUpperCase();
+
+    const auctionDate = String(
+      parameters.auctiondate || ''
+    );
+
     return (
-      hasAuctionDateParameter ||
-      dateListingMethods.has(method) ||
-      (
-        action === 'USER' &&
-        /auctiondate=/i.test(
-          parsedUrl.search
-        )
+      action === 'AUCTION' &&
+      method === 'PREVIEW' &&
+      /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(
+        auctionDate
       )
     );
   } catch {
@@ -541,188 +544,390 @@ function isLikelyAuctionDateUrl(value) {
   }
 }
 
+function buildAuctionPreviewUrl(
+  calendarUrl,
+  month,
+  day,
+  year
+) {
+  const numericMonth = Number(month);
+  const numericDay = Number(day);
+  const numericYear = Number(year);
+
+  if (
+    !Number.isInteger(numericMonth) ||
+    !Number.isInteger(numericDay) ||
+    !Number.isInteger(numericYear)
+  ) {
+    return '';
+  }
+
+  if (
+    numericMonth < 1 ||
+    numericMonth > 12 ||
+    numericDay < 1 ||
+    numericDay > 31 ||
+    numericYear < 2000
+  ) {
+    return '';
+  }
+
+  try {
+    const calendar = new URL(
+      normalizeAmpersands(calendarUrl)
+    );
+
+    const auctionDate =
+      `${String(numericMonth).padStart(2, '0')}/` +
+      `${String(numericDay).padStart(2, '0')}/` +
+      `${numericYear}`;
+
+    return (
+      `${calendar.origin}/index.cfm` +
+      '?zaction=AUCTION' +
+      '&zmethod=PREVIEW' +
+      `&AuctionDate=${auctionDate}`
+    );
+  } catch {
+    return '';
+  }
+}
+
 // ============================================================
-// STAGE 1: LIVE CALENDAR DOM EXTRACTION
+// STAGE 1: CALENDAR CELL EXTRACTION
 // ============================================================
 
-async function extractCalendarAuctionLinks(
-  page
-) {
+async function extractCalendarAuctionLinks(page) {
   return page.evaluate(() => {
-    function normalizeText(value) {
+    function cleanText(value) {
       return String(value || '')
         .replace(/\u00a0/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
     }
 
-    function hasAuctionText(value) {
-      const text =
-        normalizeText(value);
+    function monthNameToNumber(value) {
+      const months = {
+        january: 1,
+        february: 2,
+        march: 3,
+        april: 4,
+        may: 5,
+        june: 6,
+        july: 7,
+        august: 8,
+        september: 9,
+        october: 10,
+        november: 11,
+        december: 12,
+      };
 
       return (
-        /\btax\s*deed\b/i.test(text) ||
-        /\bforeclosure\b/i.test(text) ||
-        /\bauction\b/i.test(text) ||
-        /\bactive\b/i.test(text) ||
-        /\bscheduled\b/i.test(text) ||
-        /\b\d+\s*\/\s*\d+\s*TD\b/i.test(
-          text
-        ) ||
-        /\b\d+\s*\/\s*\d+\s*FC\b/i.test(
-          text
-        )
+        months[
+          String(value || '')
+            .toLowerCase()
+        ] || null
       );
     }
 
-    function elementLooksLikeCalendar(
-      element
-    ) {
-      const text = normalizeText(
-        element.innerText ||
-        element.textContent ||
+    function looksLikePopulatedAuctionCell(text) {
+      const normalized =
+        cleanText(text);
+
+      return (
+        /\btax\s*deed\b/i.test(normalized) ||
+        /\bforeclosure\b/i.test(normalized) ||
+        /\b\d+\s*\/\s*\d+\s*TD\b/i.test(
+          normalized
+        ) ||
+        /\b\d+\s*\/\s*\d+\s*FC\b/i.test(
+          normalized
+        ) ||
+        /\b\d+\s+TD\b/i.test(normalized) ||
+        /\b\d+\s+FC\b/i.test(normalized)
+      );
+    }
+
+    function findDisplayedMonthAndYear() {
+      const bodyText = cleanText(
+        document.body?.innerText ||
+        document.body?.textContent ||
         ''
       );
 
-      const hasWeekdayNames =
-        /\bSunday\b/i.test(text) &&
-        /\bMonday\b/i.test(text) &&
-        /\bTuesday\b/i.test(text) &&
-        /\bSaturday\b/i.test(text);
-
-      const hasAuctionCalendarText =
-        /\bAuction Calendar\b/i.test(
-          text
-        ) ||
-        /\bTax Deed\b/i.test(text) ||
-        /\bForeclosure\b/i.test(text);
-
-      return (
-        hasWeekdayNames &&
-        hasAuctionCalendarText
-      );
-    }
-
-    const candidateSelectors = [
-      '#CALENDAR',
-      '#calendar',
-      '.CALENDAR',
-      '.calendar',
-      '[id*="CALENDAR" i]',
-      '[class*="CALENDAR" i]',
-      'table',
-    ];
-
-    const calendarRoots = [];
-
-    for (
-      const selector
-      of candidateSelectors
-    ) {
-      let elements = [];
-
-      try {
-        elements = [
-          ...document.querySelectorAll(
-            selector
-          ),
-        ];
-      } catch {
-        elements = [];
-      }
-
-      for (const element of elements) {
-        if (
-          elementLooksLikeCalendar(
-            element
-          ) &&
-          !calendarRoots.includes(
-            element
-          )
-        ) {
-          calendarRoots.push(element);
-        }
-      }
-    }
-
-    const rootsToSearch =
-      calendarRoots.length
-        ? calendarRoots
-        : [document.body];
-
-    const found = [];
-
-    for (const root of rootsToSearch) {
-      const anchors = [
-        ...root.querySelectorAll(
-          'a[href]'
-        ),
+      const patterns = [
+        /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})\b/i,
       ];
 
-      for (const anchor of anchors) {
-        const rawHref =
-          anchor.getAttribute('href') ||
-          '';
+      const preferredSelectors = [
+        '[class*="month" i]',
+        '[id*="month" i]',
+        '[class*="calendar" i]',
+        '[id*="calendar" i]',
+        '#Content_Title',
+        'h1',
+        'h2',
+        'h3',
+        'table',
+      ];
 
-        const resolvedHref =
-          anchor.href ||
-          rawHref;
+      for (
+        const selector
+        of preferredSelectors
+      ) {
+        let elements = [];
 
-        if (!resolvedHref) {
-          continue;
+        try {
+          elements = [
+            ...document.querySelectorAll(
+              selector
+            ),
+          ];
+        } catch {
+          elements = [];
         }
 
-        const anchorText =
-          normalizeText(
-            anchor.innerText ||
-            anchor.textContent ||
-            anchor.getAttribute(
-              'title'
-            ) ||
+        for (const element of elements) {
+          const text = cleanText(
+            element.innerText ||
+            element.textContent ||
             ''
           );
 
-        const calendarCell =
-          anchor.closest(
-            'td, th, ' +
-            'div[class*="CAL" i], ' +
-            'div[id*="CAL" i], li'
-          );
+          for (const pattern of patterns) {
+            const match =
+              text.match(pattern);
 
-        const cellText =
-          normalizeText(
-            calendarCell?.innerText ||
-            calendarCell?.textContent ||
-            anchorText
-          );
-
-        const hrefLooksLikeAuction =
-          /auctiondate=/i.test(
-            resolvedHref
-          ) ||
-          /zmethod=(daylist|preview|auction|bid|salelist)/i.test(
-            resolvedHref
-          );
-
-        const textLooksLikeAuction =
-          hasAuctionText(anchorText) ||
-          hasAuctionText(cellText);
-
-        if (
-          hrefLooksLikeAuction ||
-          textLooksLikeAuction
-        ) {
-          found.push({
-            href: resolvedHref,
-            rawHref,
-            anchorText,
-            cellText,
-          });
+            if (match) {
+              return {
+                monthName: match[1],
+                month:
+                  monthNameToNumber(
+                    match[1]
+                  ),
+                year: Number(match[2]),
+                sourceText: text,
+              };
+            }
+          }
         }
       }
+
+      for (const pattern of patterns) {
+        const match =
+          bodyText.match(pattern);
+
+        if (match) {
+          return {
+            monthName: match[1],
+            month:
+              monthNameToNumber(
+                match[1]
+              ),
+            year: Number(match[2]),
+            sourceText: match[0],
+          };
+        }
+      }
+
+      return {
+        monthName: '',
+        month: null,
+        year: null,
+        sourceText: '',
+      };
     }
 
-    return found;
+    function extractDayNumber(cell) {
+      // Prefer direct child text such as the number shown in
+      // the corner of a calendar cell.
+      const directTextParts = [
+        ...cell.childNodes,
+      ]
+        .filter(node =>
+          node.nodeType ===
+          Node.TEXT_NODE
+        )
+        .map(node =>
+          cleanText(node.textContent)
+        )
+        .filter(Boolean);
+
+      for (const part of directTextParts) {
+        const match = part.match(
+          /^\s*(\d{1,2})\b/
+        );
+
+        if (match) {
+          const day = Number(match[1]);
+
+          if (day >= 1 && day <= 31) {
+            return day;
+          }
+        }
+      }
+
+      const possibleDayElements = [
+        ...cell.querySelectorAll(
+          'a, span, div, strong, b'
+        ),
+      ];
+
+      for (
+        const element
+        of possibleDayElements
+      ) {
+        const text = cleanText(
+          element.innerText ||
+          element.textContent ||
+          ''
+        );
+
+        if (/^\d{1,2}$/.test(text)) {
+          const day = Number(text);
+
+          if (day >= 1 && day <= 31) {
+            return day;
+          }
+        }
+      }
+
+      const cellText = cleanText(
+        cell.innerText ||
+        cell.textContent ||
+        ''
+      );
+
+      const firstNumberMatch =
+        cellText.match(
+          /^\s*(\d{1,2})\b/
+        );
+
+      if (firstNumberMatch) {
+        const day = Number(
+          firstNumberMatch[1]
+        );
+
+        if (day >= 1 && day <= 31) {
+          return day;
+        }
+      }
+
+      return null;
+    }
+
+    function extractExistingPreviewUrls(cell) {
+      const values = [];
+
+      const elements = [
+        cell,
+        ...cell.querySelectorAll('*'),
+      ];
+
+      for (const element of elements) {
+        if (
+          element.tagName
+            ?.toLowerCase() === 'a'
+        ) {
+          values.push(
+            element.href || '',
+            element.getAttribute(
+              'href'
+            ) || ''
+          );
+        }
+
+        for (
+          const attribute
+          of element.attributes || []
+        ) {
+          values.push(
+            attribute.value || ''
+          );
+        }
+
+        values.push(
+          element.outerHTML || ''
+        );
+      }
+
+      const discovered = [];
+
+      for (let value of values) {
+        value = String(value || '')
+          .replace(/&amp;/gi, '&')
+          .replace(/\\u0026/gi, '&')
+          .replace(/\\x26/gi, '&')
+          .replace(/\\\//g, '/');
+
+        const matches = value.match(
+          /(?:https?:\/\/[^\s"'<>\\)]+)?\/?index\.cfm\?zaction=AUCTION&zmethod=PREVIEW&AuctionDate=\d{1,2}\/\d{1,2}\/\d{4}/gi
+        ) || [];
+
+        discovered.push(...matches);
+      }
+
+      return [...new Set(discovered)];
+    }
+
+    const displayedDate =
+      findDisplayedMonthAndYear();
+
+    const findings = [];
+
+    // The displayed RealForeclose calendar is table based.
+    const cells = [
+      ...document.querySelectorAll('td'),
+    ];
+
+    for (const cell of cells) {
+      const cellText = cleanText(
+        cell.innerText ||
+        cell.textContent ||
+        ''
+      );
+
+      if (
+        !looksLikePopulatedAuctionCell(
+          cellText
+        )
+      ) {
+        continue;
+      }
+
+      const existingUrls =
+        extractExistingPreviewUrls(cell);
+
+      const day =
+        extractDayNumber(cell);
+
+      findings.push({
+        sourceType:
+          existingUrls.length
+            ? 'existing-url'
+            : 'derived-date',
+
+        urls: existingUrls,
+
+        cellText,
+        day,
+
+        month:
+          displayedDate.month,
+
+        year:
+          displayedDate.year,
+
+        monthSource:
+          displayedDate.sourceText,
+
+        cellHtml: (
+          cell.outerHTML || ''
+        ).slice(0, 15000),
+      });
+    }
+
+    return findings;
   });
 }
 
@@ -773,8 +978,6 @@ async function inspectCalendarPage(
       throw new Error(blockedReason);
     }
 
-    // Wait for either a recognizable calendar or a link
-    // containing an auction date.
     await page.waitForFunction(
       () => {
         const bodyText =
@@ -782,23 +985,19 @@ async function inspectCalendarPage(
           document.body?.textContent ||
           '';
 
-        const hasCalendarHeaders =
+        const hasWeekHeaders =
           /\bSunday\b/i.test(bodyText) &&
           /\bMonday\b/i.test(bodyText) &&
           /\bSaturday\b/i.test(bodyText);
 
-        const hasAuctionDateLink =
-          Boolean(
-            document.querySelector(
-              'a[href*="auctiondate=" i], ' +
-              'a[href*="zmethod=DAYLIST" i], ' +
-              'a[href*="zmethod=PREVIEW" i]'
-            )
+        const hasDateHeading =
+          /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}\b/i.test(
+            bodyText
           );
 
         return (
-          hasCalendarHeaders ||
-          hasAuctionDateLink
+          hasWeekHeaders &&
+          hasDateHeading
         );
       },
       {
@@ -807,7 +1006,6 @@ async function inspectCalendarPage(
       }
     );
 
-    // Allow late calendar scripts to finish rendering.
     await sleep(1200);
 
     const candidates =
@@ -815,75 +1013,154 @@ async function inspectCalendarPage(
         page
       );
 
+    console.log(
+      `Populated calendar cells found: ` +
+      `${candidates.length}`
+    );
+
     const accepted = [];
     const rejected = [];
 
     for (const candidate of candidates) {
-      let absoluteUrl = '';
-
-      try {
-        absoluteUrl = new URL(
-          normalizeAmpersands(
-            candidate.href
-          ),
-          normalizedCalendarUrl
-        ).toString();
-      } catch {
-        rejected.push({
-          calendarUrl:
-            normalizedCalendarUrl,
-
-          href:
-            candidate.href,
-
-          reason:
-            'InvalidDiscoveredUrl',
-        });
-
-        continue;
-      }
+      const possibleUrls = [
+        ...(candidate.urls || []),
+      ];
 
       if (
-        !isLikelyAuctionDateUrl(
-          absoluteUrl
-        )
+        !possibleUrls.length &&
+        candidate.sourceType ===
+          'derived-date'
       ) {
+        const generatedUrl =
+          buildAuctionPreviewUrl(
+            normalizedCalendarUrl,
+            candidate.month,
+            candidate.day,
+            candidate.year
+          );
+
+        if (generatedUrl) {
+          possibleUrls.push(
+            generatedUrl
+          );
+        }
+      }
+
+      if (!possibleUrls.length) {
         rejected.push({
           calendarUrl:
             normalizedCalendarUrl,
 
-          href:
-            absoluteUrl,
+          reason:
+            'UnableToExtractOrDeriveAuctionUrl',
 
-          anchorText:
-            candidate.anchorText,
+          sourceType:
+            candidate.sourceType,
 
           cellText:
             candidate.cellText,
 
-          reason:
-            'NotAnAuctionDateUrl',
+          day:
+            candidate.day,
+
+          month:
+            candidate.month,
+
+          year:
+            candidate.year,
+
+          monthSource:
+            candidate.monthSource,
+
+          cellHtml:
+            candidate.cellHtml,
         });
 
         continue;
       }
 
-      accepted.push({
-        calendarUrl:
-          normalizedCalendarUrl,
+      for (
+        const discoveredValue
+        of possibleUrls
+      ) {
+        let absoluteUrl = '';
 
-        url:
-          absoluteUrl,
+        try {
+          absoluteUrl = new URL(
+            normalizeAmpersands(
+              discoveredValue
+            ),
+            normalizedCalendarUrl
+          ).toString();
+        } catch {
+          rejected.push({
+            calendarUrl:
+              normalizedCalendarUrl,
 
-        anchorText:
-          candidate.anchorText,
+            reason:
+              'InvalidDiscoveredUrl',
 
-        cellText:
-          candidate.cellText,
-      });
+            discoveredValue,
+
+            cellText:
+              candidate.cellText,
+          });
+
+          continue;
+        }
+
+        if (
+          !isLikelyAuctionDateUrl(
+            absoluteUrl
+          )
+        ) {
+          rejected.push({
+            calendarUrl:
+              normalizedCalendarUrl,
+
+            reason:
+              'NotAnAuctionPreviewUrl',
+
+            href:
+              absoluteUrl,
+
+            sourceType:
+              candidate.sourceType,
+
+            cellText:
+              candidate.cellText,
+          });
+
+          continue;
+        }
+
+        accepted.push({
+          calendarUrl:
+            normalizedCalendarUrl,
+
+          url:
+            absoluteUrl,
+
+          sourceType:
+            candidate.sourceType,
+
+          cellText:
+            candidate.cellText,
+
+          day:
+            candidate.day,
+
+          month:
+            candidate.month,
+
+          year:
+            candidate.year,
+        });
+      }
     }
 
-    const uniqueAccepted = new Map();
+    const uniqueAccepted =
+      new Map();
 
     for (const item of accepted) {
       const key =
@@ -908,14 +1185,29 @@ async function inspectCalendarPage(
       `${details.length}`
     );
 
+    for (const item of details) {
+      console.log(
+        `  ${item.sourceType}: ` +
+        `${item.url}`
+      );
+    }
+
+    if (!details.length) {
+      console.warn(
+        'No auction preview URLs were accepted.'
+      );
+    }
+
     return {
-      urls:
-        details.map(
-          item => item.url
-        ),
+      urls: details.map(
+        item => item.url
+      ),
 
       details,
       rejected,
+
+      candidatesFound:
+        candidates.length,
     };
   } catch (error) {
     const message =
@@ -931,11 +1223,11 @@ async function inspectCalendarPage(
       urls: [],
       details: [],
       rejected: [],
+      candidatesFound: 0,
 
       error: {
         url: calendarUrl,
-        stage:
-          'CalendarDiscovery',
+        stage: 'CalendarDiscovery',
         message,
       },
     };
@@ -970,16 +1262,15 @@ async function refreshAuctionUrlsFromCalendars(
     await loadCalendarUrls();
 
   console.log(
-    `Found ${calendarUrls.length} ` +
-    `unique calendar URL(s) in ` +
+    `Found ${calendarUrls.length} unique ` +
+    `calendar URL(s) in ` +
     `${SHEET_NAME}!${CALENDAR_URL_RANGE}`
   );
 
   if (!calendarUrls.length) {
     throw new Error(
       `No valid calendar URLs found in ` +
-      `${SHEET_NAME}!` +
-      `${CALENDAR_URL_RANGE}`
+      `${SHEET_NAME}!${CALENDAR_URL_RANGE}`
     );
   }
 
@@ -1048,19 +1339,34 @@ async function refreshAuctionUrlsFromCalendars(
     );
   }
 
-  if (
-    WRITE_DISCOVERED_URLS_TO_SHEET
-  ) {
-    await writeAuctionUrlsToSheet(
-      uniqueAuctionUrls
+  if (!uniqueAuctionUrls.length) {
+    console.warn(
+      'Stage 1 discovered zero auction preview URLs.'
     );
+
+    console.warn(
+      `${SHEET_NAME}!${AUCTION_URL_RANGE} ` +
+      'will be preserved.'
+    );
+  }
+
+  let sheetWriteResult = {
+    written: 0,
+    preservedExistingValues: true,
+  };
+
+  if (WRITE_DISCOVERED_URLS_TO_SHEET) {
+    sheetWriteResult =
+      await writeAuctionUrlsToSheet(
+        uniqueAuctionUrls
+      );
   }
 
   console.log('');
   console.log(
     `Stage 1 complete: ` +
-    `${uniqueAuctionUrls.length} ` +
-    'unique auction URL(s) discovered.'
+    `${uniqueAuctionUrls.length} unique ` +
+    'auction URL(s) discovered.'
   );
 
   return {
@@ -1070,11 +1376,12 @@ async function refreshAuctionUrlsFromCalendars(
     discoveryDetails,
     rejectedLinks,
     errors,
+    sheetWriteResult,
   };
 }
 
 // ============================================================
-// STRUCTURED AUCTION FIELD EXTRACTION
+// STRUCTURED FIELD EXTRACTION
 // ============================================================
 
 function getByLabel(
@@ -1235,9 +1542,7 @@ function extractCurrencyField(
 
     if (
       match &&
-      parseCurrency(
-        match[1]
-      ) !== null
+      parseCurrency(match[1]) !== null
     ) {
       return clean(match[1]);
     }
@@ -1247,7 +1552,7 @@ function extractCurrencyField(
 }
 
 // ============================================================
-// AUCTION FIELD VALIDATION
+// FIELD VALIDATION
 // ============================================================
 
 function isRealParcelId(value) {
@@ -1312,12 +1617,10 @@ function extractAuctionDateFromUrl(url) {
       const [key, value]
       of parsedUrl.searchParams.entries()
     ) {
-      const normalizedKey = key
-        .replace(/[^a-z]/gi, '')
-        .toLowerCase();
-
       if (
-        normalizedKey ===
+        key
+          .replace(/[^a-z]/gi, '')
+          .toLowerCase() ===
         'auctiondate'
       ) {
         return clean(value);
@@ -1357,9 +1660,7 @@ function extractAuctionDateFromText(
 // ADDRESS PROCESSING
 // ============================================================
 
-function splitAddressAndCityZip(
-  value
-) {
+function splitAddressAndCityZip(value) {
   let propertyAddress =
     clean(value);
 
@@ -1391,7 +1692,7 @@ function splitAddressAndCityZip(
 }
 
 // ============================================================
-// AUCTION STATUS DETECTION
+// STATUS AND SALE PRICE
 // ============================================================
 
 function determineAuctionStatus({
@@ -1409,26 +1710,16 @@ function determineAuctionStatus({
     clean(itemClass).toLowerCase();
 
   if (
-    statusLower.includes(
-      'redeemed'
-    ) ||
-    blockLower.includes(
-      'redeemed'
-    )
+    statusLower.includes('redeemed') ||
+    blockLower.includes('redeemed')
   ) {
     return 'Redeemed';
   }
 
   if (
-    statusLower.includes(
-      'cancel'
-    ) ||
-    blockLower.includes(
-      'cancelled'
-    ) ||
-    blockLower.includes(
-      'canceled'
-    )
+    statusLower.includes('cancel') ||
+    blockLower.includes('cancelled') ||
+    blockLower.includes('canceled')
   ) {
     return 'Cancelled';
   }
@@ -1436,35 +1727,23 @@ function determineAuctionStatus({
   if (
     statusLower.includes('sold') ||
     statusLower.includes('paid') ||
-    blockLower.includes(
-      'auction sold'
-    ) ||
-    blockLower.includes(
-      'sold to'
-    ) ||
+    blockLower.includes('auction sold') ||
+    blockLower.includes('sold to') ||
     classLower.includes('sold')
   ) {
     return 'Sold';
   }
 
   if (
-    statusLower.includes(
-      'active'
-    ) ||
-    blockLower.includes(
-      'active auction'
-    )
+    statusLower.includes('active') ||
+    blockLower.includes('active auction')
   ) {
     return 'Active';
   }
 
   if (
-    classLower.includes(
-      'preview'
-    ) ||
-    blockLower.includes(
-      'preview'
-    )
+    classLower.includes('preview') ||
+    blockLower.includes('preview')
   ) {
     return 'Preview';
   }
@@ -1472,25 +1751,17 @@ function determineAuctionStatus({
   return 'Unknown';
 }
 
-// ============================================================
-// STRICT SALE-PRICE EXTRACTION
-// ============================================================
-
 function extractConfirmedSalePrice(
   $,
   $item,
   blockText,
   auctionStatus
 ) {
-  // Do not attempt to extract a sale price unless sold status
-  // has been positively identified.
   if (auctionStatus !== 'Sold') {
     return '';
   }
 
-  // Intentionally specific.
-  // Do not add a generic "Amount" label because it can match
-  // Final Judgment Amount or another unrelated value.
+  // Do not add the generic label "Amount".
   const strictSalePriceLabels = [
     'Sale Price',
     'Sold Amount',
@@ -1516,9 +1787,7 @@ function extractConfirmedSalePrice(
     );
 
   if (
-    parseCurrency(
-      salePrice
-    ) === null
+    parseCurrency(salePrice) === null
   ) {
     salePrice = getByLabel(
       $,
@@ -1528,9 +1797,7 @@ function extractConfirmedSalePrice(
   }
 
   if (
-    parseCurrency(
-      salePrice
-    ) === null
+    parseCurrency(salePrice) === null
   ) {
     salePrice =
       extractCurrencyField(
@@ -1540,9 +1807,7 @@ function extractConfirmedSalePrice(
   }
 
   if (
-    parseCurrency(
-      salePrice
-    ) === null
+    parseCurrency(salePrice) === null
   ) {
     return '';
   }
@@ -1551,10 +1816,10 @@ function extractConfirmedSalePrice(
 }
 
 // ============================================================
-// STAGE 2: PAGE AND PAGER CONTROLS
+// STAGE 2: WAIT FOR DYNAMIC AUCTION DATA
 // ============================================================
 
-async function getPageScopes(page) {
+async function waitForAuctionData(page) {
   await page.waitForSelector(
     '#BID_WINDOW_CONTAINER',
     {
@@ -1574,351 +1839,375 @@ async function getPageScopes(page) {
         return false;
       }
 
-      const auction =
+      const auctionRecord =
         root.querySelector(
           'div[aid]'
         );
 
-      const text =
+      if (auctionRecord) {
+        return true;
+      }
+
+      const rootText =
         root.innerText ||
         root.textContent ||
         '';
 
-      const looksEmpty =
+      const noCases =
+        /there are no cases currently being auctioned/i.test(
+          rootText
+        ) ||
         /no\s+(auction|record|result|item)s?\s+(found|available)/i.test(
-          text
+          rootText
         );
 
+      if (noCases) {
+        return true;
+      }
+
+      const auctionList = (
+        document.querySelector(
+          '#ALB'
+        )?.textContent || ''
+      ).trim();
+
+      const possibleIds =
+        auctionList
+          .split(',')
+          .map(value => value.trim())
+          .filter(Boolean);
+
+      const pageIndicators = [
+        ...root.querySelectorAll(
+          '.PageFrame input'
+        ),
+      ];
+
+      const pageInputsReady =
+        pageIndicators.some(input => {
+          const value =
+            String(input.value || '')
+              .trim();
+
+          const currentPage =
+            String(
+              input.getAttribute(
+                'curPG'
+              ) || ''
+            ).trim();
+
+          return Boolean(
+            value ||
+            currentPage
+          );
+        });
+
+      const visibleCards = [
+        ...root.querySelectorAll(
+          '#Area_R > div, ' +
+          '#Area_W > div, ' +
+          '#Area_C > div'
+        ),
+      ].some(element =>
+        !element.classList.contains(
+          'Loading'
+        )
+      );
+
       return Boolean(
-        auction ||
-        looksEmpty
+        visibleCards ||
+        pageInputsReady ||
+        possibleIds.length === 0
       );
     },
     {
       timeout:
-        ELEMENT_WAIT_TIMEOUT,
+        AJAX_WAIT_TIMEOUT,
     }
   );
 
-  return {
-    async firstRowSignature() {
-      return page.$eval(
-        '#BID_WINDOW_CONTAINER',
-        root => {
-          const first =
-            root.querySelector(
-              'div[aid]'
-            );
-
-          if (!first) {
-            return '__NONE__';
-          }
-
-          const auctionId =
-            first.getAttribute(
-              'aid'
-            ) || '';
-
-          const text =
-            first.innerText ||
-            first.textContent ||
-            '';
-
-          return (
-            `${auctionId}|` +
-            text
-              .replace(/\s+/g, ' ')
-              .trim()
-          );
-        }
-      );
-    },
-
-    async waitForListChange(
-      previousSignature,
-      timeoutMilliseconds =
-        PAGE_CHANGE_TIMEOUT
-    ) {
-      const started =
-        Date.now();
-
-      while (
-        Date.now() - started <
-        timeoutMilliseconds
-      ) {
-        try {
-          const current =
-            await this
-              .firstRowSignature();
-
-          if (
-            current !==
-            previousSignature
-          ) {
-            return true;
-          }
-        } catch {
-          // Continue waiting.
-        }
-
-        await sleep(400);
-      }
-
-      return false;
-    },
-
-    async getPagerPieces() {
-      const bar = await page.$(
-        '#BID_WINDOW_CONTAINER ' +
-        '.Head_C > div:nth-of-type(3)'
-      );
-
-      if (!bar) {
-        return {
-          bar: null,
-          input: null,
-          text: null,
-          next: null,
-        };
-      }
-
-      const input =
-        await bar.$(
-          "input[type='text'], " +
-          "input[type='number'], " +
-          "input:not([type])"
-        );
-
-      const text =
-        await bar.$(
-          'span.PageText'
-        );
-
-      const next =
-        (await bar.$(
-          'span.PageRight > img'
-        )) ||
-        (await bar.$(
-          '.PageRight_HVR > img'
-        )) ||
-        (await bar.$(
-          '.PageRight img'
-        )) ||
-        (await bar.$(
-          'img[alt*="next" i], ' +
-          'img[title*="next" i]'
-        ));
-
-      return {
-        bar,
-        input,
-        text,
-        next,
-      };
-    },
-
-    async readIndicator(pieces) {
-      if (
-        !pieces ||
-        !pieces.bar
-      ) {
-        return {
-          current: null,
-          total: null,
-          raw: '',
-        };
-      }
-
-      return page.evaluate(
-        bar => {
-          const input =
-            bar.querySelector(
-              'input'
-            );
-
-          const text =
-            bar.querySelector(
-              'span.PageText'
-            );
-
-          const inputValue = (
-            input?.value || ''
-          ).trim();
-
-          const raw = (
-            text?.innerText ||
-            text?.textContent ||
-            ''
-          )
-            .replace(/\s+/g, ' ')
-            .trim();
-
-          const totalMatch =
-            raw.match(
-              /\bof\s*([0-9]+)/i
-            );
-
-          const currentMatch =
-            raw.match(
-              /\b(?:page\s*)?([0-9]+)\s+of\s+[0-9]+/i
-            );
-
-          const currentFromInput =
-            /^\d+$/.test(
-              inputValue
-            )
-              ? Number(inputValue)
-              : null;
-
-          const currentFromText =
-            currentMatch
-              ? Number(
-                  currentMatch[1]
-                )
-              : null;
-
-          return {
-            current:
-              currentFromInput ||
-              currentFromText ||
-              null,
-
-            total:
-              totalMatch
-                ? Number(
-                    totalMatch[1]
-                  )
-                : null,
-
-            raw,
-          };
-        },
-        pieces.bar
-      );
-    },
-
-    async setPageInputAndGo(
-      pieces,
-      nextPage
-    ) {
-      if (
-        !pieces ||
-        !pieces.input
-      ) {
-        return false;
-      }
-
-      try {
-        await pieces.input.focus();
-
-        await page.evaluate(
-          (element, value) => {
-            const descriptor =
-              Object
-                .getOwnPropertyDescriptor(
-                  HTMLInputElement
-                    .prototype,
-                  'value'
-                );
-
-            const setter =
-              descriptor?.set;
-
-            if (setter) {
-              setter.call(
-                element,
-                String(value)
-              );
-            } else {
-              element.value =
-                String(value);
-            }
-
-            element.dispatchEvent(
-              new Event('input', {
-                bubbles: true,
-              })
-            );
-
-            element.dispatchEvent(
-              new Event('change', {
-                bubbles: true,
-              })
-            );
-          },
-          pieces.input,
-          nextPage
-        );
-
-        await page.keyboard.press(
-          'Enter'
-        );
-
-        return true;
-      } catch {
-        return false;
-      }
-    },
-
-    async clickNextArrow(pieces) {
-      if (
-        !pieces ||
-        !pieces.next
-      ) {
-        return false;
-      }
-
-      try {
-        await page.evaluate(
-          element => {
-            element.scrollIntoView({
-              block: 'center',
-            });
-
-            const clickable =
-              element.closest(
-                'a, button, ' +
-                'input[type="submit"], ' +
-                'input[type="button"]'
-              );
-
-            (
-              clickable ||
-              element
-            ).click();
-          },
-          pieces.next
-        );
-
-        return true;
-      } catch {
-        try {
-          await pieces.next.click({
-            delay: 30,
-          });
-
-          return true;
-        } catch {
-          return false;
-        }
-      }
-    },
-  };
+  // Allow the last AJAX-render cycle to finish.
+  await sleep(1500);
 }
 
 // ============================================================
-// STAGE 2: AUCTION PARSER
+// STAGE 2: AREA AND PAGINATION HELPERS
+// ============================================================
+
+async function getAreaState(
+  page,
+  areaCode
+) {
+  return page.evaluate(code => {
+    const area =
+      document.querySelector(
+        `#Area_${code}`
+      );
+
+    const pageFrames = [
+      ...document.querySelectorAll(
+        `.PageFrame[area="${code}"]`
+      ),
+    ];
+
+    const firstAuction =
+      area?.querySelector(
+        'div[aid]'
+      );
+
+    const firstSignature =
+      firstAuction
+        ? (
+            `${
+              firstAuction.getAttribute(
+                'aid'
+              ) || ''
+            }|${
+              (
+                firstAuction.innerText ||
+                firstAuction.textContent ||
+                ''
+              )
+                .replace(/\s+/g, ' ')
+                .trim()
+            }`
+          )
+        : '__NONE__';
+
+    let current = null;
+    let total = null;
+
+    for (const frame of pageFrames) {
+      const input =
+        frame.querySelector(
+          'input'
+        );
+
+      const totalElement =
+        frame.querySelector(
+          '[id^="max"]'
+        );
+
+      const inputValue =
+        String(
+          input?.value ||
+          input?.getAttribute(
+            'curPG'
+          ) ||
+          ''
+        ).trim();
+
+      const totalValue =
+        String(
+          totalElement?.textContent ||
+          ''
+        ).trim();
+
+      if (
+        current === null &&
+        /^\d+$/.test(inputValue)
+      ) {
+        current =
+          Number(inputValue);
+      }
+
+      if (
+        total === null &&
+        /^\d+$/.test(totalValue)
+      ) {
+        total =
+          Number(totalValue);
+      }
+    }
+
+    return {
+      exists: Boolean(area),
+      firstSignature,
+      recordCount:
+        area
+          ? area.querySelectorAll(
+              'div[aid]'
+            ).length
+          : 0,
+      current,
+      total,
+    };
+  }, areaCode);
+}
+
+async function waitForAreaChange(
+  page,
+  areaCode,
+  previousSignature,
+  timeoutMilliseconds =
+    PAGE_CHANGE_TIMEOUT
+) {
+  const started = Date.now();
+
+  while (
+    Date.now() - started <
+    timeoutMilliseconds
+  ) {
+    const state =
+      await getAreaState(
+        page,
+        areaCode
+      );
+
+    if (
+      state.firstSignature !==
+      previousSignature
+    ) {
+      await sleep(500);
+      return true;
+    }
+
+    await sleep(400);
+  }
+
+  return false;
+}
+
+async function moveAreaToNextPage(
+  page,
+  areaCode,
+  nextPage,
+  previousSignature
+) {
+  const inputSelector =
+    `.PageFrame[area="${areaCode}"] ` +
+    'input';
+
+  const nextSelector =
+    `.PageFrame[area="${areaCode}"] ` +
+    '.PageRight';
+
+  const input =
+    await page.$(inputSelector);
+
+  if (input) {
+    try {
+      await input.focus();
+
+      await page.evaluate(
+        (element, value) => {
+          const descriptor =
+            Object
+              .getOwnPropertyDescriptor(
+                HTMLInputElement.prototype,
+                'value'
+              );
+
+          const setter =
+            descriptor?.set;
+
+          if (setter) {
+            setter.call(
+              element,
+              String(value)
+            );
+          } else {
+            element.value =
+              String(value);
+          }
+
+          element.dispatchEvent(
+            new Event('input', {
+              bubbles: true,
+            })
+          );
+
+          element.dispatchEvent(
+            new Event('change', {
+              bubbles: true,
+            })
+          );
+        },
+        input,
+        nextPage
+      );
+
+      await page.keyboard.press('Enter');
+
+      const changed =
+        await waitForAreaChange(
+          page,
+          areaCode,
+          previousSignature
+        );
+
+      if (changed) {
+        return true;
+      }
+    } catch {
+      // Fall back to next arrow.
+    }
+  }
+
+  const nextArrow =
+    await page.$(nextSelector);
+
+  if (!nextArrow) {
+    return false;
+  }
+
+  try {
+    await page.evaluate(element => {
+      element.scrollIntoView({
+        block: 'center',
+      });
+
+      const clickable =
+        element.closest(
+          'a, button'
+        );
+
+      (
+        clickable ||
+        element
+      ).click();
+    }, nextArrow);
+
+    return waitForAreaChange(
+      page,
+      areaCode,
+      previousSignature
+    );
+  } catch {
+    try {
+      await nextArrow.click({
+        delay: 30,
+      });
+
+      return waitForAreaChange(
+        page,
+        areaCode,
+        previousSignature
+      );
+    } catch {
+      return false;
+    }
+  }
+}
+
+// ============================================================
+// STAGE 2: AUCTION HTML PARSER
 // ============================================================
 
 function parseAuctionsFromHtml(
   html,
-  pageUrl
+  pageUrl,
+  areaCode = ''
 ) {
   const $ = cheerio.load(html);
 
   const rows = [];
   const relevantElements = [];
   const rejectedRows = [];
+
+  const selector = areaCode
+    ? `#Area_${areaCode} div[aid]`
+    : '#BID_WINDOW_CONTAINER div[aid]';
 
   const openingBidLabels = [
     'Est. Min. Bid',
@@ -1936,28 +2225,300 @@ function parseAuctionsFromHtml(
     'Appraised Value',
   ];
 
-  $('#BID_WINDOW_CONTAINER div[aid]')
-    .each((_, item) => {
-      const $item = $(item);
+  $(selector).each((_, item) => {
+    const $item = $(item);
 
-      const blockText =
-        clean($item.text());
+    const blockText =
+      clean($item.text());
 
-      const auctionId =
-        clean(
-          $item.attr('aid')
+    const auctionId =
+      clean($item.attr('aid'));
+
+    const itemClass =
+      clean($item.attr('class'));
+
+    relevantElements.push({
+      sourceUrl: pageUrl,
+      areaCode,
+      tag: 'div',
+      attrs:
+        $item.attr() || {},
+      text:
+        blockText.slice(
+          0,
+          10000
+        ),
+    });
+
+    // --------------------------------------------------------
+    // Case number
+    // --------------------------------------------------------
+
+    let caseNumber =
+      getByLabel(
+        $,
+        $item,
+        [
+          'Cause Number',
+          'Case Number',
+          'Case #',
+        ]
+      );
+
+    caseNumber ||=
+      extractTextField(
+        blockText,
+        [
+          'Case #',
+          'Case Number',
+          'Cause Number',
+        ],
+        [
+          'Final Judgment Amount',
+          'Est. Min. Bid',
+          'Estimated Minimum Bid',
+          'Minimum Bid',
+          'Opening Bid',
+          'Parcel ID',
+          'Parcel Number',
+          'Account Number',
+          'Property Address',
+          'Assessed Value',
+          'Adjudged Value',
+          'Plaintiff Max Bid',
+        ]
+      );
+
+    // --------------------------------------------------------
+    // Opening or minimum bid
+    // --------------------------------------------------------
+
+    let openingBid =
+      getByLabel(
+        $,
+        $item,
+        openingBidLabels
+      );
+
+    if (
+      parseCurrency(openingBid) === null
+    ) {
+      openingBid =
+        extractCurrencyField(
+          blockText,
+          openingBidLabels
+        );
+    }
+
+    // --------------------------------------------------------
+    // Parcel ID
+    // --------------------------------------------------------
+
+    let parcelId =
+      getByLabel(
+        $,
+        $item,
+        [
+          'Account Number',
+          'Parcel Number',
+          'Parcel ID',
+          'Parcel #',
+          'APN',
+        ]
+      );
+
+    parcelId ||=
+      extractTextField(
+        blockText,
+        [
+          'Parcel ID',
+          'Parcel Number',
+          'Account Number',
+          'Parcel #',
+          'APN',
+        ],
+        [
+          'Property Address',
+          'Assessed Value',
+          'Adjudged Value',
+          'Plaintiff Max Bid',
+          'Final Judgment Amount',
+          'Opening Bid',
+          'Est. Min. Bid',
+          'Estimated Minimum Bid',
+        ]
+      );
+
+    // --------------------------------------------------------
+    // Property address
+    // --------------------------------------------------------
+
+    let propertyAddress =
+      getByLabel(
+        $,
+        $item,
+        [
+          'Property Address',
+          'Address',
+        ]
+      );
+
+    propertyAddress ||=
+      extractTextField(
+        blockText,
+        ['Property Address'],
+        [
+          'City, State Zip',
+          'City/State/Zip',
+          'City State Zip',
+          'Assessed Value',
+          'Adjudged Value',
+          'Plaintiff Max Bid',
+          'Parcel ID',
+          'Final Judgment Amount',
+          'Opening Bid',
+          'Est. Min. Bid',
+        ]
+      );
+
+    // --------------------------------------------------------
+    // Assessed value
+    // --------------------------------------------------------
+
+    let assessedValue =
+      getByLabel(
+        $,
+        $item,
+        assessedValueLabels
+      );
+
+    if (
+      parseCurrency(assessedValue) === null
+    ) {
+      assessedValue =
+        extractCurrencyField(
+          blockText,
+          assessedValueLabels
+        );
+    }
+
+    // --------------------------------------------------------
+    // City, state, and ZIP
+    // --------------------------------------------------------
+
+    let cityStateZip =
+      getByLabel(
+        $,
+        $item,
+        [
+          'City, State Zip',
+          'City/State/Zip',
+          'City State Zip',
+          'City State ZIP',
+        ]
+      );
+
+    if (
+      !cityStateZip &&
+      propertyAddress
+    ) {
+      const split =
+        splitAddressAndCityZip(
+          propertyAddress
         );
 
-      const itemClass =
-        clean(
-          $item.attr('class')
-        );
+      propertyAddress =
+        split.propertyAddress;
+
+      cityStateZip =
+        split.cityStateZip;
+    }
+
+    // --------------------------------------------------------
+    // Status
+    // --------------------------------------------------------
+
+    const status =
+      clean(
+        $item
+          .find('div.ASTAT_MSGA')
+          .first()
+          .text()
+      ) ||
+      clean(
+        $item
+          .find('.status, .ASTAT_MSGA')
+          .first()
+          .text()
+      );
+
+    const auctionStatus =
+      determineAuctionStatus({
+        status,
+        blockText,
+        itemClass,
+      });
+
+    // Sale price remains blank unless sold status is confirmed.
+    const salePrice =
+      extractConfirmedSalePrice(
+        $,
+        $item,
+        blockText,
+        auctionStatus
+      );
+
+    const auctionDate =
+      extractAuctionDateFromUrl(
+        pageUrl
+      ) ||
+      extractAuctionDateFromText(
+        blockText
+      );
+
+    const openingBidNumber =
+      parseCurrency(openingBid);
+
+    const salePriceNumber =
+      parseCurrency(salePrice);
+
+    const assessedValueNumber =
+      parseCurrency(assessedValue);
+
+    // --------------------------------------------------------
+    // Validation
+    // --------------------------------------------------------
+
+    if (
+      !isRealCaseNumber(
+        caseNumber
+      )
+    ) {
+      const rejection = {
+        sourceUrl: pageUrl,
+        areaCode,
+        auctionId,
+        reason:
+          'MissingOrInvalidCaseNumber',
+        caseNumber:
+          clean(caseNumber),
+        parcelId:
+          clean(parcelId),
+        openingBid:
+          clean(openingBid),
+      };
+
+      rejectedRows.push(rejection);
 
       relevantElements.push({
         sourceUrl: pageUrl,
-        tag: 'div',
-        attrs:
-          $item.attr() || {},
+        areaCode,
+        tag: 'parse-rejection',
+        attrs: {
+          aid: auctionId,
+          reason:
+            rejection.reason,
+        },
         text:
           blockText.slice(
             0,
@@ -1965,487 +2526,185 @@ function parseAuctionsFromHtml(
           ),
       });
 
-      // ------------------------------------------------------
-      // CASE NUMBER
-      // ------------------------------------------------------
+      return;
+    }
 
-      let caseNumber =
-        getByLabel(
-          $,
-          $item,
-          [
-            'Cause Number',
-            'Case Number',
-            'Case #',
-          ]
-        );
-
-      caseNumber ||=
-        extractTextField(
-          blockText,
-          [
-            'Case #',
-            'Case Number',
-            'Cause Number',
-          ],
-          [
-            'Final Judgment Amount',
-            'Est. Min. Bid',
-            'Estimated Minimum Bid',
-            'Minimum Bid',
-            'Opening Bid',
-            'Parcel ID',
-            'Parcel Number',
-            'Account Number',
-            'Property Address',
-            'Assessed Value',
-            'Adjudged Value',
-            'Plaintiff Max Bid',
-          ]
-        );
-
-      // ------------------------------------------------------
-      // OPENING OR MINIMUM BID
-      // ------------------------------------------------------
-
-      let openingBid =
-        getByLabel(
-          $,
-          $item,
-          openingBidLabels
-        );
-
-      if (
-        parseCurrency(
-          openingBid
-        ) === null
-      ) {
-        openingBid =
-          extractCurrencyField(
-            blockText,
-            openingBidLabels
-          );
-      }
-
-      // ------------------------------------------------------
-      // PARCEL ID
-      // ------------------------------------------------------
-
-      let parcelId =
-        getByLabel(
-          $,
-          $item,
-          [
-            'Account Number',
-            'Parcel Number',
-            'Parcel ID',
-            'Parcel #',
-            'APN',
-          ]
-        );
-
-      parcelId ||=
-        extractTextField(
-          blockText,
-          [
-            'Parcel ID',
-            'Parcel Number',
-            'Account Number',
-            'Parcel #',
-            'APN',
-          ],
-          [
-            'Property Address',
-            'Assessed Value',
-            'Adjudged Value',
-            'Plaintiff Max Bid',
-            'Final Judgment Amount',
-            'Opening Bid',
-            'Est. Min. Bid',
-            'Estimated Minimum Bid',
-          ]
-        );
-
-      // ------------------------------------------------------
-      // PROPERTY ADDRESS
-      // ------------------------------------------------------
-
-      let propertyAddress =
-        getByLabel(
-          $,
-          $item,
-          [
-            'Property Address',
-            'Address',
-          ]
-        );
-
-      propertyAddress ||=
-        extractTextField(
-          blockText,
-          ['Property Address'],
-          [
-            'City, State Zip',
-            'City/State/Zip',
-            'City State Zip',
-            'Assessed Value',
-            'Adjudged Value',
-            'Plaintiff Max Bid',
-            'Parcel ID',
-            'Final Judgment Amount',
-            'Opening Bid',
-            'Est. Min. Bid',
-          ]
-        );
-
-      // ------------------------------------------------------
-      // ASSESSED VALUE
-      // ------------------------------------------------------
-
-      let assessedValue =
-        getByLabel(
-          $,
-          $item,
-          assessedValueLabels
-        );
-
-      if (
-        parseCurrency(
-          assessedValue
-        ) === null
-      ) {
-        assessedValue =
-          extractCurrencyField(
-            blockText,
-            assessedValueLabels
-          );
-      }
-
-      // ------------------------------------------------------
-      // CITY, STATE, ZIP
-      // ------------------------------------------------------
-
-      let cityStateZip =
-        getByLabel(
-          $,
-          $item,
-          [
-            'City, State Zip',
-            'City/State/Zip',
-            'City State Zip',
-            'City State ZIP',
-          ]
-        );
-
-      if (
-        !cityStateZip &&
-        propertyAddress
-      ) {
-        const split =
-          splitAddressAndCityZip(
-            propertyAddress
-          );
-
-        propertyAddress =
-          split.propertyAddress;
-
-        cityStateZip =
-          split.cityStateZip;
-      }
-
-      // ------------------------------------------------------
-      // STATUS
-      // ------------------------------------------------------
-
-      const status =
-        clean(
-          $item
-            .find(
-              'div.ASTAT_MSGA'
-            )
-            .first()
-            .text()
-        ) ||
-        clean(
-          $item
-            .find(
-              '.status, ' +
-              '.ASTAT_MSGA'
-            )
-            .first()
-            .text()
-        );
-
-      const auctionStatus =
-        determineAuctionStatus({
-          status,
-          blockText,
-          itemClass,
-        });
-
-      // Sale price is only extracted for confirmed sold rows.
-      const salePrice =
-        extractConfirmedSalePrice(
-          $,
-          $item,
-          blockText,
-          auctionStatus
-        );
-
-      const auctionDate =
-        extractAuctionDateFromUrl(
-          pageUrl
-        ) ||
-        extractAuctionDateFromText(
-          blockText
-        );
-
-      const openingBidNumber =
-        parseCurrency(openingBid);
-
-      const salePriceNumber =
-        parseCurrency(salePrice);
-
-      const assessedValueNumber =
-        parseCurrency(
-          assessedValue
-        );
-
-      // ------------------------------------------------------
-      // REQUIRED VALIDATION
-      // ------------------------------------------------------
-
-      if (
-        !isRealCaseNumber(
-          caseNumber
-        )
-      ) {
-        const rejection = {
-          sourceUrl: pageUrl,
-          auctionId,
-          reason:
-            'MissingOrInvalidCaseNumber',
-          caseNumber:
-            clean(caseNumber),
-          openingBid:
-            clean(openingBid),
-          parcelId:
-            clean(parcelId),
-        };
-
-        rejectedRows.push(
-          rejection
-        );
-
-        relevantElements.push({
-          sourceUrl: pageUrl,
-          tag: 'parse-rejection',
-          attrs: {
-            aid: auctionId,
-            reason:
-              'MissingOrInvalidCaseNumber',
-          },
-          text:
-            blockText.slice(
-              0,
-              10000
-            ),
-        });
-
-        return;
-      }
-
-      if (
-        EXCLUDE_ZERO_OR_MISSING_OPENING_BID &&
-        (
-          openingBidNumber === null ||
-          openingBidNumber <= 0
-        )
-      ) {
-        const rejection = {
-          sourceUrl: pageUrl,
-          auctionId,
-          reason:
-            'OpeningBidIsBlankInvalidOrZero',
-          caseNumber:
-            clean(caseNumber),
-          openingBid:
-            clean(openingBid),
-          parcelId:
-            clean(parcelId),
-        };
-
-        rejectedRows.push(
-          rejection
-        );
-
-        relevantElements.push({
-          sourceUrl: pageUrl,
-          tag: 'parse-rejection',
-          attrs: {
-            aid: auctionId,
-            reason:
-              'OpeningBidIsBlankInvalidOrZero',
-          },
-          text:
-            blockText.slice(
-              0,
-              10000
-            ),
-        });
-
-        return;
-      }
-
-      // ------------------------------------------------------
-      // CALCULATIONS
-      // ------------------------------------------------------
-
-      // Confirmed sold records only:
-      // sale price minus opening/minimum bid.
-      const saleSurplus =
-        auctionStatus === 'Sold' &&
-        salePriceNumber !== null &&
-        openingBidNumber !== null
-          ? Number(
-              (
-                salePriceNumber -
-                openingBidNumber
-              ).toFixed(2)
-            )
-          : null;
-
-      // Assessed value minus confirmed sale price.
-      const assessedVsSaleSpread =
-        auctionStatus === 'Sold' &&
-        assessedValueNumber !== null &&
-        salePriceNumber !== null
-          ? Number(
-              (
-                assessedValueNumber -
-                salePriceNumber
-              ).toFixed(2)
-            )
-          : null;
-
-      // Assessed value minus opening bid.
-      const assessedVsOpeningSpread =
-        assessedValueNumber !== null &&
-        openingBidNumber !== null
-          ? Number(
-              (
-                assessedValueNumber -
-                openingBidNumber
-              ).toFixed(2)
-            )
-          : null;
-
-      const meetsMinimumSurplus =
-        saleSurplus === null
-          ? ''
-          : saleSurplus >=
-              MIN_SURPLUS
-            ? 'Yes'
-            : 'No';
-
-      const row = {
+    if (
+      EXCLUDE_ZERO_OR_MISSING_OPENING_BID &&
+      (
+        openingBidNumber === null ||
+        openingBidNumber <= 0
+      )
+    ) {
+      const rejection = {
         sourceUrl: pageUrl,
+        areaCode,
         auctionId,
-        auctionStatus,
-
-        sale:
-          auctionStatus === 'Sold'
-            ? 'Yes'
-            : 'No',
-
-        auctionType:
-          'Foreclosure',
-
+        reason:
+          'OpeningBidIsBlankInvalidOrZero',
         caseNumber:
           clean(caseNumber),
-
         parcelId:
-          isRealParcelId(
-            parcelId
-          )
-            ? clean(parcelId)
-            : '',
-
-        propertyAddress:
-          clean(propertyAddress),
-
-        cityStateZip:
-          clean(cityStateZip),
-
+          clean(parcelId),
         openingBid:
           clean(openingBid),
-
-        // Blank for Active, Preview, Unknown, Redeemed,
-        // and Cancelled auctions.
-        salePrice:
-          auctionStatus === 'Sold'
-            ? clean(salePrice)
-            : '',
-
-        assessedValue:
-          clean(assessedValue),
-
-        auctionDate:
-          clean(auctionDate),
-
-        status:
-          clean(status),
-
-        rawClass:
-          itemClass,
-
-        surplus:
-          saleSurplus,
-
-        saleSurplus,
-
-        assessedVsSaleSpread,
-
-        assessedVsOpeningSpread,
-
-        meetsMinimumSurplus,
       };
 
-      if (
-        FILTER_BY_MINIMUM_SURPLUS &&
-        row.meetsMinimumSurplus !==
-          'Yes'
-      ) {
-        rejectedRows.push({
-          sourceUrl: pageUrl,
-          auctionId,
+      rejectedRows.push(rejection);
 
+      relevantElements.push({
+        sourceUrl: pageUrl,
+        areaCode,
+        tag: 'parse-rejection',
+        attrs: {
+          aid: auctionId,
           reason:
-            row.saleSurplus === null
-              ? 'SaleSurplusUnavailable'
-              : 'BelowMinimumSurplusThreshold',
+            rejection.reason,
+        },
+        text:
+          blockText.slice(
+            0,
+            10000
+          ),
+      });
 
-          caseNumber:
-            row.caseNumber,
+      return;
+    }
 
-          parcelId:
-            row.parcelId,
+    // --------------------------------------------------------
+    // Calculations
+    // --------------------------------------------------------
 
-          openingBid:
-            row.openingBid,
+    const saleSurplus =
+      auctionStatus === 'Sold' &&
+      salePriceNumber !== null &&
+      openingBidNumber !== null
+        ? roundCurrency(
+            salePriceNumber -
+            openingBidNumber
+          )
+        : null;
 
-          salePrice:
-            row.salePrice,
+    const assessedVsSaleSpread =
+      auctionStatus === 'Sold' &&
+      assessedValueNumber !== null &&
+      salePriceNumber !== null
+        ? roundCurrency(
+            assessedValueNumber -
+            salePriceNumber
+          )
+        : null;
 
-          saleSurplus:
-            row.saleSurplus,
-        });
+    const assessedVsOpeningSpread =
+      assessedValueNumber !== null &&
+      openingBidNumber !== null
+        ? roundCurrency(
+            assessedValueNumber -
+            openingBidNumber
+          )
+        : null;
 
-        return;
-      }
+    const meetsMinimumSurplus =
+      saleSurplus === null
+        ? ''
+        : saleSurplus >= MIN_SURPLUS
+          ? 'Yes'
+          : 'No';
 
-      rows.push(row);
-    });
+    const row = {
+      sourceUrl: pageUrl,
+      areaCode,
+      auctionId,
+      auctionStatus,
+
+      sale:
+        auctionStatus === 'Sold'
+          ? 'Yes'
+          : 'No',
+
+      auctionType: 'Foreclosure',
+
+      caseNumber:
+        clean(caseNumber),
+
+      parcelId:
+        isRealParcelId(parcelId)
+          ? clean(parcelId)
+          : '',
+
+      propertyAddress:
+        clean(propertyAddress),
+
+      cityStateZip:
+        clean(cityStateZip),
+
+      openingBid:
+        clean(openingBid),
+
+      salePrice:
+        auctionStatus === 'Sold'
+          ? clean(salePrice)
+          : '',
+
+      assessedValue:
+        clean(assessedValue),
+
+      auctionDate:
+        clean(auctionDate),
+
+      status:
+        clean(status),
+
+      rawClass:
+        itemClass,
+
+      surplus:
+        saleSurplus,
+
+      saleSurplus,
+
+      assessedVsSaleSpread,
+
+      assessedVsOpeningSpread,
+
+      meetsMinimumSurplus,
+    };
+
+    if (
+      FILTER_BY_MINIMUM_SURPLUS &&
+      row.meetsMinimumSurplus !== 'Yes'
+    ) {
+      rejectedRows.push({
+        sourceUrl: pageUrl,
+        areaCode,
+        auctionId,
+
+        reason:
+          row.saleSurplus === null
+            ? 'SaleSurplusUnavailable'
+            : 'BelowMinimumSurplusThreshold',
+
+        caseNumber:
+          row.caseNumber,
+
+        parcelId:
+          row.parcelId,
+
+        openingBid:
+          row.openingBid,
+
+        salePrice:
+          row.salePrice,
+
+        saleSurplus:
+          row.saleSurplus,
+      });
+
+      return;
+    }
+
+    rows.push(row);
+  });
 
   return {
     rows,
@@ -2472,9 +2731,6 @@ async function inspectAndParse(
   const seenRows =
     new Set();
 
-  const seenPageSignatures =
-    new Set();
-
   try {
     await configurePage(page);
 
@@ -2490,9 +2746,7 @@ async function inspectAndParse(
       await page.goto(
         normalizedUrl,
         {
-          waitUntil:
-            'networkidle2',
-
+          waitUntil: 'networkidle2',
           timeout:
             PAGE_LOAD_TIMEOUT,
         }
@@ -2518,191 +2772,142 @@ async function inspectAndParse(
       );
     }
 
-    const scope =
-      await getPageScopes(page);
+    await waitForAuctionData(page);
 
-    let pagesProcessed = 0;
+    const areaCodes = [
+      'R',
+      'W',
+      'C',
+    ];
 
-    while (
-      pagesProcessed <
-      MAX_PAGES
-    ) {
+    for (const areaCode of areaCodes) {
       console.log(
-        `Parsing result page ` +
-        `${pagesProcessed + 1} ` +
-        `of maximum ${MAX_PAGES}`
+        `Processing auction area: ` +
+        `${areaCode}`
       );
 
-      const html =
-        await page.content();
+      const seenAreaPages =
+        new Set();
 
-      const currentBlockedReason =
-        detectBlockedPage(
-          html,
-          null
-        );
+      let pagesProcessed = 0;
 
-      if (
-        currentBlockedReason
+      while (
+        pagesProcessed <
+        MAX_PAGES_PER_AREA
       ) {
-        throw new Error(
-          currentBlockedReason
-        );
-      }
-
-      const currentPageSignature =
-        await scope
-          .firstRowSignature();
-
-      if (
-        seenPageSignatures.has(
-          currentPageSignature
-        )
-      ) {
-        console.log(
-          'Repeated result page detected. ' +
-          'Ending this URL.'
-        );
-
-        break;
-      }
-
-      seenPageSignatures.add(
-        currentPageSignature
-      );
-
-      const {
-        rows,
-        relevantElements:
-          currentElements,
-
-        rejectedRows:
-          currentRejections,
-      } = parseAuctionsFromHtml(
-        html,
-        normalizedUrl
-      );
-
-      for (const row of rows) {
-        const key = [
-          row.sourceUrl,
-          row.caseNumber,
-          row.parcelId,
-          row.auctionId,
-        ].join('|');
-
-        if (!seenRows.has(key)) {
-          seenRows.add(key);
-          parsedRows.push(row);
-        }
-      }
-
-      relevantElements.push(
-        ...currentElements
-      );
-
-      rejectedRows.push(
-        ...currentRejections
-      );
-
-      console.log(
-        `Unique parsed rows so far: ` +
-        `${parsedRows.length}`
-      );
-
-      pagesProcessed += 1;
-
-      const pieces =
-        await scope
-          .getPagerPieces();
-
-      if (!pieces.bar) {
-        console.log(
-          'Pager bar not found. ' +
-          'Ending this URL.'
-        );
-
-        break;
-      }
-
-      const indicator =
-        await scope.readIndicator(
-          pieces
-        );
-
-      const currentPage =
-        indicator.current ||
-        pagesProcessed;
-
-      const totalPages =
-        indicator.total;
-
-      if (
-        totalPages &&
-        currentPage >= totalPages
-      ) {
-        console.log(
-          `Reached last result page ` +
-          `(${currentPage}/` +
-          `${totalPages}).`
-        );
-
-        break;
-      }
-
-      const previousSignature =
-        await scope
-          .firstRowSignature();
-
-      const nextPage =
-        currentPage + 1;
-
-      let changed = false;
-
-      const inputTriggered =
-        await scope
-          .setPageInputAndGo(
-            pieces,
-            nextPage
+        const state =
+          await getAreaState(
+            page,
+            areaCode
           );
 
-      if (inputTriggered) {
-        changed =
-          await scope
-            .waitForListChange(
-              previousSignature
-            );
-      }
+        if (!state.exists) {
+          console.log(
+            `Area ${areaCode} was not found.`
+          );
 
-      if (
-        !changed &&
-        pieces.next
-      ) {
-        const arrowTriggered =
-          await scope
-            .clickNextArrow(
-              pieces
-            );
-
-        if (arrowTriggered) {
-          changed =
-            await scope
-              .waitForListChange(
-                previousSignature
-              );
+          break;
         }
-      }
 
-      if (!changed) {
-        console.log(
-          'No list change after pager actions. ' +
-          'Ending this URL.'
+        if (
+          seenAreaPages.has(
+            state.firstSignature
+          )
+        ) {
+          console.log(
+            `Repeated page detected in ` +
+            `area ${areaCode}.`
+          );
+
+          break;
+        }
+
+        seenAreaPages.add(
+          state.firstSignature
         );
 
-        break;
-      }
+        const html =
+          await page.content();
 
-      await sleep(800);
+        const {
+          rows,
+          relevantElements:
+            currentElements,
+          rejectedRows:
+            currentRejections,
+        } = parseAuctionsFromHtml(
+          html,
+          normalizedUrl,
+          areaCode
+        );
+
+        for (const row of rows) {
+          const key = [
+            row.sourceUrl,
+            row.caseNumber,
+            row.parcelId,
+            row.auctionId,
+          ].join('|');
+
+          if (!seenRows.has(key)) {
+            seenRows.add(key);
+            parsedRows.push(row);
+          }
+        }
+
+        relevantElements.push(
+          ...currentElements
+        );
+
+        rejectedRows.push(
+          ...currentRejections
+        );
+
+        pagesProcessed += 1;
+
+        console.log(
+          `Area ${areaCode}, page ` +
+          `${state.current || pagesProcessed}, ` +
+          `records: ${state.recordCount}, ` +
+          `unique total: ${parsedRows.length}`
+        );
+
+        if (
+          state.total &&
+          state.current &&
+          state.current >= state.total
+        ) {
+          break;
+        }
+
+        if (
+          !state.recordCount &&
+          !state.total
+        ) {
+          break;
+        }
+
+        const currentPage =
+          state.current ||
+          pagesProcessed;
+
+        const nextPage =
+          currentPage + 1;
+
+        const changed =
+          await moveAreaToNextPage(
+            page,
+            areaCode,
+            nextPage,
+            state.firstSignature
+          );
+
+        if (!changed) {
+          break;
+        }
+
+        await sleep(800);
+      }
     }
 
     return {
@@ -2727,8 +2932,7 @@ async function inspectAndParse(
 
       error: {
         url,
-        stage:
-          'AuctionParsing',
+        stage: 'AuctionParsing',
         message,
       },
     };
@@ -2797,7 +3001,7 @@ function deduplicateRows(rows) {
 
     // ========================================================
     // STAGE 1
-    // G2:G calendar URLs -> C2:C auction-date URLs
+    // G2:G calendars -> C2:C auction preview URLs
     // ========================================================
 
     const calendarResult =
@@ -2805,7 +3009,6 @@ function deduplicateRows(rows) {
         browser
       );
 
-    // Save discovery details locally for troubleshooting.
     writeJson(
       OUTPUT_CALENDAR_LINKS_FILE,
       {
@@ -2816,12 +3019,16 @@ function deduplicateRows(rows) {
         rejected:
           calendarResult
             .rejectedLinks,
+
+        sheetWriteResult:
+          calendarResult
+            .sheetWriteResult,
       }
     );
 
     // ========================================================
     // STAGE 2
-    // C2:C auction-date URLs -> parsed auction records
+    // C2:C auction preview URLs -> auction records
     // ========================================================
 
     console.log('');
@@ -2846,10 +3053,9 @@ function deduplicateRows(rows) {
 
     if (!urls.length) {
       throw new Error(
-        'Stage 1 did not produce valid ' +
-        `auction URLs in ` +
-        `${SHEET_NAME}!` +
-        `${AUCTION_URL_RANGE}`
+        'No auction URLs are available for Stage 2. ' +
+        'Stage 1 discovered zero URLs and column C is empty. ' +
+        `Inspect ${OUTPUT_CALENDAR_LINKS_FILE} for details.`
       );
     }
 
@@ -2857,7 +3063,6 @@ function deduplicateRows(rows) {
     const allRows = [];
     const allRejectedRows = [];
 
-    // Include Stage 1 errors in the common errors file.
     const errors = [
       ...calendarResult.errors,
     ];
@@ -2872,8 +3077,8 @@ function deduplicateRows(rows) {
       console.log('');
       console.log(
         `Processing auction URL ` +
-        `${index + 1}/` +
-        `${urls.length}: ${url}`
+        `${index + 1}/${urls.length}: ` +
+        `${url}`
       );
 
       const result =
@@ -2912,13 +3117,11 @@ function deduplicateRows(rows) {
       new Date();
 
     const durationSeconds =
-      Number(
+      roundCurrency(
         (
-          (
-            completedAt.getTime() -
-            startedAt.getTime()
-          ) / 1000
-        ).toFixed(2)
+          completedAt.getTime() -
+          startedAt.getTime()
+        ) / 1000
       );
 
     const summary = {
@@ -2949,7 +3152,7 @@ function deduplicateRows(rows) {
             .auctionUrls
             .length,
 
-        acceptedLinkDetails:
+        acceptedLinks:
           calendarResult
             .discoveryDetails
             .length,
@@ -2963,14 +3166,24 @@ function deduplicateRows(rows) {
           calendarResult
             .errors
             .length,
+
+        urlsWritten:
+          calendarResult
+            .sheetWriteResult
+            .written,
+
+        preservedExistingColumnC:
+          calendarResult
+            .sheetWriteResult
+            .preservedExistingValues,
       },
 
       configuration: {
         minimumSurplus:
           MIN_SURPLUS,
 
-        maximumPagesPerUrl:
-          MAX_PAGES,
+        maximumPagesPerArea:
+          MAX_PAGES_PER_AREA,
 
         excludeZeroOrMissingOpeningBid:
           EXCLUDE_ZERO_OR_MISSING_OPENING_BID,
@@ -2980,6 +3193,9 @@ function deduplicateRows(rows) {
 
         writeDiscoveredUrlsToSheet:
           WRITE_DISCOVERED_URLS_TO_SHEET,
+
+        preserveColumnCIfNoUrlsDiscovered:
+          PRESERVE_COLUMN_C_IF_NO_URLS_DISCOVERED,
 
         preserveColumnCIfAllCalendarsFail:
           PRESERVE_COLUMN_C_IF_ALL_CALENDARS_FAIL,
@@ -3055,8 +3271,7 @@ function deduplicateRows(rows) {
         aboveOrEqualThreshold:
           finalRows.filter(
             row =>
-              row.saleSurplus !==
-                null &&
+              row.saleSurplus !== null &&
               row.saleSurplus >=
                 MIN_SURPLUS
           ).length,
@@ -3064,8 +3279,7 @@ function deduplicateRows(rows) {
         belowThreshold:
           finalRows.filter(
             row =>
-              row.saleSurplus !==
-                null &&
+              row.saleSurplus !== null &&
               row.saleSurplus <
                 MIN_SURPLUS
           ).length,
@@ -3073,59 +3287,50 @@ function deduplicateRows(rows) {
         unavailable:
           finalRows.filter(
             row =>
-              row.saleSurplus ===
-              null
+              row.saleSurplus === null
           ).length,
       },
 
       blanks: {
         caseNumberBlank:
           finalRows.filter(
-            row =>
-              !row.caseNumber
+            row => !row.caseNumber
           ).length,
 
         parcelIdBlank:
           finalRows.filter(
-            row =>
-              !row.parcelId
+            row => !row.parcelId
           ).length,
 
         propertyAddressBlank:
           finalRows.filter(
-            row =>
-              !row.propertyAddress
+            row => !row.propertyAddress
           ).length,
 
         openingBidBlank:
           finalRows.filter(
-            row =>
-              !row.openingBid
+            row => !row.openingBid
           ).length,
 
         salePriceBlank:
           finalRows.filter(
-            row =>
-              !row.salePrice
+            row => !row.salePrice
           ).length,
 
         assessedValueBlank:
           finalRows.filter(
-            row =>
-              !row.assessedValue
+            row => !row.assessedValue
           ).length,
 
         auctionDateBlank:
           finalRows.filter(
-            row =>
-              !row.auctionDate
+            row => !row.auctionDate
           ).length,
 
         saleSurplusBlank:
           finalRows.filter(
             row =>
-              row.saleSurplus ===
-              null
+              row.saleSurplus === null
           ).length,
       },
 
@@ -3149,7 +3354,7 @@ function deduplicateRows(rows) {
     };
 
     // ========================================================
-    // WRITE LOCAL OUTPUT FILES
+    // WRITE OUTPUT FILES
     // ========================================================
 
     writeJson(
@@ -3261,7 +3466,7 @@ function deduplicateRows(rows) {
     );
   } catch (error) {
     console.error(
-      'Fatal inspectWebpage error:',
+      'Fatal webInspector error:',
       error?.message ||
       error
     );
