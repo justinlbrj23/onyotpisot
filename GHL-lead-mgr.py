@@ -7,8 +7,8 @@ from google.oauth2.service_account import Credentials
 # CONFIG
 # ===================================================
 
-SPREADSHEET_ID = "1LTaEIiJW1gUwaNBED5PF_pH8xqOGxhqMqTTO-HFu6sY"
-SHEET_NAME = "For REI Upload"
+SPREADSHEET_ID = "1C-85RMXealULter_fPjpP1aWaGVrgf8b2duWkowlgNM"
+SHEET_NAME = "main leads"
 
 SERVICE_ACCOUNT_FILE = "service-account.json"
 
